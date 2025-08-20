@@ -5,6 +5,8 @@ $(WASM_SRC):
 
 build: $(WASM_SRC)
 	jco transpile $(WASM_SRC) \
-	-o target/jco 
+	-o target/jco \
+	--base64-cutoff=99999999 \
+	--no-nodejs-compat
 
 .PHONY: build
