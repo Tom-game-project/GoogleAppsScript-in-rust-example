@@ -1,0 +1,4 @@
+package component:playground-jco;
+world my-world {
+  export scream: func(input: string) -> string;
+}
