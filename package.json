@@ -12,5 +12,8 @@
   "description": "",
   "dependencies": {
     "@bytecodealliance/preview2-shim": "^0.15.1"
+  },
+  "devDependencies": {
+
   }
 }

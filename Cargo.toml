@@ -20,3 +20,7 @@ crate-type = ["cdylib"]
 package = "component:playground-jco"
 
 [package.metadata.component.dependencies]
+
+[package.metadata.component.target.dependencies]
+"wasi:logging" = { path = "./wit/deps/wasi-logging-0.1.0-draft" }
+

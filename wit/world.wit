@@ -1,4 +1,7 @@
 package component:playground-jco;
+
 world my-world {
+  import wasi:logging/logging@0.1.0-draft;
   export scream: func(input: string) -> string;
+  export say-hello: func(input: string);
 }
