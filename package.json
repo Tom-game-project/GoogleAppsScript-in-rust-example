@@ -23,7 +23,7 @@
     "babel-loader": "^10.0.0",
     "babel-plugin-transform-bigint-to-jsbi": "^1.0.3",
     "gas-webpack-plugin": "^2.6.0",
-    "jsbi": "^4.3.2",
+    "jsbi": "^3.2.5",
     "ts-loader": "^9.5.2",
     "typescript": "^5.9.2",
     "webpack": "^5.101.3",
