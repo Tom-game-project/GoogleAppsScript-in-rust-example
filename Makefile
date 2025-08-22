@@ -9,10 +9,8 @@ build: $(WASM_SRC)
 	-o target/jco \
 	--base64-cutoff=99999999 \
 	--map 'wasi:logging/logging=./log-host.js' \
-	--no-nodejs-compat
+	--no-nodejs-compat \
+	--tla-compat
 	cp log-host.js ./target/jco/
-
-
-	#--instantiation sync
 
 .PHONY: build
