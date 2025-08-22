@@ -16,7 +16,7 @@ cargo component build
 
 # install and build the JS code
 npm install
-jco transpile target/wasm32-wasi/debug/playground_jco.wasm -o target/jco
+make build
 
 # run the JS code
 node index.js

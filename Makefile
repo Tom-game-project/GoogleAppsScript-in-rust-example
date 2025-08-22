@@ -3,6 +3,7 @@ WASM_SRC=target/wasm32-wasip1/debug/playground_jco.wasm
 $(WASM_SRC):
 	cargo component build
 
+# グルーコードの生成
 build: $(WASM_SRC)
 	jco transpile $(WASM_SRC) \
 	-o target/jco \
@@ -10,6 +11,8 @@ build: $(WASM_SRC)
 	--map 'wasi:logging/logging=./log-host.js' \
 	--no-nodejs-compat
 	cp log-host.js ./target/jco/
+
+
 	#--instantiation sync
 
 .PHONY: build

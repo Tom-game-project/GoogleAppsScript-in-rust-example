@@ -1,10 +1,10 @@
 {
   "name": "playground-jco",
-  "type": "module",
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "webpack"
   },
   "keywords": [],
   "author": "",
@@ -14,6 +14,19 @@
     "@bytecodealliance/preview2-shim": "^0.15.1"
   },
   "devDependencies": {
-
+    "@babel/cli": "^7.28.3",
+    "@babel/core": "^7.28.3",
+    "@babel/plugin-proposal-class-properties": "^7.18.6",
+    "@babel/plugin-proposal-private-methods": "^7.18.6",
+    "@babel/plugin-proposal-private-property-in-object": "^7.21.11",
+    "@babel/preset-env": "^7.28.3",
+    "babel-loader": "^10.0.0",
+    "babel-plugin-transform-bigint-to-jsbi": "^1.0.3",
+    "gas-webpack-plugin": "^2.6.0",
+    "jsbi": "^4.3.2",
+    "ts-loader": "^9.5.2",
+    "typescript": "^5.9.2",
+    "webpack": "^5.101.3",
+    "webpack-cli": "^6.0.1"
   }
 }
