@@ -3,7 +3,7 @@ const GasPlugin = require('gas-webpack-plugin');
 
 module.exports = {
   mode: 'development',
-  entry: './main.ts',
+  entry: ['./textencoderdecoder.ts', './main.ts'],
   devtool: false,
   output: {
     filename: 'main.js',
