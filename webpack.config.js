@@ -2,7 +2,7 @@ const path = require('path');
 const GasPlugin = require('gas-webpack-plugin');
 
 module.exports = {
-  mode: 'development',
+  mode: 'production',
   entry: ['./textencoderdecoder.ts', './main.ts'],
   devtool: false,
   output: {
@@ -20,10 +20,6 @@ module.exports = {
       {
         test: /\.js$/,
         exclude: /node_modules\/(?!@bytecodealliance\/preview2-shim)/,
-        //include: [
-	//	path.resolve(__dirname, 'target/jco'),
-	//	path.resolve(__dirname, 'node_modules/@bytecodealliance/preview2-shim')
-        //],
         use: {
           loader: "babel-loader",
 	  options: {

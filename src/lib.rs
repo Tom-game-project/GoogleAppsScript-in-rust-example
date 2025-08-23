@@ -1,15 +1,14 @@
 mod bindings;
 
+use bindings::example::resouceex::example_resource;
+use bindings::gas::logger::*;
 use bindings::Guest;
-
-use bindings::wasi::logging::logging::log;
 
 struct Component;
 
 // Guestトレイトが、ホストに公開する関数
 impl Guest for Component {
     fn scream(input: String) -> String {
-        
         let mut s = input.to_uppercase();
         s.push_str("!!1!");
         s.into()
@@ -18,11 +17,17 @@ impl Guest for Component {
     fn say_hello(s: String) 
     {
         // ホスト側(jsの機能)をRustで使用する
-        log(
-            bindings::wasi::logging::logging::Level::Info,
-            &String::from("stdout"), 
-            &format!("+++ {} +++", &s)
-        );
+        logger::log(&format!("+++ {} +++", &s));
+        logger::log(&logger::get_log());
+    }
+
+    fn my_func()
+    {
+        let a = example_resource::ExampleList::new();
+        a 
+            .append("hello")
+            .append("world");
+        logger::log(&format!("hello world {}", a.to_string()));
     }
 }
 

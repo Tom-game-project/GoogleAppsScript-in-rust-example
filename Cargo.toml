@@ -23,4 +23,9 @@ package = "component:playground-jco"
 
 [package.metadata.component.target.dependencies]
 "wasi:logging" = { path = "./wit/deps/wasi-logging-0.1.0-draft" }
+"example:resouceex" = { path = "./wit/deps/resource-example"}
+
+# google apps script wit 
+"gas:logger" = { path = "./wit/deps/google-apps-script-logger-0.1.0-alpha"}
+
 

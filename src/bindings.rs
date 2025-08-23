@@ -32,9 +32,16 @@ pub unsafe fn _export_say_hello_cabi<T: Guest>(arg0: *mut u8, arg1: usize) {
     let bytes0 = _rt::Vec::from_raw_parts(arg0.cast(), len0, len0);
     T::say_hello(_rt::string_lift(bytes0));
 }
+#[doc(hidden)]
+#[allow(non_snake_case)]
+pub unsafe fn _export_my_func_cabi<T: Guest>() {
+    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+    T::my_func();
+}
 pub trait Guest {
     fn scream(input: _rt::String) -> _rt::String;
     fn say_hello(input: _rt::String) -> ();
+    fn my_func() -> ();
 }
 #[doc(hidden)]
 macro_rules! __export_world_my_world_cabi {
@@ -46,7 +53,9 @@ macro_rules! __export_world_my_world_cabi {
         : * mut u8,) { unsafe { $($path_to_types)*:: __post_return_scream::<$ty > (arg0)
         } } #[unsafe (export_name = "say-hello")] unsafe extern "C" fn
         export_say_hello(arg0 : * mut u8, arg1 : usize,) { unsafe { $($path_to_types)*::
-        _export_say_hello_cabi::<$ty > (arg0, arg1) } } };
+        _export_say_hello_cabi::<$ty > (arg0, arg1) } } #[unsafe (export_name =
+        "my-func")] unsafe extern "C" fn export_my_func() { unsafe { $($path_to_types)*::
+        _export_my_func_cabi::<$ty > () } } };
     };
 }
 #[doc(hidden)]
@@ -57,6 +66,235 @@ struct _RetArea([::core::mem::MaybeUninit<u8>; 2 * ::core::mem::size_of::<*const
 static mut _RET_AREA: _RetArea = _RetArea(
     [::core::mem::MaybeUninit::uninit(); 2 * ::core::mem::size_of::<*const u8>()],
 );
+#[rustfmt::skip]
+#[allow(dead_code, clippy::all)]
+pub mod example {
+    pub mod resouceex {
+        #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
+        pub mod example_resource {
+            #[used]
+            #[doc(hidden)]
+            static __FORCE_SECTION_REF: fn() = super::super::super::__link_custom_section_describing_imports;
+            use super::super::super::_rt;
+            #[derive(Debug)]
+            #[repr(transparent)]
+            pub struct ExampleList {
+                handle: _rt::Resource<ExampleList>,
+            }
+            impl ExampleList {
+                #[doc(hidden)]
+                pub unsafe fn from_handle(handle: u32) -> Self {
+                    Self {
+                        handle: unsafe { _rt::Resource::from_handle(handle) },
+                    }
+                }
+                #[doc(hidden)]
+                pub fn take_handle(&self) -> u32 {
+                    _rt::Resource::take_handle(&self.handle)
+                }
+                #[doc(hidden)]
+                pub fn handle(&self) -> u32 {
+                    _rt::Resource::handle(&self.handle)
+                }
+            }
+            unsafe impl _rt::WasmResource for ExampleList {
+                #[inline]
+                unsafe fn drop(_handle: u32) {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unreachable!();
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        #[link(
+                            wasm_import_module = "example:resouceex/example-resource"
+                        )]
+                        unsafe extern "C" {
+                            #[link_name = "[resource-drop]example-list"]
+                            fn drop(_: u32);
+                        }
+                        unsafe { drop(_handle) };
+                    }
+                }
+            }
+            impl ExampleList {
+                #[allow(unused_unsafe, clippy::all)]
+                pub fn new() -> Self {
+                    unsafe {
+                        #[cfg(target_arch = "wasm32")]
+                        #[link(
+                            wasm_import_module = "example:resouceex/example-resource"
+                        )]
+                        unsafe extern "C" {
+                            #[link_name = "[constructor]example-list"]
+                            fn wit_import0() -> i32;
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        unsafe extern "C" fn wit_import0() -> i32 {
+                            unreachable!()
+                        }
+                        let ret = unsafe { wit_import0() };
+                        unsafe { ExampleList::from_handle(ret as u32) }
+                    }
+                }
+            }
+            impl ExampleList {
+                #[allow(unused_unsafe, clippy::all)]
+                /// 文字列を追記し、チェーンのためにビルダー自身を返す。
+                pub fn append(&self, s: &str) -> ExampleList {
+                    unsafe {
+                        let vec0 = s;
+                        let ptr0 = vec0.as_ptr().cast::<u8>();
+                        let len0 = vec0.len();
+                        #[cfg(target_arch = "wasm32")]
+                        #[link(
+                            wasm_import_module = "example:resouceex/example-resource"
+                        )]
+                        unsafe extern "C" {
+                            #[link_name = "[method]example-list.append"]
+                            fn wit_import1(_: i32, _: *mut u8, _: usize) -> i32;
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        unsafe extern "C" fn wit_import1(
+                            _: i32,
+                            _: *mut u8,
+                            _: usize,
+                        ) -> i32 {
+                            unreachable!()
+                        }
+                        let ret = unsafe {
+                            wit_import1((self).handle() as i32, ptr0.cast_mut(), len0)
+                        };
+                        unsafe { ExampleList::from_handle(ret as u32) }
+                    }
+                }
+            }
+            impl ExampleList {
+                #[allow(unused_unsafe, clippy::all)]
+                /// 最終的に構築された文字列を返す。
+                pub fn to_string(&self) -> _rt::String {
+                    unsafe {
+                        #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
+                        #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
+                        struct RetArea(
+                            [::core::mem::MaybeUninit<
+                                u8,
+                            >; 2 * ::core::mem::size_of::<*const u8>()],
+                        );
+                        let mut ret_area = RetArea(
+                            [::core::mem::MaybeUninit::uninit(); 2
+                                * ::core::mem::size_of::<*const u8>()],
+                        );
+                        let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
+                        #[cfg(target_arch = "wasm32")]
+                        #[link(
+                            wasm_import_module = "example:resouceex/example-resource"
+                        )]
+                        unsafe extern "C" {
+                            #[link_name = "[method]example-list.to-string"]
+                            fn wit_import1(_: i32, _: *mut u8);
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        unsafe extern "C" fn wit_import1(_: i32, _: *mut u8) {
+                            unreachable!()
+                        }
+                        unsafe { wit_import1((self).handle() as i32, ptr0) };
+                        let l2 = *ptr0.add(0).cast::<*mut u8>();
+                        let l3 = *ptr0
+                            .add(::core::mem::size_of::<*const u8>())
+                            .cast::<usize>();
+                        let len4 = l3;
+                        let bytes4 = _rt::Vec::from_raw_parts(l2.cast(), len4, len4);
+                        let result5 = _rt::string_lift(bytes4);
+                        result5
+                    }
+                }
+            }
+        }
+    }
+}
+#[rustfmt::skip]
+#[allow(dead_code, clippy::all)]
+pub mod gas {
+    pub mod logger {
+        #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
+        pub mod logger {
+            #[used]
+            #[doc(hidden)]
+            static __FORCE_SECTION_REF: fn() = super::super::super::__link_custom_section_describing_imports;
+            use super::super::super::_rt;
+            #[allow(unused_unsafe, clippy::all)]
+            pub fn log(data: &str) -> () {
+                unsafe {
+                    let vec0 = data;
+                    let ptr0 = vec0.as_ptr().cast::<u8>();
+                    let len0 = vec0.len();
+                    #[cfg(target_arch = "wasm32")]
+                    #[link(wasm_import_module = "gas:logger/logger@0.1.0-alpha")]
+                    unsafe extern "C" {
+                        #[link_name = "log"]
+                        fn wit_import1(_: *mut u8, _: usize);
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unsafe extern "C" fn wit_import1(_: *mut u8, _: usize) {
+                        unreachable!()
+                    }
+                    unsafe { wit_import1(ptr0.cast_mut(), len0) };
+                }
+            }
+            #[allow(unused_unsafe, clippy::all)]
+            pub fn clear() -> () {
+                unsafe {
+                    #[cfg(target_arch = "wasm32")]
+                    #[link(wasm_import_module = "gas:logger/logger@0.1.0-alpha")]
+                    unsafe extern "C" {
+                        #[link_name = "clear"]
+                        fn wit_import0();
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unsafe extern "C" fn wit_import0() {
+                        unreachable!()
+                    }
+                    unsafe { wit_import0() };
+                }
+            }
+            #[allow(unused_unsafe, clippy::all)]
+            pub fn get_log() -> _rt::String {
+                unsafe {
+                    #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
+                    #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
+                    struct RetArea(
+                        [::core::mem::MaybeUninit<
+                            u8,
+                        >; 2 * ::core::mem::size_of::<*const u8>()],
+                    );
+                    let mut ret_area = RetArea(
+                        [::core::mem::MaybeUninit::uninit(); 2
+                            * ::core::mem::size_of::<*const u8>()],
+                    );
+                    let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
+                    #[cfg(target_arch = "wasm32")]
+                    #[link(wasm_import_module = "gas:logger/logger@0.1.0-alpha")]
+                    unsafe extern "C" {
+                        #[link_name = "get-log"]
+                        fn wit_import1(_: *mut u8);
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unsafe extern "C" fn wit_import1(_: *mut u8) {
+                        unreachable!()
+                    }
+                    unsafe { wit_import1(ptr0) };
+                    let l2 = *ptr0.add(0).cast::<*mut u8>();
+                    let l3 = *ptr0
+                        .add(::core::mem::size_of::<*const u8>())
+                        .cast::<usize>();
+                    let len4 = l3;
+                    let bytes4 = _rt::Vec::from_raw_parts(l2.cast(), len4, len4);
+                    let result5 = _rt::string_lift(bytes4);
+                    result5
+                }
+            }
+        }
+    }
+}
 #[rustfmt::skip]
 #[allow(dead_code, clippy::all)]
 pub mod wasi {
@@ -174,10 +412,7 @@ pub mod wasi {
 #[rustfmt::skip]
 mod _rt {
     #![allow(dead_code, clippy::all)]
-    #[cfg(target_arch = "wasm32")]
-    pub fn run_ctors_once() {
-        wit_bindgen_rt::run_ctors_once();
-    }
+    pub use alloc_crate::string::String;
     pub use alloc_crate::vec::Vec;
     pub unsafe fn string_lift(bytes: Vec<u8>) -> String {
         if cfg!(debug_assertions) {
@@ -186,6 +421,84 @@ mod _rt {
             String::from_utf8_unchecked(bytes)
         }
     }
+    use core::fmt;
+    use core::marker;
+    use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
+    /// A type which represents a component model resource, either imported or
+    /// exported into this component.
+    ///
+    /// This is a low-level wrapper which handles the lifetime of the resource
+    /// (namely this has a destructor). The `T` provided defines the component model
+    /// intrinsics that this wrapper uses.
+    ///
+    /// One of the chief purposes of this type is to provide `Deref` implementations
+    /// to access the underlying data when it is owned.
+    ///
+    /// This type is primarily used in generated code for exported and imported
+    /// resources.
+    #[repr(transparent)]
+    pub struct Resource<T: WasmResource> {
+        handle: AtomicU32,
+        _marker: marker::PhantomData<T>,
+    }
+    /// A trait which all wasm resources implement, namely providing the ability to
+    /// drop a resource.
+    ///
+    /// This generally is implemented by generated code, not user-facing code.
+    #[allow(clippy::missing_safety_doc)]
+    pub unsafe trait WasmResource {
+        /// Invokes the `[resource-drop]...` intrinsic.
+        unsafe fn drop(handle: u32);
+    }
+    impl<T: WasmResource> Resource<T> {
+        #[doc(hidden)]
+        pub unsafe fn from_handle(handle: u32) -> Self {
+            debug_assert!(handle != u32::MAX);
+            Self {
+                handle: AtomicU32::new(handle),
+                _marker: marker::PhantomData,
+            }
+        }
+        /// Takes ownership of the handle owned by `resource`.
+        ///
+        /// Note that this ideally would be `into_handle` taking `Resource<T>` by
+        /// ownership. The code generator does not enable that in all situations,
+        /// unfortunately, so this is provided instead.
+        ///
+        /// Also note that `take_handle` is in theory only ever called on values
+        /// owned by a generated function. For example a generated function might
+        /// take `Resource<T>` as an argument but then call `take_handle` on a
+        /// reference to that argument. In that sense the dynamic nature of
+        /// `take_handle` should only be exposed internally to generated code, not
+        /// to user code.
+        #[doc(hidden)]
+        pub fn take_handle(resource: &Resource<T>) -> u32 {
+            resource.handle.swap(u32::MAX, Relaxed)
+        }
+        #[doc(hidden)]
+        pub fn handle(resource: &Resource<T>) -> u32 {
+            resource.handle.load(Relaxed)
+        }
+    }
+    impl<T: WasmResource> fmt::Debug for Resource<T> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("Resource").field("handle", &self.handle).finish()
+        }
+    }
+    impl<T: WasmResource> Drop for Resource<T> {
+        fn drop(&mut self) {
+            unsafe {
+                match self.handle.load(Relaxed) {
+                    u32::MAX => {}
+                    other => T::drop(other),
+                }
+            }
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    pub fn run_ctors_once() {
+        wit_bindgen_rt::run_ctors_once();
+    }
     pub unsafe fn cabi_dealloc(ptr: *mut u8, size: usize, align: usize) {
         if size == 0 {
             return;
@@ -193,7 +506,6 @@ mod _rt {
         let layout = alloc::Layout::from_size_align_unchecked(size, align);
         alloc::dealloc(ptr, layout);
     }
-    pub use alloc_crate::string::String;
     extern crate alloc as alloc_crate;
     pub use alloc_crate::alloc;
 }
@@ -232,15 +544,21 @@ pub(crate) use __export_my_world_impl as export;
 )]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 349] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xde\x01\x01A\x02\x01\
-A\x06\x01B\x04\x01m\x06\x05trace\x05debug\x04info\x04warn\x05error\x08critical\x04\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 646] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\x87\x04\x01A\x02\x01\
+A\x0c\x01B\x04\x01m\x06\x05trace\x05debug\x04info\x04warn\x05error\x08critical\x04\
 \0\x05level\x03\0\0\x01@\x03\x05level\x01\x07contexts\x07messages\x01\0\x04\0\x03\
-log\x01\x02\x03\0\x20wasi:logging/logging@0.1.0-draft\x05\0\x01@\x01\x05inputs\0\
-s\x04\0\x06scream\x01\x01\x01@\x01\x05inputs\x01\0\x04\0\x09say-hello\x01\x02\x04\
-\0!component:playground-jco/my-world\x04\0\x0b\x0e\x01\0\x08my-world\x03\0\0\0G\x09\
-producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.227.1\x10wit-bindgen-rus\
-t\x060.41.0";
+log\x01\x02\x03\0\x20wasi:logging/logging@0.1.0-draft\x05\0\x01B\x06\x01@\x01\x04\
+datas\x01\0\x04\0\x03log\x01\0\x01@\0\x01\0\x04\0\x05clear\x01\x01\x01@\0\0s\x04\
+\0\x07get-log\x01\x02\x03\0\x1dgas:logger/logger@0.1.0-alpha\x05\x01\x01B\x09\x04\
+\0\x0cexample-list\x03\x01\x01i\0\x01@\0\0\x01\x04\0\x19[constructor]example-lis\
+t\x01\x02\x01h\0\x01@\x02\x04self\x03\x01ss\0\x01\x04\0\x1b[method]example-list.\
+append\x01\x04\x01@\x01\x04self\x03\0s\x04\0\x1e[method]example-list.to-string\x01\
+\x05\x03\0\"example:resouceex/example-resource\x05\x02\x01@\x01\x05inputs\0s\x04\
+\0\x06scream\x01\x03\x01@\x01\x05inputs\x01\0\x04\0\x09say-hello\x01\x04\x01@\0\x01\
+\0\x04\0\x07my-func\x01\x05\x04\0!component:playground-jco/my-world\x04\0\x0b\x0e\
+\x01\0\x08my-world\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-compon\
+ent\x070.227.1\x10wit-bindgen-rust\x060.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {

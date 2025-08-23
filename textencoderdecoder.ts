@@ -66,7 +66,6 @@
         } else {
           bytes = new Uint8Array(input);
         }
-        // 簡易 UTF-8 decode (詳細版は省略)
         let result = "";
         for (let i = 0; i < bytes.length; i++) {
           result += String.fromCharCode(bytes[i]);
@@ -140,14 +139,12 @@
       return out;
     }
 
-    // 便利関数：Uint8Array を返す（GASでバイナリ扱いに便利）
     function atobBytesImpl(b64: string): Uint8Array {
       return _decodeBase64ToBytes(String(b64));
     }
 
     // @ts-ignore
     globalThis.atob = atobImpl;
-    // 型が無ければ any として扱われる。必要なら .d.ts で宣言を追加してください
     // @ts-ignore
     globalThis.atobBytes = atobBytesImpl;
   }

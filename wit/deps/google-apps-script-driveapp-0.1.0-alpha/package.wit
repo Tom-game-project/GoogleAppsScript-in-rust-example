@@ -1,0 +1,12 @@
+package gas:driveapp@0.1.0-alpha;
+
+
+interface drive-app {
+    resource drive-app {
+
+    }
+}
+
+world imports {
+	import drive-app;
+}

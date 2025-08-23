@@ -1,4 +1,4 @@
-import { $init, scream, sayHello } from "./target/jco/playground_jco.js";
+import { $init, scream, sayHello, myFunc  } from "./target/jco/playground_jco.js";
 //import { TextDecoder, TextEncoder } from "./textencoderdecoder.js";
 import "./textencoderdecoder"
 
@@ -9,4 +9,10 @@ global.aaa = function() {
     let msg = scream("hello world");
     sayHello(msg);
   });
+}
+
+global.bbb = function () {
+	$init.then(() => {
+		myFunc();
+	});
 }

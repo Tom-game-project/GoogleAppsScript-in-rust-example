@@ -1,0 +1,17 @@
+package example:resouceex;
+
+interface example-resource {
+    resource example-list {
+	constructor();
+
+	/// 文字列を追記し、チェーンのためにビルダー自身を返す。
+	append: func(s: string) -> example-list;
+
+        /// 最終的に構築された文字列を返す。
+        to-string: func() -> string;
+    }
+}
+
+world imports {
+	import example-resource;
+}

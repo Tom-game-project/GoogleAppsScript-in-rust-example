@@ -2,6 +2,10 @@ package component:playground-jco;
 
 world my-world {
   import wasi:logging/logging@0.1.0-draft;
+  import gas:logger/logger@0.1.0-alpha;
+  import example:resouceex/example-resource;
+
   export scream: func(input: string) -> string;
   export say-hello: func(input: string);
+  export my-func: func();
 }
