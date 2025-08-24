@@ -35,9 +35,15 @@ impl Guest for Component {
     {
         let a = GasDriveApp::new();
         logger::log(&format!("storage {}", a.get_storage_used()));
+
+        let file = &a.get_file_by_id("1SBGJr6jusew1MKhir_sQNC1XLYXMgNA6");
+
         logger::log(
-            &a.get_file_by_id("1SBGJr6jusew1MKhir_sQNC1XLYXMgNA6").get_name()
+            &format!("file name: {}", &file.get_name())
         );
+
+        let buf = file.get_blob().get_bytes();
+        logger::log(&format!("byte {:?}", buf));
     }
 }
 

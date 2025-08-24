@@ -1,9 +1,19 @@
 package gas:drive-app@0.1.0-alpha;
 
+interface gas-blob {
+	resource gas-blob {
+		constructor();
+		//get-name: func() -> string;
+		get-bytes: func() -> list<u8>;
+	}
+}
+
 interface gas-file {
+	use gas-blob.{gas-blob};
 	resource gas-file {
 		constructor();
 		get-name: func() -> string;
+		get-blob: func() -> gas-blob;
 	}
 }
 
@@ -17,6 +27,7 @@ interface gas-drive-app {
 }
 
 world imports {
+	import gas-blob;
 	import gas-file;
 	import gas-drive-app;
 }

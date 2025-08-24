@@ -226,11 +226,119 @@ pub mod example {
 pub mod gas {
     pub mod drive_app {
         #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
+        pub mod gas_blob {
+            #[used]
+            #[doc(hidden)]
+            static __FORCE_SECTION_REF: fn() = super::super::super::__link_custom_section_describing_imports;
+            use super::super::super::_rt;
+            #[derive(Debug)]
+            #[repr(transparent)]
+            pub struct GasBlob {
+                handle: _rt::Resource<GasBlob>,
+            }
+            impl GasBlob {
+                #[doc(hidden)]
+                pub unsafe fn from_handle(handle: u32) -> Self {
+                    Self {
+                        handle: unsafe { _rt::Resource::from_handle(handle) },
+                    }
+                }
+                #[doc(hidden)]
+                pub fn take_handle(&self) -> u32 {
+                    _rt::Resource::take_handle(&self.handle)
+                }
+                #[doc(hidden)]
+                pub fn handle(&self) -> u32 {
+                    _rt::Resource::handle(&self.handle)
+                }
+            }
+            unsafe impl _rt::WasmResource for GasBlob {
+                #[inline]
+                unsafe fn drop(_handle: u32) {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unreachable!();
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        #[link(
+                            wasm_import_module = "gas:drive-app/gas-blob@0.1.0-alpha"
+                        )]
+                        unsafe extern "C" {
+                            #[link_name = "[resource-drop]gas-blob"]
+                            fn drop(_: u32);
+                        }
+                        unsafe { drop(_handle) };
+                    }
+                }
+            }
+            impl GasBlob {
+                #[allow(unused_unsafe, clippy::all)]
+                pub fn new() -> Self {
+                    unsafe {
+                        #[cfg(target_arch = "wasm32")]
+                        #[link(
+                            wasm_import_module = "gas:drive-app/gas-blob@0.1.0-alpha"
+                        )]
+                        unsafe extern "C" {
+                            #[link_name = "[constructor]gas-blob"]
+                            fn wit_import0() -> i32;
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        unsafe extern "C" fn wit_import0() -> i32 {
+                            unreachable!()
+                        }
+                        let ret = unsafe { wit_import0() };
+                        unsafe { GasBlob::from_handle(ret as u32) }
+                    }
+                }
+            }
+            impl GasBlob {
+                #[allow(unused_unsafe, clippy::all)]
+                /// get-name: func() -> string;
+                pub fn get_bytes(&self) -> _rt::Vec<u8> {
+                    unsafe {
+                        #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
+                        #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
+                        struct RetArea(
+                            [::core::mem::MaybeUninit<
+                                u8,
+                            >; 2 * ::core::mem::size_of::<*const u8>()],
+                        );
+                        let mut ret_area = RetArea(
+                            [::core::mem::MaybeUninit::uninit(); 2
+                                * ::core::mem::size_of::<*const u8>()],
+                        );
+                        let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
+                        #[cfg(target_arch = "wasm32")]
+                        #[link(
+                            wasm_import_module = "gas:drive-app/gas-blob@0.1.0-alpha"
+                        )]
+                        unsafe extern "C" {
+                            #[link_name = "[method]gas-blob.get-bytes"]
+                            fn wit_import1(_: i32, _: *mut u8);
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        unsafe extern "C" fn wit_import1(_: i32, _: *mut u8) {
+                            unreachable!()
+                        }
+                        unsafe { wit_import1((self).handle() as i32, ptr0) };
+                        let l2 = *ptr0.add(0).cast::<*mut u8>();
+                        let l3 = *ptr0
+                            .add(::core::mem::size_of::<*const u8>())
+                            .cast::<usize>();
+                        let len4 = l3;
+                        let result5 = _rt::Vec::from_raw_parts(l2.cast(), len4, len4);
+                        result5
+                    }
+                }
+            }
+        }
+        #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
         pub mod gas_file {
             #[used]
             #[doc(hidden)]
             static __FORCE_SECTION_REF: fn() = super::super::super::__link_custom_section_describing_imports;
             use super::super::super::_rt;
+            pub type GasBlob = super::super::super::gas::drive_app::gas_blob::GasBlob;
             #[derive(Debug)]
             #[repr(transparent)]
             pub struct GasFile {
@@ -328,6 +436,31 @@ pub mod gas {
                         let bytes4 = _rt::Vec::from_raw_parts(l2.cast(), len4, len4);
                         let result5 = _rt::string_lift(bytes4);
                         result5
+                    }
+                }
+            }
+            impl GasFile {
+                #[allow(unused_unsafe, clippy::all)]
+                pub fn get_blob(&self) -> GasBlob {
+                    unsafe {
+                        #[cfg(target_arch = "wasm32")]
+                        #[link(
+                            wasm_import_module = "gas:drive-app/gas-file@0.1.0-alpha"
+                        )]
+                        unsafe extern "C" {
+                            #[link_name = "[method]gas-file.get-blob"]
+                            fn wit_import0(_: i32) -> i32;
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        unsafe extern "C" fn wit_import0(_: i32) -> i32 {
+                            unreachable!()
+                        }
+                        let ret = unsafe { wit_import0((self).handle() as i32) };
+                        unsafe {
+                            super::super::super::gas::drive_app::gas_blob::GasBlob::from_handle(
+                                ret as u32,
+                            )
+                        }
                     }
                 }
             }
@@ -786,9 +919,9 @@ pub(crate) use __export_my_world_impl as export;
 )]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 1047] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\x98\x07\x01A\x02\x01\
-A\x12\x01B\x04\x01m\x06\x05trace\x05debug\x04info\x04warn\x05error\x08critical\x04\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 1260] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xed\x08\x01A\x02\x01\
+A\x15\x01B\x04\x01m\x06\x05trace\x05debug\x04info\x04warn\x05error\x08critical\x04\
 \0\x05level\x03\0\0\x01@\x03\x05level\x01\x07contexts\x07messages\x01\0\x04\0\x03\
 log\x01\x02\x03\0\x20wasi:logging/logging@0.1.0-draft\x05\0\x01B\x09\x04\0\x0cex\
 ample-list\x03\x01\x01i\0\x01@\0\0\x01\x04\0\x19[constructor]example-list\x01\x02\
@@ -796,19 +929,24 @@ ample-list\x03\x01\x01i\0\x01@\0\0\x01\x04\0\x19[constructor]example-list\x01\x0
 \x04\x01@\x01\x04self\x03\0s\x04\0\x1e[method]example-list.to-string\x01\x05\x03\
 \0\"example:resouceex/example-resource\x05\x01\x01B\x06\x01@\x01\x04datas\x01\0\x04\
 \0\x03log\x01\0\x01@\0\x01\0\x04\0\x05clear\x01\x01\x01@\0\0s\x04\0\x07get-log\x01\
-\x02\x03\0\x1dgas:logger/logger@0.1.0-alpha\x05\x02\x01B\x07\x04\0\x08gas-file\x03\
-\x01\x01i\0\x01@\0\0\x01\x04\0\x15[constructor]gas-file\x01\x02\x01h\0\x01@\x01\x04\
-self\x03\0s\x04\0\x19[method]gas-file.get-name\x01\x04\x03\0\"gas:drive-app/gas-\
-file@0.1.0-alpha\x05\x03\x02\x03\0\x03\x08gas-file\x01B\x0c\x02\x03\x02\x01\x04\x04\
-\0\x08gas-file\x03\0\0\x04\0\x0dgas-drive-app\x03\x01\x01i\x02\x01@\0\0\x03\x04\0\
-\x1a[constructor]gas-drive-app\x01\x04\x01h\x02\x01i\x01\x01@\x02\x04self\x05\x02\
-ids\0\x06\x04\0$[method]gas-drive-app.get-file-by-id\x01\x07\x01@\x01\x04self\x05\
-\0x\x04\0&[method]gas-drive-app.get-storage-used\x01\x08\x03\0'gas:drive-app/gas\
--drive-app@0.1.0-alpha\x05\x05\x01@\x01\x05inputs\0s\x04\0\x06scream\x01\x06\x01\
-@\x01\x05inputs\x01\0\x04\0\x09say-hello\x01\x07\x01@\0\x01\0\x04\0\x09my-func00\
-\x01\x08\x04\0\x09my-func01\x01\x08\x04\0!component:playground-jco/my-world\x04\0\
-\x0b\x0e\x01\0\x08my-world\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwi\
-t-component\x070.227.1\x10wit-bindgen-rust\x060.41.0";
+\x02\x03\0\x1dgas:logger/logger@0.1.0-alpha\x05\x02\x01B\x08\x04\0\x08gas-blob\x03\
+\x01\x01i\0\x01@\0\0\x01\x04\0\x15[constructor]gas-blob\x01\x02\x01h\0\x01p}\x01\
+@\x01\x04self\x03\0\x04\x04\0\x1a[method]gas-blob.get-bytes\x01\x05\x03\0\"gas:d\
+rive-app/gas-blob@0.1.0-alpha\x05\x03\x02\x03\0\x03\x08gas-blob\x01B\x0c\x02\x03\
+\x02\x01\x04\x04\0\x08gas-blob\x03\0\0\x04\0\x08gas-file\x03\x01\x01i\x02\x01@\0\
+\0\x03\x04\0\x15[constructor]gas-file\x01\x04\x01h\x02\x01@\x01\x04self\x05\0s\x04\
+\0\x19[method]gas-file.get-name\x01\x06\x01i\x01\x01@\x01\x04self\x05\0\x07\x04\0\
+\x19[method]gas-file.get-blob\x01\x08\x03\0\"gas:drive-app/gas-file@0.1.0-alpha\x05\
+\x05\x02\x03\0\x04\x08gas-file\x01B\x0c\x02\x03\x02\x01\x06\x04\0\x08gas-file\x03\
+\0\0\x04\0\x0dgas-drive-app\x03\x01\x01i\x02\x01@\0\0\x03\x04\0\x1a[constructor]\
+gas-drive-app\x01\x04\x01h\x02\x01i\x01\x01@\x02\x04self\x05\x02ids\0\x06\x04\0$\
+[method]gas-drive-app.get-file-by-id\x01\x07\x01@\x01\x04self\x05\0x\x04\0&[meth\
+od]gas-drive-app.get-storage-used\x01\x08\x03\0'gas:drive-app/gas-drive-app@0.1.\
+0-alpha\x05\x07\x01@\x01\x05inputs\0s\x04\0\x06scream\x01\x08\x01@\x01\x05inputs\
+\x01\0\x04\0\x09say-hello\x01\x09\x01@\0\x01\0\x04\0\x09my-func00\x01\x0a\x04\0\x09\
+my-func01\x01\x0a\x04\0!component:playground-jco/my-world\x04\0\x0b\x0e\x01\0\x08\
+my-world\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.2\
+27.1\x10wit-bindgen-rust\x060.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {

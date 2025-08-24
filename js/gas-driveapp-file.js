@@ -1,3 +1,4 @@
+import { GasBlob } from "./gas-driveapp-blob";
 
 export const GasFile = class File {
 	/**
@@ -13,5 +14,11 @@ export const GasFile = class File {
 	*/
 	getName() {
 		return this.file.getName();
+	}
+
+	getBlob() {
+		const b = this.file.getBlob();
+
+		return new GasBlob(b);
 	}
 };
