@@ -11,7 +11,8 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
-    "@bytecodealliance/preview2-shim": "^0.15.1"
+    "@bytecodealliance/preview2-shim": "^0.15.1",
+    "@types/google-apps-script": "^1.0.100"
   },
   "devDependencies": {
     "@babel/cli": "^7.28.3",

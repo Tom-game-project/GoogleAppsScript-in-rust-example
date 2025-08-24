@@ -1,18 +1,29 @@
-import { $init, scream, sayHello, myFunc  } from "./target/jco/playground_jco.js";
-//import { TextDecoder, TextEncoder } from "./textencoderdecoder.js";
+import { 
+	$init,
+       	scream, 
+	sayHello,
+       	myFunc00,
+       	myFunc01  
+} from "./target/jco/playground_jco.js";
 import "./textencoderdecoder"
 
 declare const global: any;
 
 global.aaa = function() {
-  $init.then(() => {
-    let msg = scream("hello world");
-    sayHello(msg);
-  });
+	$init.then(() => {
+		let msg = scream("hello world");
+		sayHello(msg);
+	});
 }
 
 global.bbb = function () {
 	$init.then(() => {
-		myFunc();
+		myFunc00();
+	});
+}
+
+global.ccc = function () {
+	$init.then(() => {
+		myFunc01();
 	});
 }

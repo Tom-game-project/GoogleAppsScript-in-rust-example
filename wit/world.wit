@@ -1,11 +1,16 @@
 package component:playground-jco;
 
 world my-world {
-  import wasi:logging/logging@0.1.0-draft;
-  import gas:logger/logger@0.1.0-alpha;
-  import example:resouceex/example-resource;
+	import wasi:logging/logging@0.1.0-draft;
+	import example:resouceex/example-resource;
 
-  export scream: func(input: string) -> string;
-  export say-hello: func(input: string);
-  export my-func: func();
+	// for google apps script api
+	import gas:logger/logger@0.1.0-alpha;
+	import gas:drive-app/gas-drive-app@0.1.0-alpha;
+	//import gas:file/file@0.1.0-alpha;
+
+	export scream: func(input: string) -> string;
+	export say-hello: func(input: string);
+	export my-func00: func();
+	export my-func01: func();
 }

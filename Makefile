@@ -14,13 +14,17 @@ build: $(WASM_SRC)
 	jco transpile $(WASM_SRC) \
 	-o target/jco \
 	--base64-cutoff=99999999 \
+	--map 'example:resouceex/example-resource=./example-resouceex.js' \
 	--map 'wasi:logging/logging=./log-host.js' \
 	--map 'gas:logger/logger=./gas-logger.js' \
-	--map 'example:resouceex/example-resource=./example-resouceex.js' \
+	--map 'gas:drive-app/gas-drive-app=./gas-driveapp.js' \
+	--map 'gas:drive-app/gas-file=./gas-driveapp-file.js' \
 	--no-nodejs-compat \
 	--tla-compat
 	cp js/log-host.js target/jco/
 	cp js/gas-logger.js target/jco/
 	cp js/example-resouceex.js target/jco/
+	cp js/gas-driveapp.js target/jco/
+	cp js/gas-driveapp-file.js target/jco/
 
 .PHONY: build

@@ -1,6 +1,7 @@
 mod bindings;
 
 use bindings::example::resouceex::example_resource;
+use bindings::gas::drive_app::gas_drive_app::GasDriveApp;
 use bindings::gas::logger::*;
 use bindings::Guest;
 
@@ -21,13 +22,22 @@ impl Guest for Component {
         logger::log(&logger::get_log());
     }
 
-    fn my_func()
+    fn my_func00()
     {
         let a = example_resource::ExampleList::new();
         a 
             .append("hello")
             .append("world");
         logger::log(&format!("hello world {}", a.to_string()));
+    }
+
+    fn my_func01()
+    {
+        let a = GasDriveApp::new();
+        logger::log(&format!("storage {}", a.get_storage_used()));
+        logger::log(
+            &a.get_file_by_id("1SBGJr6jusew1MKhir_sQNC1XLYXMgNA6").get_name()
+        );
     }
 }
 

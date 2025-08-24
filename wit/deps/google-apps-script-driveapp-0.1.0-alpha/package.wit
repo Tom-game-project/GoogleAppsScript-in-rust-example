@@ -1,12 +1,22 @@
-package gas:driveapp@0.1.0-alpha;
+package gas:drive-app@0.1.0-alpha;
 
+interface gas-file {
+	resource gas-file {
+		constructor();
+		get-name: func() -> string;
+	}
+}
 
-interface drive-app {
-    resource drive-app {
-
-    }
+interface gas-drive-app {
+	use gas-file.{gas-file};
+	resource gas-drive-app {
+		constructor();
+		get-file-by-id: func(id :string) -> gas-file;
+		get-storage-used: func() -> s64;
+	}
 }
 
 world imports {
-	import drive-app;
+	import gas-file;
+	import gas-drive-app;
 }
