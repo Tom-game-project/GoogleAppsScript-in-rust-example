@@ -10,4 +10,16 @@ export const GasBlob = class Blob {
 		const vec_u8 = new Uint8Array(buf);
 		return vec_u8;
 	}
+
+	setBytes(data) {
+		console.log("DEBUG: called setBlob");
+		//console.log(data);
+		this.blob.setBytes(Array.from(data));
+		return this;
+	}
+
+	getDataAsString()
+	{
+		return this.blob.getDataAsString();
+	}
 };

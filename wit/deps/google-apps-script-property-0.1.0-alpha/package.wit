@@ -1,0 +1,20 @@
+package gas:property@0.1.0-alpha;
+
+interface properties {
+	resource properties {
+		constructor();
+		get-property: func(key:string) -> option<string>;
+	}
+}
+
+interface properties-service {
+	use properties.{properties};
+	get-user-properties: func() -> properties;
+	get-script-properties: func() -> properties;
+	get-document-properties: func() -> properties;
+}
+
+world imports {
+	import properties;
+	import properties-service;
+}

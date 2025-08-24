@@ -3,8 +3,9 @@ package gas:drive-app@0.1.0-alpha;
 interface gas-blob {
 	resource gas-blob {
 		constructor();
-		//get-name: func() -> string;
 		get-bytes: func() -> list<u8>;
+		set-bytes: func(data: list<u8>) -> gas-blob;
+		get-data-as-string: func() -> string;
 	}
 }
 
@@ -14,6 +15,7 @@ interface gas-file {
 		constructor();
 		get-name: func() -> string;
 		get-blob: func() -> gas-blob;
+		set-content: func(content: string) -> gas-file;
 	}
 }
 

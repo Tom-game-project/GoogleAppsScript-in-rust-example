@@ -1,6 +1,7 @@
 import { GasBlob } from "./gas-driveapp-blob";
 
 export const GasFile = class File {
+
 	/**
          * @param {GoogleAppsScript.Drive.File} fileObject
          */
@@ -20,5 +21,11 @@ export const GasFile = class File {
 		const b = this.file.getBlob();
 
 		return new GasBlob(b);
+	}
+
+	setContent(content)
+	{
+		this.file.setContent(content);
+		return this;
 	}
 };

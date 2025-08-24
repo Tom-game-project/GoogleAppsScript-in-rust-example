@@ -44,12 +44,18 @@ pub unsafe fn _export_my_func01_cabi<T: Guest>() {
     #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
     T::my_func01();
 }
+#[doc(hidden)]
+#[allow(non_snake_case)]
+pub unsafe fn _export_my_func02_cabi<T: Guest>() {
+    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+    T::my_func02();
+}
 pub trait Guest {
-    /// import gas:file/file@0.1.0-alpha;
     fn scream(input: _rt::String) -> _rt::String;
     fn say_hello(input: _rt::String) -> ();
     fn my_func00() -> ();
     fn my_func01() -> ();
+    fn my_func02() -> ();
 }
 #[doc(hidden)]
 macro_rules! __export_world_my_world_cabi {
@@ -65,7 +71,9 @@ macro_rules! __export_world_my_world_cabi {
         "my-func00")] unsafe extern "C" fn export_my_func00() { unsafe {
         $($path_to_types)*:: _export_my_func00_cabi::<$ty > () } } #[unsafe (export_name
         = "my-func01")] unsafe extern "C" fn export_my_func01() { unsafe {
-        $($path_to_types)*:: _export_my_func01_cabi::<$ty > () } } };
+        $($path_to_types)*:: _export_my_func01_cabi::<$ty > () } } #[unsafe (export_name
+        = "my-func02")] unsafe extern "C" fn export_my_func02() { unsafe {
+        $($path_to_types)*:: _export_my_func02_cabi::<$ty > () } } };
     };
 }
 #[doc(hidden)]
@@ -293,7 +301,6 @@ pub mod gas {
             }
             impl GasBlob {
                 #[allow(unused_unsafe, clippy::all)]
-                /// get-name: func() -> string;
                 pub fn get_bytes(&self) -> _rt::Vec<u8> {
                     unsafe {
                         #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
@@ -327,6 +334,76 @@ pub mod gas {
                             .cast::<usize>();
                         let len4 = l3;
                         let result5 = _rt::Vec::from_raw_parts(l2.cast(), len4, len4);
+                        result5
+                    }
+                }
+            }
+            impl GasBlob {
+                #[allow(unused_unsafe, clippy::all)]
+                pub fn set_bytes(&self, data: &[u8]) -> GasBlob {
+                    unsafe {
+                        let vec0 = data;
+                        let ptr0 = vec0.as_ptr().cast::<u8>();
+                        let len0 = vec0.len();
+                        #[cfg(target_arch = "wasm32")]
+                        #[link(
+                            wasm_import_module = "gas:drive-app/gas-blob@0.1.0-alpha"
+                        )]
+                        unsafe extern "C" {
+                            #[link_name = "[method]gas-blob.set-bytes"]
+                            fn wit_import1(_: i32, _: *mut u8, _: usize) -> i32;
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        unsafe extern "C" fn wit_import1(
+                            _: i32,
+                            _: *mut u8,
+                            _: usize,
+                        ) -> i32 {
+                            unreachable!()
+                        }
+                        let ret = unsafe {
+                            wit_import1((self).handle() as i32, ptr0.cast_mut(), len0)
+                        };
+                        unsafe { GasBlob::from_handle(ret as u32) }
+                    }
+                }
+            }
+            impl GasBlob {
+                #[allow(unused_unsafe, clippy::all)]
+                pub fn get_data_as_string(&self) -> _rt::String {
+                    unsafe {
+                        #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
+                        #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
+                        struct RetArea(
+                            [::core::mem::MaybeUninit<
+                                u8,
+                            >; 2 * ::core::mem::size_of::<*const u8>()],
+                        );
+                        let mut ret_area = RetArea(
+                            [::core::mem::MaybeUninit::uninit(); 2
+                                * ::core::mem::size_of::<*const u8>()],
+                        );
+                        let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
+                        #[cfg(target_arch = "wasm32")]
+                        #[link(
+                            wasm_import_module = "gas:drive-app/gas-blob@0.1.0-alpha"
+                        )]
+                        unsafe extern "C" {
+                            #[link_name = "[method]gas-blob.get-data-as-string"]
+                            fn wit_import1(_: i32, _: *mut u8);
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        unsafe extern "C" fn wit_import1(_: i32, _: *mut u8) {
+                            unreachable!()
+                        }
+                        unsafe { wit_import1((self).handle() as i32, ptr0) };
+                        let l2 = *ptr0.add(0).cast::<*mut u8>();
+                        let l3 = *ptr0
+                            .add(::core::mem::size_of::<*const u8>())
+                            .cast::<usize>();
+                        let len4 = l3;
+                        let bytes4 = _rt::Vec::from_raw_parts(l2.cast(), len4, len4);
+                        let result5 = _rt::string_lift(bytes4);
                         result5
                     }
                 }
@@ -461,6 +538,36 @@ pub mod gas {
                                 ret as u32,
                             )
                         }
+                    }
+                }
+            }
+            impl GasFile {
+                #[allow(unused_unsafe, clippy::all)]
+                pub fn set_content(&self, content: &str) -> GasFile {
+                    unsafe {
+                        let vec0 = content;
+                        let ptr0 = vec0.as_ptr().cast::<u8>();
+                        let len0 = vec0.len();
+                        #[cfg(target_arch = "wasm32")]
+                        #[link(
+                            wasm_import_module = "gas:drive-app/gas-file@0.1.0-alpha"
+                        )]
+                        unsafe extern "C" {
+                            #[link_name = "[method]gas-file.set-content"]
+                            fn wit_import1(_: i32, _: *mut u8, _: usize) -> i32;
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        unsafe extern "C" fn wit_import1(
+                            _: i32,
+                            _: *mut u8,
+                            _: usize,
+                        ) -> i32 {
+                            unreachable!()
+                        }
+                        let ret = unsafe {
+                            wit_import1((self).handle() as i32, ptr0.cast_mut(), len0)
+                        };
+                        unsafe { GasFile::from_handle(ret as u32) }
                     }
                 }
             }
@@ -669,6 +776,222 @@ pub mod gas {
             }
         }
     }
+    pub mod property {
+        #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
+        pub mod properties {
+            #[used]
+            #[doc(hidden)]
+            static __FORCE_SECTION_REF: fn() = super::super::super::__link_custom_section_describing_imports;
+            use super::super::super::_rt;
+            #[derive(Debug)]
+            #[repr(transparent)]
+            pub struct Properties {
+                handle: _rt::Resource<Properties>,
+            }
+            impl Properties {
+                #[doc(hidden)]
+                pub unsafe fn from_handle(handle: u32) -> Self {
+                    Self {
+                        handle: unsafe { _rt::Resource::from_handle(handle) },
+                    }
+                }
+                #[doc(hidden)]
+                pub fn take_handle(&self) -> u32 {
+                    _rt::Resource::take_handle(&self.handle)
+                }
+                #[doc(hidden)]
+                pub fn handle(&self) -> u32 {
+                    _rt::Resource::handle(&self.handle)
+                }
+            }
+            unsafe impl _rt::WasmResource for Properties {
+                #[inline]
+                unsafe fn drop(_handle: u32) {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unreachable!();
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        #[link(
+                            wasm_import_module = "gas:property/properties@0.1.0-alpha"
+                        )]
+                        unsafe extern "C" {
+                            #[link_name = "[resource-drop]properties"]
+                            fn drop(_: u32);
+                        }
+                        unsafe { drop(_handle) };
+                    }
+                }
+            }
+            impl Properties {
+                #[allow(unused_unsafe, clippy::all)]
+                pub fn new() -> Self {
+                    unsafe {
+                        #[cfg(target_arch = "wasm32")]
+                        #[link(
+                            wasm_import_module = "gas:property/properties@0.1.0-alpha"
+                        )]
+                        unsafe extern "C" {
+                            #[link_name = "[constructor]properties"]
+                            fn wit_import0() -> i32;
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        unsafe extern "C" fn wit_import0() -> i32 {
+                            unreachable!()
+                        }
+                        let ret = unsafe { wit_import0() };
+                        unsafe { Properties::from_handle(ret as u32) }
+                    }
+                }
+            }
+            impl Properties {
+                #[allow(unused_unsafe, clippy::all)]
+                pub fn get_property(&self, key: &str) -> Option<_rt::String> {
+                    unsafe {
+                        #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
+                        #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
+                        struct RetArea(
+                            [::core::mem::MaybeUninit<
+                                u8,
+                            >; 3 * ::core::mem::size_of::<*const u8>()],
+                        );
+                        let mut ret_area = RetArea(
+                            [::core::mem::MaybeUninit::uninit(); 3
+                                * ::core::mem::size_of::<*const u8>()],
+                        );
+                        let vec0 = key;
+                        let ptr0 = vec0.as_ptr().cast::<u8>();
+                        let len0 = vec0.len();
+                        let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
+                        #[cfg(target_arch = "wasm32")]
+                        #[link(
+                            wasm_import_module = "gas:property/properties@0.1.0-alpha"
+                        )]
+                        unsafe extern "C" {
+                            #[link_name = "[method]properties.get-property"]
+                            fn wit_import2(_: i32, _: *mut u8, _: usize, _: *mut u8);
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        unsafe extern "C" fn wit_import2(
+                            _: i32,
+                            _: *mut u8,
+                            _: usize,
+                            _: *mut u8,
+                        ) {
+                            unreachable!()
+                        }
+                        unsafe {
+                            wit_import2(
+                                (self).handle() as i32,
+                                ptr0.cast_mut(),
+                                len0,
+                                ptr1,
+                            )
+                        };
+                        let l3 = i32::from(*ptr1.add(0).cast::<u8>());
+                        let result7 = match l3 {
+                            0 => None,
+                            1 => {
+                                let e = {
+                                    let l4 = *ptr1
+                                        .add(::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>();
+                                    let l5 = *ptr1
+                                        .add(2 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>();
+                                    let len6 = l5;
+                                    let bytes6 = _rt::Vec::from_raw_parts(
+                                        l4.cast(),
+                                        len6,
+                                        len6,
+                                    );
+                                    _rt::string_lift(bytes6)
+                                };
+                                Some(e)
+                            }
+                            _ => _rt::invalid_enum_discriminant(),
+                        };
+                        result7
+                    }
+                }
+            }
+        }
+        #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
+        pub mod properties_service {
+            #[used]
+            #[doc(hidden)]
+            static __FORCE_SECTION_REF: fn() = super::super::super::__link_custom_section_describing_imports;
+            pub type Properties = super::super::super::gas::property::properties::Properties;
+            #[allow(unused_unsafe, clippy::all)]
+            pub fn get_user_properties() -> Properties {
+                unsafe {
+                    #[cfg(target_arch = "wasm32")]
+                    #[link(
+                        wasm_import_module = "gas:property/properties-service@0.1.0-alpha"
+                    )]
+                    unsafe extern "C" {
+                        #[link_name = "get-user-properties"]
+                        fn wit_import0() -> i32;
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unsafe extern "C" fn wit_import0() -> i32 {
+                        unreachable!()
+                    }
+                    let ret = unsafe { wit_import0() };
+                    unsafe {
+                        super::super::super::gas::property::properties::Properties::from_handle(
+                            ret as u32,
+                        )
+                    }
+                }
+            }
+            #[allow(unused_unsafe, clippy::all)]
+            pub fn get_script_properties() -> Properties {
+                unsafe {
+                    #[cfg(target_arch = "wasm32")]
+                    #[link(
+                        wasm_import_module = "gas:property/properties-service@0.1.0-alpha"
+                    )]
+                    unsafe extern "C" {
+                        #[link_name = "get-script-properties"]
+                        fn wit_import0() -> i32;
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unsafe extern "C" fn wit_import0() -> i32 {
+                        unreachable!()
+                    }
+                    let ret = unsafe { wit_import0() };
+                    unsafe {
+                        super::super::super::gas::property::properties::Properties::from_handle(
+                            ret as u32,
+                        )
+                    }
+                }
+            }
+            #[allow(unused_unsafe, clippy::all)]
+            pub fn get_document_properties() -> Properties {
+                unsafe {
+                    #[cfg(target_arch = "wasm32")]
+                    #[link(
+                        wasm_import_module = "gas:property/properties-service@0.1.0-alpha"
+                    )]
+                    unsafe extern "C" {
+                        #[link_name = "get-document-properties"]
+                        fn wit_import0() -> i32;
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unsafe extern "C" fn wit_import0() -> i32 {
+                        unreachable!()
+                    }
+                    let ret = unsafe { wit_import0() };
+                    unsafe {
+                        super::super::super::gas::property::properties::Properties::from_handle(
+                            ret as u32,
+                        )
+                    }
+                }
+            }
+        }
+    }
 }
 #[rustfmt::skip]
 #[allow(dead_code, clippy::all)]
@@ -870,6 +1193,13 @@ mod _rt {
             String::from_utf8_unchecked(bytes)
         }
     }
+    pub unsafe fn invalid_enum_discriminant<T>() -> T {
+        if cfg!(debug_assertions) {
+            panic!("invalid enum discriminant")
+        } else {
+            unsafe { core::hint::unreachable_unchecked() }
+        }
+    }
     #[cfg(target_arch = "wasm32")]
     pub fn run_ctors_once() {
         wit_bindgen_rt::run_ctors_once();
@@ -919,9 +1249,9 @@ pub(crate) use __export_my_world_impl as export;
 )]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 1260] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xed\x08\x01A\x02\x01\
-A\x15\x01B\x04\x01m\x06\x05trace\x05debug\x04info\x04warn\x05error\x08critical\x04\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 1751] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xd8\x0c\x01A\x02\x01\
+A\x1b\x01B\x04\x01m\x06\x05trace\x05debug\x04info\x04warn\x05error\x08critical\x04\
 \0\x05level\x03\0\0\x01@\x03\x05level\x01\x07contexts\x07messages\x01\0\x04\0\x03\
 log\x01\x02\x03\0\x20wasi:logging/logging@0.1.0-draft\x05\0\x01B\x09\x04\0\x0cex\
 ample-list\x03\x01\x01i\0\x01@\0\0\x01\x04\0\x19[constructor]example-list\x01\x02\
@@ -929,24 +1259,34 @@ ample-list\x03\x01\x01i\0\x01@\0\0\x01\x04\0\x19[constructor]example-list\x01\x0
 \x04\x01@\x01\x04self\x03\0s\x04\0\x1e[method]example-list.to-string\x01\x05\x03\
 \0\"example:resouceex/example-resource\x05\x01\x01B\x06\x01@\x01\x04datas\x01\0\x04\
 \0\x03log\x01\0\x01@\0\x01\0\x04\0\x05clear\x01\x01\x01@\0\0s\x04\0\x07get-log\x01\
-\x02\x03\0\x1dgas:logger/logger@0.1.0-alpha\x05\x02\x01B\x08\x04\0\x08gas-blob\x03\
+\x02\x03\0\x1dgas:logger/logger@0.1.0-alpha\x05\x02\x01B\x0c\x04\0\x08gas-blob\x03\
 \x01\x01i\0\x01@\0\0\x01\x04\0\x15[constructor]gas-blob\x01\x02\x01h\0\x01p}\x01\
-@\x01\x04self\x03\0\x04\x04\0\x1a[method]gas-blob.get-bytes\x01\x05\x03\0\"gas:d\
-rive-app/gas-blob@0.1.0-alpha\x05\x03\x02\x03\0\x03\x08gas-blob\x01B\x0c\x02\x03\
-\x02\x01\x04\x04\0\x08gas-blob\x03\0\0\x04\0\x08gas-file\x03\x01\x01i\x02\x01@\0\
-\0\x03\x04\0\x15[constructor]gas-file\x01\x04\x01h\x02\x01@\x01\x04self\x05\0s\x04\
-\0\x19[method]gas-file.get-name\x01\x06\x01i\x01\x01@\x01\x04self\x05\0\x07\x04\0\
-\x19[method]gas-file.get-blob\x01\x08\x03\0\"gas:drive-app/gas-file@0.1.0-alpha\x05\
+@\x01\x04self\x03\0\x04\x04\0\x1a[method]gas-blob.get-bytes\x01\x05\x01@\x02\x04\
+self\x03\x04data\x04\0\x01\x04\0\x1a[method]gas-blob.set-bytes\x01\x06\x01@\x01\x04\
+self\x03\0s\x04\0#[method]gas-blob.get-data-as-string\x01\x07\x03\0\"gas:drive-a\
+pp/gas-blob@0.1.0-alpha\x05\x03\x02\x03\0\x03\x08gas-blob\x01B\x0e\x02\x03\x02\x01\
+\x04\x04\0\x08gas-blob\x03\0\0\x04\0\x08gas-file\x03\x01\x01i\x02\x01@\0\0\x03\x04\
+\0\x15[constructor]gas-file\x01\x04\x01h\x02\x01@\x01\x04self\x05\0s\x04\0\x19[m\
+ethod]gas-file.get-name\x01\x06\x01i\x01\x01@\x01\x04self\x05\0\x07\x04\0\x19[me\
+thod]gas-file.get-blob\x01\x08\x01@\x02\x04self\x05\x07contents\0\x03\x04\0\x1c[\
+method]gas-file.set-content\x01\x09\x03\0\"gas:drive-app/gas-file@0.1.0-alpha\x05\
 \x05\x02\x03\0\x04\x08gas-file\x01B\x0c\x02\x03\x02\x01\x06\x04\0\x08gas-file\x03\
 \0\0\x04\0\x0dgas-drive-app\x03\x01\x01i\x02\x01@\0\0\x03\x04\0\x1a[constructor]\
 gas-drive-app\x01\x04\x01h\x02\x01i\x01\x01@\x02\x04self\x05\x02ids\0\x06\x04\0$\
 [method]gas-drive-app.get-file-by-id\x01\x07\x01@\x01\x04self\x05\0x\x04\0&[meth\
 od]gas-drive-app.get-storage-used\x01\x08\x03\0'gas:drive-app/gas-drive-app@0.1.\
-0-alpha\x05\x07\x01@\x01\x05inputs\0s\x04\0\x06scream\x01\x08\x01@\x01\x05inputs\
-\x01\0\x04\0\x09say-hello\x01\x09\x01@\0\x01\0\x04\0\x09my-func00\x01\x0a\x04\0\x09\
-my-func01\x01\x0a\x04\0!component:playground-jco/my-world\x04\0\x0b\x0e\x01\0\x08\
-my-world\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.2\
-27.1\x10wit-bindgen-rust\x060.41.0";
+0-alpha\x05\x07\x01B\x08\x04\0\x0aproperties\x03\x01\x01i\0\x01@\0\0\x01\x04\0\x17\
+[constructor]properties\x01\x02\x01h\0\x01ks\x01@\x02\x04self\x03\x03keys\0\x04\x04\
+\0\x1f[method]properties.get-property\x01\x05\x03\0#gas:property/properties@0.1.\
+0-alpha\x05\x08\x02\x03\0\x06\x0aproperties\x01B\x07\x02\x03\x02\x01\x09\x04\0\x0a\
+properties\x03\0\0\x01i\x01\x01@\0\0\x02\x04\0\x13get-user-properties\x01\x03\x04\
+\0\x15get-script-properties\x01\x03\x04\0\x17get-document-properties\x01\x03\x03\
+\0+gas:property/properties-service@0.1.0-alpha\x05\x0a\x01@\x01\x05inputs\0s\x04\
+\0\x06scream\x01\x0b\x01@\x01\x05inputs\x01\0\x04\0\x09say-hello\x01\x0c\x01@\0\x01\
+\0\x04\0\x09my-func00\x01\x0d\x04\0\x09my-func01\x01\x0d\x04\0\x09my-func02\x01\x0d\
+\x04\0!component:playground-jco/my-world\x04\0\x0b\x0e\x01\0\x08my-world\x03\0\0\
+\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.227.1\x10wit-bind\
+gen-rust\x060.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {

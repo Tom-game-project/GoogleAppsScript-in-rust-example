@@ -3,6 +3,7 @@ mod bindings;
 use bindings::example::resouceex::example_resource;
 use bindings::gas::drive_app::gas_drive_app::GasDriveApp;
 use bindings::gas::logger::*;
+use bindings::gas::property::*;
 use bindings::Guest;
 
 struct Component;
@@ -42,8 +43,29 @@ impl Guest for Component {
             &format!("file name: {}", &file.get_name())
         );
 
-        let buf = file.get_blob().get_bytes();
+        let blob = file.get_blob();
+        let mut buf = blob.get_bytes();
+
         logger::log(&format!("byte {:?}", buf));
+        buf.push(10); // 改行を追加
+        blob.set_bytes(&buf);
+        file.set_content(&blob.get_data_as_string());
+    }
+
+    fn my_func02()
+    {
+        let key = "hello";
+        // プロパティサービスの取得
+        if let Some(value) =
+            properties_service::get_script_properties()
+                .get_property(key)
+        {
+            logger::log(&format!("key - {} : value - {}", key, value));
+        }
+        else 
+        {
+            logger::log(&format!("no such key: {}", key));
+        }
     }
 }
 

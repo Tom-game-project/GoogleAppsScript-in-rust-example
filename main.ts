@@ -3,7 +3,8 @@ import {
        	scream, 
 	sayHello,
        	myFunc00,
-       	myFunc01  
+       	myFunc01,
+       	myFunc02,
 } from "./target/jco/playground_jco.js";
 import "./textencoderdecoder"
 
@@ -27,3 +28,10 @@ global.ccc = function () {
 		myFunc01();
 	});
 }
+
+global.ddd = function () {
+	$init.then(() => {
+		myFunc02();
+	});
+}
+

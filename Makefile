@@ -24,6 +24,8 @@ build: $(WASM_SRC)
 	--map 'gas:drive-app/gas-drive-app=./gas-driveapp.js' \
 	--map 'gas:drive-app/gas-file=./gas-driveapp-file.js' \
 	--map 'gas:drive-app/gas-blob=./gas-driveapp-blob.js' \
+	--map 'gas:property/properties=./gas-property-properties.js' \
+	--map 'gas:property/properties-service=./gas-property-properties-service.js' \
 	--no-nodejs-compat \
 	--tla-compat
 	cp js/log-host.js target/jco/
@@ -32,5 +34,7 @@ build: $(WASM_SRC)
 	cp js/gas-driveapp.js target/jco/
 	cp js/gas-driveapp-file.js target/jco/
 	cp js/gas-driveapp-blob.js target/jco/
+	cp js/gas-property-properties.js target/jco/
+	cp js/gas-property-properties-service.js target/jco/
 
 .PHONY: build
