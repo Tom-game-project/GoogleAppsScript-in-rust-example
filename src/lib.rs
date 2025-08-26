@@ -34,33 +34,35 @@ impl Guest for Component {
 
     fn my_func01()
     {
-        let a = GasDriveApp::new();
-        logger::log(&format!("storage {}", a.get_storage_used()));
-
-        let file = &a.get_file_by_id("1SBGJr6jusew1MKhir_sQNC1XLYXMgNA6");
-
-        logger::log(
-            &format!("file name: {}", &file.get_name())
-        );
-
-        let blob = file.get_blob();
-        let mut buf = blob.get_bytes();
-
-        logger::log(&format!("byte {:?}", buf));
-        buf.push(10); // 改行を追加
-        blob.set_bytes(&buf);
-        file.set_content(&blob.get_data_as_string());
+        logger::log("hello world");
     }
 
     fn my_func02()
     {
-        let key = "hello";
+        let key = "FILE_ID";
         // プロパティサービスの取得
         if let Some(value) =
             properties_service::get_script_properties()
                 .get_property(key)
         {
             logger::log(&format!("key - {} : value - {}", key, value));
+
+            let a = GasDriveApp::new();
+            logger::log(&format!("storage used: {}", a.get_storage_used()));
+
+            let file = &a.get_file_by_id(&value);
+
+            logger::log(
+                &format!("file name: {}", &file.get_name())
+            );
+
+            let blob = file.get_blob();
+            let mut buf = blob.get_bytes();
+
+            logger::log(&format!("byte {:?}", buf));
+            buf.push(10); // 改行を追加
+            blob.set_bytes(&buf);
+            file.set_content(&blob.get_data_as_string());
         }
         else 
         {

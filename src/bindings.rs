@@ -914,6 +914,70 @@ pub mod gas {
                     }
                 }
             }
+            impl Properties {
+                #[allow(unused_unsafe, clippy::all)]
+                pub fn get_keys(&self) -> _rt::Vec<_rt::String> {
+                    unsafe {
+                        #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
+                        #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
+                        struct RetArea(
+                            [::core::mem::MaybeUninit<
+                                u8,
+                            >; 2 * ::core::mem::size_of::<*const u8>()],
+                        );
+                        let mut ret_area = RetArea(
+                            [::core::mem::MaybeUninit::uninit(); 2
+                                * ::core::mem::size_of::<*const u8>()],
+                        );
+                        let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
+                        #[cfg(target_arch = "wasm32")]
+                        #[link(
+                            wasm_import_module = "gas:property/properties@0.1.0-alpha"
+                        )]
+                        unsafe extern "C" {
+                            #[link_name = "[method]properties.get-keys"]
+                            fn wit_import1(_: i32, _: *mut u8);
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        unsafe extern "C" fn wit_import1(_: i32, _: *mut u8) {
+                            unreachable!()
+                        }
+                        unsafe { wit_import1((self).handle() as i32, ptr0) };
+                        let l2 = *ptr0.add(0).cast::<*mut u8>();
+                        let l3 = *ptr0
+                            .add(::core::mem::size_of::<*const u8>())
+                            .cast::<usize>();
+                        let base7 = l2;
+                        let len7 = l3;
+                        let mut result7 = _rt::Vec::with_capacity(len7);
+                        for i in 0..len7 {
+                            let base = base7
+                                .add(i * (2 * ::core::mem::size_of::<*const u8>()));
+                            let e7 = {
+                                let l4 = *base.add(0).cast::<*mut u8>();
+                                let l5 = *base
+                                    .add(::core::mem::size_of::<*const u8>())
+                                    .cast::<usize>();
+                                let len6 = l5;
+                                let bytes6 = _rt::Vec::from_raw_parts(
+                                    l4.cast(),
+                                    len6,
+                                    len6,
+                                );
+                                _rt::string_lift(bytes6)
+                            };
+                            result7.push(e7);
+                        }
+                        _rt::cabi_dealloc(
+                            base7,
+                            len7 * (2 * ::core::mem::size_of::<*const u8>()),
+                            ::core::mem::size_of::<*const u8>(),
+                        );
+                        let result8 = result7;
+                        result8
+                    }
+                }
+            }
         }
         #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
         pub mod properties_service {
@@ -1200,16 +1264,16 @@ mod _rt {
             unsafe { core::hint::unreachable_unchecked() }
         }
     }
-    #[cfg(target_arch = "wasm32")]
-    pub fn run_ctors_once() {
-        wit_bindgen_rt::run_ctors_once();
-    }
     pub unsafe fn cabi_dealloc(ptr: *mut u8, size: usize, align: usize) {
         if size == 0 {
             return;
         }
         let layout = alloc::Layout::from_size_align_unchecked(size, align);
         alloc::dealloc(ptr, layout);
+    }
+    #[cfg(target_arch = "wasm32")]
+    pub fn run_ctors_once() {
+        wit_bindgen_rt::run_ctors_once();
     }
     extern crate alloc as alloc_crate;
     pub use alloc_crate::alloc;
@@ -1249,8 +1313,8 @@ pub(crate) use __export_my_world_impl as export;
 )]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 1751] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xd8\x0c\x01A\x02\x01\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 1797] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\x86\x0d\x01A\x02\x01\
 A\x1b\x01B\x04\x01m\x06\x05trace\x05debug\x04info\x04warn\x05error\x08critical\x04\
 \0\x05level\x03\0\0\x01@\x03\x05level\x01\x07contexts\x07messages\x01\0\x04\0\x03\
 log\x01\x02\x03\0\x20wasi:logging/logging@0.1.0-draft\x05\0\x01B\x09\x04\0\x0cex\
@@ -1275,14 +1339,15 @@ method]gas-file.set-content\x01\x09\x03\0\"gas:drive-app/gas-file@0.1.0-alpha\x0
 gas-drive-app\x01\x04\x01h\x02\x01i\x01\x01@\x02\x04self\x05\x02ids\0\x06\x04\0$\
 [method]gas-drive-app.get-file-by-id\x01\x07\x01@\x01\x04self\x05\0x\x04\0&[meth\
 od]gas-drive-app.get-storage-used\x01\x08\x03\0'gas:drive-app/gas-drive-app@0.1.\
-0-alpha\x05\x07\x01B\x08\x04\0\x0aproperties\x03\x01\x01i\0\x01@\0\0\x01\x04\0\x17\
+0-alpha\x05\x07\x01B\x0b\x04\0\x0aproperties\x03\x01\x01i\0\x01@\0\0\x01\x04\0\x17\
 [constructor]properties\x01\x02\x01h\0\x01ks\x01@\x02\x04self\x03\x03keys\0\x04\x04\
-\0\x1f[method]properties.get-property\x01\x05\x03\0#gas:property/properties@0.1.\
-0-alpha\x05\x08\x02\x03\0\x06\x0aproperties\x01B\x07\x02\x03\x02\x01\x09\x04\0\x0a\
-properties\x03\0\0\x01i\x01\x01@\0\0\x02\x04\0\x13get-user-properties\x01\x03\x04\
-\0\x15get-script-properties\x01\x03\x04\0\x17get-document-properties\x01\x03\x03\
-\0+gas:property/properties-service@0.1.0-alpha\x05\x0a\x01@\x01\x05inputs\0s\x04\
-\0\x06scream\x01\x0b\x01@\x01\x05inputs\x01\0\x04\0\x09say-hello\x01\x0c\x01@\0\x01\
+\0\x1f[method]properties.get-property\x01\x05\x01ps\x01@\x01\x04self\x03\0\x06\x04\
+\0\x1b[method]properties.get-keys\x01\x07\x03\0#gas:property/properties@0.1.0-al\
+pha\x05\x08\x02\x03\0\x06\x0aproperties\x01B\x07\x02\x03\x02\x01\x09\x04\0\x0apr\
+operties\x03\0\0\x01i\x01\x01@\0\0\x02\x04\0\x13get-user-properties\x01\x03\x04\0\
+\x15get-script-properties\x01\x03\x04\0\x17get-document-properties\x01\x03\x03\0\
++gas:property/properties-service@0.1.0-alpha\x05\x0a\x01@\x01\x05inputs\0s\x04\0\
+\x06scream\x01\x0b\x01@\x01\x05inputs\x01\0\x04\0\x09say-hello\x01\x0c\x01@\0\x01\
 \0\x04\0\x09my-func00\x01\x0d\x04\0\x09my-func01\x01\x0d\x04\0\x09my-func02\x01\x0d\
 \x04\0!component:playground-jco/my-world\x04\0\x0b\x0e\x01\0\x08my-world\x03\0\0\
 \0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.227.1\x10wit-bind\

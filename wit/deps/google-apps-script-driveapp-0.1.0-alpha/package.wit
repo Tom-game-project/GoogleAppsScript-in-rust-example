@@ -11,6 +11,7 @@ interface gas-blob {
 
 interface gas-file {
 	use gas-blob.{gas-blob};
+
 	resource gas-file {
 		constructor();
 		get-name: func() -> string;
@@ -21,6 +22,7 @@ interface gas-file {
 
 interface gas-drive-app {
 	use gas-file.{gas-file};
+
 	resource gas-drive-app {
 		constructor();
 		get-file-by-id: func(id :string) -> gas-file;

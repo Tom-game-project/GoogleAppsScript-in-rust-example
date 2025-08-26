@@ -4,11 +4,13 @@ interface properties {
 	resource properties {
 		constructor();
 		get-property: func(key:string) -> option<string>;
+		get-keys: func() -> list<string>;
 	}
 }
 
 interface properties-service {
 	use properties.{properties};
+
 	get-user-properties: func() -> properties;
 	get-script-properties: func() -> properties;
 	get-document-properties: func() -> properties;
