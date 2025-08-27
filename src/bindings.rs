@@ -707,35 +707,59 @@ pub mod gas {
             }
             impl GasDriveApp {
                 #[allow(unused_unsafe, clippy::all)]
-                pub fn get_file_by_id(&self, id: &str) -> GasFile {
+                pub fn get_file_by_id(&self, id: &str) -> Option<GasFile> {
                     unsafe {
+                        #[repr(align(4))]
+                        struct RetArea([::core::mem::MaybeUninit<u8>; 8]);
+                        let mut ret_area = RetArea(
+                            [::core::mem::MaybeUninit::uninit(); 8],
+                        );
                         let vec0 = id;
                         let ptr0 = vec0.as_ptr().cast::<u8>();
                         let len0 = vec0.len();
+                        let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
                         #[link(
                             wasm_import_module = "gas:drive-app/gas-drive-app@0.1.0-alpha"
                         )]
                         unsafe extern "C" {
                             #[link_name = "[method]gas-drive-app.get-file-by-id"]
-                            fn wit_import1(_: i32, _: *mut u8, _: usize) -> i32;
+                            fn wit_import2(_: i32, _: *mut u8, _: usize, _: *mut u8);
                         }
                         #[cfg(not(target_arch = "wasm32"))]
-                        unsafe extern "C" fn wit_import1(
+                        unsafe extern "C" fn wit_import2(
                             _: i32,
                             _: *mut u8,
                             _: usize,
-                        ) -> i32 {
+                            _: *mut u8,
+                        ) {
                             unreachable!()
                         }
-                        let ret = unsafe {
-                            wit_import1((self).handle() as i32, ptr0.cast_mut(), len0)
-                        };
                         unsafe {
-                            super::super::super::gas::drive_app::gas_file::GasFile::from_handle(
-                                ret as u32,
+                            wit_import2(
+                                (self).handle() as i32,
+                                ptr0.cast_mut(),
+                                len0,
+                                ptr1,
                             )
-                        }
+                        };
+                        let l3 = i32::from(*ptr1.add(0).cast::<u8>());
+                        let result5 = match l3 {
+                            0 => None,
+                            1 => {
+                                let e = {
+                                    let l4 = *ptr1.add(4).cast::<i32>();
+                                    unsafe {
+                                        super::super::super::gas::drive_app::gas_file::GasFile::from_handle(
+                                            l4 as u32,
+                                        )
+                                    }
+                                };
+                                Some(e)
+                            }
+                            _ => _rt::invalid_enum_discriminant(),
+                        };
+                        result5
                     }
                 }
             }
@@ -1123,6 +1147,7 @@ pub mod gas {
         }
     }
     pub mod spreadsheet_app {
+        /// https://developers.google.com/apps-script/reference/spreadsheet/range
         #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
         pub mod gas_range {
             #[used]
@@ -1354,6 +1379,7 @@ pub mod gas {
                 }
             }
         }
+        /// https://developers.google.com/apps-script/reference/spreadsheet/sheet
         #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
         pub mod gas_sheet {
             #[used]
@@ -1447,6 +1473,7 @@ pub mod gas {
                 }
             }
         }
+        /// https://developers.google.com/apps-script/reference/spreadsheet/spreadsheet
         #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
         pub mod gas_spreadsheet {
             #[used]
@@ -1671,6 +1698,7 @@ pub mod gas {
                 }
             }
         }
+        /// https://developers.google.com/apps-script/reference/spreadsheet/spreadsheet-app
         #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
         pub mod gas_spreadsheet_app {
             #[used]
@@ -2072,8 +2100,8 @@ pub(crate) use __export_my_world_impl as export;
 )]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 2853] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xa6\x15\x01A\x02\x01\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 2856] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xa9\x15\x01A\x02\x01\
 A+\x01q\x02\x05empty\0\0\x0cstring-value\x01s\0\x03\0\x0acell-value\x03\0\0\x01B\
 \x04\x01m\x06\x05trace\x05debug\x04info\x04warn\x05error\x08critical\x04\0\x05le\
 vel\x03\0\0\x01@\x03\x05level\x01\x07contexts\x07messages\x01\0\x04\0\x03log\x01\
@@ -2094,45 +2122,45 @@ pp/gas-blob@0.1.0-alpha\x05\x05\x02\x03\0\x03\x08gas-blob\x01B\x0e\x02\x03\x02\x
 ethod]gas-file.get-name\x01\x06\x01i\x01\x01@\x01\x04self\x05\0\x07\x04\0\x19[me\
 thod]gas-file.get-blob\x01\x08\x01@\x02\x04self\x05\x07contents\0\x03\x04\0\x1c[\
 method]gas-file.set-content\x01\x09\x03\0\"gas:drive-app/gas-file@0.1.0-alpha\x05\
-\x07\x02\x03\0\x04\x08gas-file\x01B\x0c\x02\x03\x02\x01\x08\x04\0\x08gas-file\x03\
+\x07\x02\x03\0\x04\x08gas-file\x01B\x0d\x02\x03\x02\x01\x08\x04\0\x08gas-file\x03\
 \0\0\x04\0\x0dgas-drive-app\x03\x01\x01i\x02\x01@\0\0\x03\x04\0\x1a[constructor]\
-gas-drive-app\x01\x04\x01h\x02\x01i\x01\x01@\x02\x04self\x05\x02ids\0\x06\x04\0$\
-[method]gas-drive-app.get-file-by-id\x01\x07\x01@\x01\x04self\x05\0x\x04\0&[meth\
-od]gas-drive-app.get-storage-used\x01\x08\x03\0'gas:drive-app/gas-drive-app@0.1.\
-0-alpha\x05\x09\x01B\x0b\x04\0\x0aproperties\x03\x01\x01i\0\x01@\0\0\x01\x04\0\x17\
-[constructor]properties\x01\x02\x01h\0\x01ks\x01@\x02\x04self\x03\x03keys\0\x04\x04\
-\0\x1f[method]properties.get-property\x01\x05\x01ps\x01@\x01\x04self\x03\0\x06\x04\
-\0\x1b[method]properties.get-keys\x01\x07\x03\0#gas:property/properties@0.1.0-al\
-pha\x05\x0a\x02\x03\0\x06\x0aproperties\x01B\x07\x02\x03\x02\x01\x0b\x04\0\x0apr\
-operties\x03\0\0\x01i\x01\x01@\0\0\x02\x04\0\x13get-user-properties\x01\x03\x04\0\
-\x15get-script-properties\x01\x03\x04\0\x17get-document-properties\x01\x03\x03\0\
-+gas:property/properties-service@0.1.0-alpha\x05\x0c\x01B\x0b\x01q\x06\x05empty\0\
-\0\x0cstring-value\x01s\0\x0cnumber-value\x01u\0\x0dboolean-value\x01\x7f\0\x0ad\
-ate-value\x01s\0\x0fotherwise-value\0\0\x04\0\x0acell-value\x03\0\0\x04\0\x09gas\
--range\x03\x01\x01i\x02\x01@\0\0\x03\x04\0\x16[constructor]gas-range\x01\x04\x01\
-h\x02\x01p\x01\x01p\x06\x01@\x01\x04self\x05\0\x07\x04\0\x1c[method]gas-range.ge\
-t-values\x01\x08\x03\0)gas:spreadsheet-app/gas-range@0.1.0-alpha\x05\x0d\x02\x03\
-\0\x08\x09gas-range\x01B\x0a\x02\x03\x02\x01\x0e\x04\0\x09gas-range\x03\0\0\x04\0\
-\x09gas-sheet\x03\x01\x01i\x02\x01@\0\0\x03\x04\0\x16[constructor]gas-sheet\x01\x04\
-\x01h\x02\x01i\x01\x01@\x01\x04self\x05\0\x06\x04\0\x20[method]gas-sheet.get-dat\
-a-range\x01\x07\x03\0)gas:spreadsheet-app/gas-sheet@0.1.0-alpha\x05\x0f\x02\x03\0\
-\x09\x09gas-sheet\x01B\x0f\x02\x03\x02\x01\x10\x04\0\x09gas-sheet\x03\0\0\x04\0\x0f\
-gas-spreadsheet\x03\x01\x01i\x02\x01@\0\0\x03\x04\0\x1c[constructor]gas-spreadsh\
-eet\x01\x04\x01h\x02\x01@\x01\x04self\x05\0s\x04\0\x1e[method]gas-spreadsheet.ge\
-t-id\x01\x06\x01i\x01\x01k\x07\x01@\x02\x04self\x05\x02ids\0\x08\x04\0'[method]g\
-as-spreadsheet.get-sheet-by-id\x01\x09\x01@\x02\x04self\x05\x04names\0\x08\x04\0\
-)[method]gas-spreadsheet.get-sheet-by-name\x01\x0a\x03\0/gas:spreadsheet-app/gas\
--spreadsheet@0.1.0-alpha\x05\x11\x02\x03\0\x0a\x0fgas-spreadsheet\x01B\x0d\x02\x03\
-\x02\x01\x08\x04\0\x08gas-file\x03\0\0\x02\x03\x02\x01\x12\x04\0\x0fgas-spreadsh\
-eet\x03\0\x02\x01i\x01\x01i\x03\x01k\x05\x01@\x01\x04file\x04\0\x06\x04\0\x04ope\
-n\x01\x07\x01@\x01\x02ids\0\x06\x04\0\x0aopen-by-id\x01\x08\x01@\x01\x03urls\0\x06\
-\x04\0\x0bopen-by-url\x01\x09\x03\03gas:spreadsheet-app/gas-spreadsheet-app@0.1.\
-0-alpha\x05\x13\x01@\0\0\x01\x04\0\x0evariant-func00\x01\x14\x01@\x01\x05inputs\0\
-s\x04\0\x06scream\x01\x15\x01@\x01\x05inputs\x01\0\x04\0\x09say-hello\x01\x16\x01\
-@\0\x01\0\x04\0\x09my-func00\x01\x17\x04\0\x09my-func01\x01\x17\x04\0\x09my-func\
-02\x01\x17\x04\0\x09my-func03\x01\x17\x04\0!component:playground-jco/my-world\x04\
-\0\x0b\x0e\x01\0\x08my-world\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0d\
-wit-component\x070.227.1\x10wit-bindgen-rust\x060.41.0";
+gas-drive-app\x01\x04\x01h\x02\x01i\x01\x01k\x06\x01@\x02\x04self\x05\x02ids\0\x07\
+\x04\0$[method]gas-drive-app.get-file-by-id\x01\x08\x01@\x01\x04self\x05\0x\x04\0\
+&[method]gas-drive-app.get-storage-used\x01\x09\x03\0'gas:drive-app/gas-drive-ap\
+p@0.1.0-alpha\x05\x09\x01B\x0b\x04\0\x0aproperties\x03\x01\x01i\0\x01@\0\0\x01\x04\
+\0\x17[constructor]properties\x01\x02\x01h\0\x01ks\x01@\x02\x04self\x03\x03keys\0\
+\x04\x04\0\x1f[method]properties.get-property\x01\x05\x01ps\x01@\x01\x04self\x03\
+\0\x06\x04\0\x1b[method]properties.get-keys\x01\x07\x03\0#gas:property/propertie\
+s@0.1.0-alpha\x05\x0a\x02\x03\0\x06\x0aproperties\x01B\x07\x02\x03\x02\x01\x0b\x04\
+\0\x0aproperties\x03\0\0\x01i\x01\x01@\0\0\x02\x04\0\x13get-user-properties\x01\x03\
+\x04\0\x15get-script-properties\x01\x03\x04\0\x17get-document-properties\x01\x03\
+\x03\0+gas:property/properties-service@0.1.0-alpha\x05\x0c\x01B\x0b\x01q\x06\x05\
+empty\0\0\x0cstring-value\x01s\0\x0cnumber-value\x01u\0\x0dboolean-value\x01\x7f\
+\0\x0adate-value\x01s\0\x0fotherwise-value\0\0\x04\0\x0acell-value\x03\0\0\x04\0\
+\x09gas-range\x03\x01\x01i\x02\x01@\0\0\x03\x04\0\x16[constructor]gas-range\x01\x04\
+\x01h\x02\x01p\x01\x01p\x06\x01@\x01\x04self\x05\0\x07\x04\0\x1c[method]gas-rang\
+e.get-values\x01\x08\x03\0)gas:spreadsheet-app/gas-range@0.1.0-alpha\x05\x0d\x02\
+\x03\0\x08\x09gas-range\x01B\x0a\x02\x03\x02\x01\x0e\x04\0\x09gas-range\x03\0\0\x04\
+\0\x09gas-sheet\x03\x01\x01i\x02\x01@\0\0\x03\x04\0\x16[constructor]gas-sheet\x01\
+\x04\x01h\x02\x01i\x01\x01@\x01\x04self\x05\0\x06\x04\0\x20[method]gas-sheet.get\
+-data-range\x01\x07\x03\0)gas:spreadsheet-app/gas-sheet@0.1.0-alpha\x05\x0f\x02\x03\
+\0\x09\x09gas-sheet\x01B\x0f\x02\x03\x02\x01\x10\x04\0\x09gas-sheet\x03\0\0\x04\0\
+\x0fgas-spreadsheet\x03\x01\x01i\x02\x01@\0\0\x03\x04\0\x1c[constructor]gas-spre\
+adsheet\x01\x04\x01h\x02\x01@\x01\x04self\x05\0s\x04\0\x1e[method]gas-spreadshee\
+t.get-id\x01\x06\x01i\x01\x01k\x07\x01@\x02\x04self\x05\x02ids\0\x08\x04\0'[meth\
+od]gas-spreadsheet.get-sheet-by-id\x01\x09\x01@\x02\x04self\x05\x04names\0\x08\x04\
+\0)[method]gas-spreadsheet.get-sheet-by-name\x01\x0a\x03\0/gas:spreadsheet-app/g\
+as-spreadsheet@0.1.0-alpha\x05\x11\x02\x03\0\x0a\x0fgas-spreadsheet\x01B\x0d\x02\
+\x03\x02\x01\x08\x04\0\x08gas-file\x03\0\0\x02\x03\x02\x01\x12\x04\0\x0fgas-spre\
+adsheet\x03\0\x02\x01i\x01\x01i\x03\x01k\x05\x01@\x01\x04file\x04\0\x06\x04\0\x04\
+open\x01\x07\x01@\x01\x02ids\0\x06\x04\0\x0aopen-by-id\x01\x08\x01@\x01\x03urls\0\
+\x06\x04\0\x0bopen-by-url\x01\x09\x03\03gas:spreadsheet-app/gas-spreadsheet-app@\
+0.1.0-alpha\x05\x13\x01@\0\0\x01\x04\0\x0evariant-func00\x01\x14\x01@\x01\x05inp\
+uts\0s\x04\0\x06scream\x01\x15\x01@\x01\x05inputs\x01\0\x04\0\x09say-hello\x01\x16\
+\x01@\0\x01\0\x04\0\x09my-func00\x01\x17\x04\0\x09my-func01\x01\x17\x04\0\x09my-\
+func02\x01\x17\x04\0\x09my-func03\x01\x17\x04\0!component:playground-jco/my-worl\
+d\x04\0\x0b\x0e\x01\0\x08my-world\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\
+\x0dwit-component\x070.227.1\x10wit-bindgen-rust\x060.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {

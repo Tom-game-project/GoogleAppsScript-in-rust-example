@@ -13,10 +13,7 @@ export const GasRange = class GasRange
 
 	getValues()
 	{
-		const v_list = this.range.getValues();
-		console.log(v_list);
-		return v_list.map((i) => 
-			i.map(
+		return this.range.getValues().map((i) => i.map(
 				(cell_value) => 
 				{
 					if (cell_value === "")

@@ -25,7 +25,7 @@ interface gas-drive-app {
 
 	resource gas-drive-app {
 		constructor();
-		get-file-by-id: func(id: string) -> gas-file;
+		get-file-by-id: func(id: string) -> option<gas-file>;
 		get-storage-used: func() -> s64;
 	}
 }

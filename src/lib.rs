@@ -52,7 +52,7 @@ impl Guest for Component {
             let a = GasDriveApp::new();
             logger::log(&format!("storage used: {}", a.get_storage_used()));
 
-            let file = &a.get_file_by_id(&value);
+            let file = &a.get_file_by_id(&value).expect(&format!("no such file {}", value));
 
             logger::log(
                 &format!("file name: {}", &file.get_name())

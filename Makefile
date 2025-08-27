@@ -38,7 +38,7 @@ $(WASM_SRC): $(RS_SRCS)
 
 # グルーコードの生成
 $(JCO_OUT_DIR): $(WASM_SRC) $(JS_SHIMS)
-	jco transpile $(WASM_SRC) \
+	npx jco transpile $(WASM_SRC) \
 	-o $(JCO_OUT_DIR) \
 	$(JCO_FLAGS) \
 	--map 'example:resouceex/example-resource=./example-resouceex.js' \

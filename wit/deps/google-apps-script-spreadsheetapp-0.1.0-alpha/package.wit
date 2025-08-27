@@ -2,7 +2,7 @@ package gas:spreadsheet-app@0.1.0-alpha;
 
 use gas:drive-app/gas-file@0.1.0-alpha;
 
-
+/// https://developers.google.com/apps-script/reference/spreadsheet/range
 interface gas-range {
 	variant cell-value {
 		empty,
@@ -22,6 +22,7 @@ interface gas-range {
 	}
 }
 
+/// https://developers.google.com/apps-script/reference/spreadsheet/sheet
 interface gas-sheet {
 	use gas-range.{gas-range};
 
@@ -32,6 +33,7 @@ interface gas-sheet {
 	}
 }
 
+/// https://developers.google.com/apps-script/reference/spreadsheet/spreadsheet
 interface gas-spreadsheet {
 	use gas-sheet.{gas-sheet};
 
@@ -44,6 +46,7 @@ interface gas-spreadsheet {
 	}
 }
 
+/// https://developers.google.com/apps-script/reference/spreadsheet/spreadsheet-app
 interface gas-spreadsheet-app {
 	use gas-file.{gas-file};
 	use gas-spreadsheet.{gas-spreadsheet};

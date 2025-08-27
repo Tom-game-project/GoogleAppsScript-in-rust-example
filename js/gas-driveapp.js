@@ -13,6 +13,10 @@ export const GasDriveApp = class a {
 	getFileById(id) {
 		const f = DriveApp.getFileById(id);
 
+		if (f===null)
+		{
+			return null;
+		}
 		return new GasFile(f);
 	}
 
