@@ -19,7 +19,11 @@ JS_SHIMS = \
 	js/gas-driveapp-file.js \
 	js/gas-driveapp-blob.js \
 	js/gas-property-properties.js \
-	js/gas-property-properties-service.js
+	js/gas-property-properties-service.js \
+	js/gas-spreadsheetapp.js \
+	js/gas-spreadsheetapp-range.js \
+	js/gas-spreadsheetapp-sheet.js \
+	js/gas-spreadsheetapp-spreadsheet.js
 
 
 # guest impls
@@ -44,11 +48,20 @@ $(JCO_OUT_DIR): $(WASM_SRC) $(JS_SHIMS)
 	--map 'gas:drive-app/gas-file=./gas-driveapp-file.js' \
 	--map 'gas:drive-app/gas-blob=./gas-driveapp-blob.js' \
 	--map 'gas:property/properties=./gas-property-properties.js' \
-	--map 'gas:property/properties-service=./gas-property-properties-service.js'
-	cp $(JS_SHIMS) target/jco/
+	--map 'gas:property/properties-service=./gas-property-properties-service.js' \
+	--map 'gas:spreadsheet-app/gas-spreadsheet-app=./gas-spreadsheetapp.js' \
+	--map 'gas:spreadsheet-app/gas-spreadsheet=./gas-spreadsheetapp-spreadsheet.js' \
+	--map 'gas:spreadsheet-app/gas-range=./gas-spreadsheetapp-range.js' \
+	--map 'gas:spreadsheet-app/gas-sheet=./gas-spreadsheetapp-sheet.js'
+	# ---
+	cp $(JS_SHIMS) $(JCO_OUT_DIR)
 
 
-build-pack: $(JCO_OUT_DIR)
+# generate grue code based on rust component programs 
+build-grue: $(JCO_OUT_DIR)
+
+# packing
+build-pack: build-grue
 	npx webpack
 
 

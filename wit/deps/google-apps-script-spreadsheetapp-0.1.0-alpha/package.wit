@@ -1,0 +1,59 @@
+package gas:spreadsheet-app@0.1.0-alpha;
+
+use gas:drive-app/gas-file@0.1.0-alpha;
+
+
+interface gas-range {
+	variant cell-value {
+		empty,
+		string-value(string),
+		number-value(f64),
+		boolean-value(bool),
+		// TODO
+		date-value(string),
+		otherwise-value, // ERR
+	}
+
+	resource gas-range {
+		constructor();
+
+		// https://developers.google.com/apps-script/reference/spreadsheet/range?hl=ja#getValues()
+		get-values: func() -> list<list<cell-value>>;
+	}
+}
+
+interface gas-sheet {
+	use gas-range.{gas-range};
+
+	resource gas-sheet {
+		constructor();
+
+		get-data-range: func() -> gas-range;
+	}
+}
+
+interface gas-spreadsheet {
+	use gas-sheet.{gas-sheet};
+
+	resource gas-spreadsheet{
+		constructor();
+
+		get-id:func() -> string;
+		get-sheet-by-id: func(id:string) -> option<gas-sheet>;
+		get-sheet-by-name: func(name:string) -> option<gas-sheet>;
+	}
+}
+
+interface gas-spreadsheet-app {
+	use gas-file.{gas-file};
+	use gas-spreadsheet.{gas-spreadsheet};
+
+	open: func(file: gas-file) -> option<gas-spreadsheet>;
+	open-by-id: func(id: string) -> option<gas-spreadsheet>;
+	open-by-url: func(url: string) -> option<gas-spreadsheet>;
+}
+
+world imports {
+	import gas-spreadsheet;
+	import gas-spreadsheet-app;
+}

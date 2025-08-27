@@ -29,4 +29,4 @@ package = "component:playground-jco"
 "gas:logger" = { path = "./wit/deps/google-apps-script-logger-0.1.0-alpha"}
 "gas:drive-app" = { path = "./wit/deps/google-apps-script-driveapp-0.1.0-alpha"}
 "gas:property" = { path = "./wit/deps/google-apps-script-property-0.1.0-alpha"}
-
+"gas:spreadsheet-app" = { path = "./wit/deps/google-apps-script-spreadsheetapp-0.1.0-alpha" }

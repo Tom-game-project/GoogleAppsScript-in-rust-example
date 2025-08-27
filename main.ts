@@ -5,6 +5,8 @@ import {
        	myFunc00,
        	myFunc01,
        	myFunc02,
+       	myFunc03,
+	variantFunc00,
 } from "./target/jco/playground_jco.js";
 import "./textencoderdecoder"
 
@@ -35,3 +37,14 @@ global.ddd = function () {
 	});
 }
 
+global.eee = function () {
+	$init.then(() => {
+		myFunc03();
+	});
+}
+
+global.fff = function () {
+	$init.then(() => {
+		console.log(variantFunc00());
+	});
+}

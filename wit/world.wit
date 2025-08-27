@@ -8,10 +8,19 @@ world my-world {
 	import gas:logger/logger@0.1.0-alpha;
 	import gas:drive-app/gas-drive-app@0.1.0-alpha;
 	import gas:property/properties-service@0.1.0-alpha;
+	import gas:spreadsheet-app/gas-spreadsheet-app@0.1.0-alpha;
+
+	variant cell-value {
+		empty,
+		string-value(string),
+	}
+
+	export variant-func00: func() -> cell-value;
 
 	export scream: func(input: string) -> string;
 	export say-hello: func(input: string);
 	export my-func00: func();
 	export my-func01: func();
 	export my-func02: func();
+	export my-func03: func();
 }

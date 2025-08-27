@@ -4,6 +4,8 @@ use bindings::example::resouceex::example_resource;
 use bindings::gas::drive_app::gas_drive_app::GasDriveApp;
 use bindings::gas::logger::*;
 use bindings::gas::property::*;
+use bindings::gas::spreadsheet_app;
+use bindings::gas::spreadsheet_app::gas_range;
 use bindings::Guest;
 
 struct Component;
@@ -68,6 +70,61 @@ impl Guest for Component {
         {
             logger::log(&format!("no such key: {}", key));
         }
+    }
+
+    fn my_func03()
+    {
+        let key = "SPREADSHEET_ID";
+        if let Some(value) = 
+            properties_service::get_script_properties().get_property(key)
+        {
+            if let Some(spreadsheet) = spreadsheet_app::gas_spreadsheet_app::open_by_id(&value) {
+                logger::log(&format!("sheet id {}", spreadsheet.get_id()));
+                let sheet_name = "sheet1";
+                if let Some (sheet) =spreadsheet.get_sheet_by_name(sheet_name)
+                {
+                    for i in sheet.get_data_range().get_values()
+                    {
+                        for j in i
+                        {
+                            match j {
+                                gas_range::CellValue::Empty => {
+                                    logger::log("Empty");
+                                }
+                                gas_range::CellValue::StringValue(s) => {
+                                    logger::log(&format!("string {}", s));
+                                }
+                                gas_range::CellValue::NumberValue(n) => {
+                                    logger::log(&format!("number {}", n));
+                                }
+                                gas_range::CellValue::BooleanValue(b) => {
+                                    logger::log(&format!("boolean {:?}", b));
+                                }
+                                _ => {
+                                    logger::log("otherwise");
+                                }
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    logger::log(&format!("no such sheet name {}", sheet_name));
+                }
+            }else 
+            {
+                logger::log("no such spreadsheet");
+            }
+        }
+        else 
+        {
+            logger::log(&format!("no such key: {}", key));
+        }
+        
+    }
+
+    fn variant_func00() -> bindings::CellValue {
+        bindings::CellValue::StringValue("hello world".to_string())
     }
 }
 
