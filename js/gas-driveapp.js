@@ -1,29 +1,17 @@
 import { GasFile } from "./gas-driveapp-file";
 
-export const GasDriveApp = class a {
-	constructor () {
-		console.log("Host JS: DriveApp");
-	}
+export const getFileById = function (id)
+{
+	const f = DriveApp.getFileById(id);
 
-	/**
-	 * IDでファイルを取得します。
-         * @param {string} id
-         * @returns {GoogleAppsScript.Drive.File}
-        */
-	getFileById(id) {
-		const f = DriveApp.getFileById(id);
-
-		if (f===null)
-		{
-			return null;
-		}
-		return new GasFile(f);
-	}
-
-	getStorageUsed ()
+	if (f===null)
 	{
-		console.log("called getStorageUsed");
-		return DriveApp.getStorageUsed();
+		return null;
 	}
-};
+	return new GasFile(f);
+}
 
+export const getStorageUsed = function ()
+{
+	return DriveApp.getStorageUsed();
+}

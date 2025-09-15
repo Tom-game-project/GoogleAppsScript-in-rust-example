@@ -35,6 +35,7 @@ export const GasRange = class GasRange
 					else if (cell_value instanceof Date)
 					{
 						// TODO cell_valueは時間情報を含める最小のデータを用いたい
+						
 						return {tag: "date-value", val: cell_value};
 					}
 					else

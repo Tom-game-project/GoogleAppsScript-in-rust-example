@@ -9,25 +9,34 @@ interface gas-blob {
 	}
 }
 
+interface gas-access {
+	enum gas-access {
+	    anyone,
+	    anyone-with-link,
+	    domain,
+	    domain-with-link,
+	    private,
+	}
+}
+
 interface gas-file {
 	use gas-blob.{gas-blob};
+	use gas-access.{gas-access};
 
 	resource gas-file {
 		constructor();
 		get-name: func() -> string;
 		get-blob: func() -> gas-blob;
 		set-content: func(content: string) -> gas-file;
+		get-sharing-access: func () -> gas-access;
 	}
 }
 
 interface gas-drive-app {
 	use gas-file.{gas-file};
 
-	resource gas-drive-app {
-		constructor();
-		get-file-by-id: func(id: string) -> option<gas-file>;
-		get-storage-used: func() -> s64;
-	}
+	get-file-by-id: func(id: string) -> option<gas-file>;
+	get-storage-used: func() -> s64;
 }
 
 world imports {

@@ -1,7 +1,7 @@
 mod bindings;
 
 use bindings::example::resouceex::example_resource;
-use bindings::gas::drive_app::gas_drive_app::GasDriveApp;
+use bindings::gas::drive_app;
 use bindings::gas::logger::*;
 use bindings::gas::property::*;
 use bindings::gas::spreadsheet_app;
@@ -42,6 +42,7 @@ impl Guest for Component {
     fn my_func02()
     {
         let key = "FILE_ID";
+
         // プロパティサービスの取得
         if let Some(value) =
             properties_service::get_script_properties()
@@ -49,11 +50,13 @@ impl Guest for Component {
         {
             logger::log(&format!("key - {} : value - {}", key, value));
 
-            let a = GasDriveApp::new();
-            logger::log(&format!("storage used: {}", a.get_storage_used()));
+            //let a = GasDriveApp::new();
+            //GasDriveApp::
 
-            let file = &a.get_file_by_id(&value).expect(&format!("no such file {}", value));
+            logger::log(&format!("storage used: {}", drive_app::gas_drive_app::get_storage_used()));
 
+            let file = drive_app::gas_drive_app::get_file_by_id(&value)
+                .expect(&format!("no such file {}", value));
             logger::log(
                 &format!("file name: {}", &file.get_name())
             );
@@ -65,6 +68,7 @@ impl Guest for Component {
             buf.push(10); // 改行を追加
             blob.set_bytes(&buf);
             file.set_content(&blob.get_data_as_string());
+            logger::log("Success to set file");
         }
         else 
         {
@@ -124,6 +128,7 @@ impl Guest for Component {
     }
 
     fn variant_func00() -> bindings::CellValue {
+        // valiant型をjsとやり取りする際の方法
         bindings::CellValue::StringValue("hello world".to_string())
     }
 }
