@@ -31,6 +31,14 @@ EOF
 make push
 ```
 
+## Project Structure
+
+- `js`: This file contains the implementation of the JavaScript wrapper that bridges the GAS API with the Rust world.
+- `src`: Rust implementation example
+- `wit`: Google Apps Script API definitions
+- `main.ts`: GAS project entry point
+
+
 ## Using the Google Apps Script API via WIT
 
 API definitions for the Google Apps Script API are located in the `wit` directory. If you can't find the API you need, you can add your own .wit file definitions to this directory.
