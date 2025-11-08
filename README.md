@@ -1,6 +1,6 @@
 # Google Apps Script in Rust Example
 
-This is an example project demonstrating how to run Rust on Google Apps Script (GAS), using jco and cargo-component. This project was created in February 2025 and is based on the [playground_jco](https://github.com/yoshuawuyts/playground-jco) repository.
+This is an example project demonstrating how to run Rust on Google Apps Script (GAS), using jco and cargo-component. This project was created in August 2025 and is based on the [playground_jco](https://github.com/yoshuawuyts/playground-jco) repository.
 
 ## What's This?
 
