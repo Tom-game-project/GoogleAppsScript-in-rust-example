@@ -1,5 +1,5 @@
 [package]
-name = "playground-jco"
+name = "GoogleAppsScript-in-rust-example"
 version = "0.1.0"
 edition = "2024"
 
@@ -17,7 +17,7 @@ wit-bindgen-rt = { version = "0.43.0", features = ["bitflags"] }
 crate-type = ["cdylib"]
 
 [package.metadata.component]
-package = "component:playground-jco"
+package = "component:googleappsscript-in-rust-example"
 
 [package.metadata.component.dependencies]
 

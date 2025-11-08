@@ -33,11 +33,15 @@ make push
 
 ## Project Structure
 
-- `js`: This file contains the implementation of the JavaScript wrapper that bridges the GAS API with the Rust world.
-- `src`: Rust implementation example
-- `wit`: Google Apps Script API definitions
+- `js/`: This directory contains the implementation of the JavaScript wrapper that bridges the GAS API with the Rust world.
+- `src/`: Rust implementation example
+  - `bindings.rs`: Auto generated
+  - `lib.rs`: Each method corresponds to a function defined in the wit/world.wit.
+- `wit/`: 
+  - `deps/`: GAS API definitions
+  - `world.wit`: Rust component definitions
 - `main.ts`: GAS project entry point
-
+- `Makefile`: build rule
 
 ## Using the Google Apps Script API via WIT
 

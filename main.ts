@@ -7,7 +7,7 @@ import {
        	myFunc02,
        	myFunc03,
 	variantFunc00,
-} from "./target/jco/playground_jco.js";
+} from "./target/jco/GoogleAppsScript_in_rust_example.js";
 import "./textencoderdecoder"
 
 declare const global: any;

@@ -2093,12 +2093,12 @@ macro_rules! __export_my_world_impl {
 pub(crate) use __export_my_world_impl as export;
 #[cfg(target_arch = "wasm32")]
 #[unsafe(
-    link_section = "component-type:wit-bindgen:0.41.0:component:playground-jco:my-world:encoded world"
+    link_section = "component-type:wit-bindgen:0.41.0:component:googleappsscript-in-rust-example:my-world:encoded world"
 )]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 2946] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\x83\x16\x01A\x02\x01\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 2964] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\x95\x16\x01A\x02\x01\
 A.\x01q\x02\x05empty\0\0\x0cstring-value\x01s\0\x03\0\x0acell-value\x03\0\0\x01B\
 \x04\x01m\x06\x05trace\x05debug\x04info\x04warn\x05error\x08critical\x04\0\x05le\
 vel\x03\0\0\x01@\x03\x05level\x01\x07contexts\x07messages\x01\0\x04\0\x03log\x01\
@@ -2157,9 +2157,9 @@ n\x01\x07\x01@\x01\x02ids\0\x06\x04\0\x0aopen-by-id\x01\x08\x01@\x01\x03urls\0\x
 0-alpha\x05\x15\x01@\0\0\x01\x04\0\x0evariant-func00\x01\x16\x01@\x01\x05inputs\0\
 s\x04\0\x06scream\x01\x17\x01@\x01\x05inputs\x01\0\x04\0\x09say-hello\x01\x18\x01\
 @\0\x01\0\x04\0\x09my-func00\x01\x19\x04\0\x09my-func01\x01\x19\x04\0\x09my-func\
-02\x01\x19\x04\0\x09my-func03\x01\x19\x04\0!component:playground-jco/my-world\x04\
-\0\x0b\x0e\x01\0\x08my-world\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0d\
-wit-component\x070.227.1\x10wit-bindgen-rust\x060.41.0";
+02\x01\x19\x04\0\x09my-func03\x01\x19\x04\03component:googleappsscript-in-rust-e\
+xample/my-world\x04\0\x0b\x0e\x01\0\x08my-world\x03\0\0\0G\x09producers\x01\x0cp\
+rocessed-by\x02\x0dwit-component\x070.227.1\x10wit-bindgen-rust\x060.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {

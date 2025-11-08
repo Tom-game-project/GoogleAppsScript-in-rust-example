@@ -1,4 +1,5 @@
-WASM_SRC = target/wasm32-wasip1/debug/playground_jco.wasm
+# WASM_SRC = target/wasm32-wasip1/debug/GoogleAppsScript-in-rust-example.wasm
+WASM_SRC = target/wasm32-wasip1/release/GoogleAppsScript_in_rust_example.wasm
 
 
 JCO_OUT_DIR = \
@@ -33,7 +34,7 @@ RS_SRCS = \
 
 
 $(WASM_SRC): $(RS_SRCS)
-	cargo component build
+	cargo component build --release
 
 
 # グルーコードの生成

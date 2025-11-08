@@ -1,4 +1,4 @@
-package component:playground-jco;
+package component:googleappsscript-in-rust-example;
 
 world my-world {
 	import wasi:logging/logging@0.1.0-draft;
