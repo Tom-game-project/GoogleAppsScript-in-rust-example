@@ -11,7 +11,9 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "@bytecodealliance/jco": "^1.15.3",
     "@bytecodealliance/preview2-shim": "^0.15.1",
+    "@google/clasp": "^3.1.1",
     "@types/google-apps-script": "^1.0.100"
   },
   "devDependencies": {

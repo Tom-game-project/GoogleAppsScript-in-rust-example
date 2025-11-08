@@ -721,7 +721,6 @@ pub mod gas {
             use super::super::super::_rt;
             pub type GasFile = super::super::super::gas::drive_app::gas_file::GasFile;
             #[allow(unused_unsafe, clippy::all)]
-            /// constructor();
             pub fn get_file_by_id(id: &str) -> Option<GasFile> {
                 unsafe {
                     #[repr(align(4))]
