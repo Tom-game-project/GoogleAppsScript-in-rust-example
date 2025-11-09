@@ -1,10 +1,15 @@
-# WASM_SRC = target/wasm32-wasip1/debug/GoogleAppsScript-in-rust-example.wasm
-WASM_SRC = target/wasm32-wasip1/release/GoogleAppsScript_in_rust_example.wasm
+BUILD ?= debug
 
+ifeq ($(BUILD),release)
+    WASM_SRC := target/wasm32-wasip1/release/GoogleAppsScript_in_rust_example.wasm
+    CARGO_FLAGS := --release
+else
+    WASM_SRC := target/wasm32-wasip1/debug/GoogleAppsScript_in_rust_example.wasm
+    CARGO_FLAGS :=
+endif
 
 JCO_OUT_DIR = \
 	    target/jco
-
 
 JCO_FLAGS = \
 	--base64-cutoff=99999999 \
@@ -32,10 +37,8 @@ RS_SRCS = \
 	src/bindings.rs\
 	src/lib.rs
 
-
 $(WASM_SRC): $(RS_SRCS)
-	cargo component build --release
-
+	cargo component build $(CARGO_FLAGS)
 
 # グルーコードの生成
 $(JCO_OUT_DIR): $(WASM_SRC) $(JS_SHIMS)
@@ -57,18 +60,13 @@ $(JCO_OUT_DIR): $(WASM_SRC) $(JS_SHIMS)
 	# ---
 	cp $(JS_SHIMS) $(JCO_OUT_DIR)
 
-
-# generate grue code based on rust component programs 
-build-grue: $(JCO_OUT_DIR)
-
 # packing
-build-pack: build-grue
+build-pack: $(JCO_OUT_DIR)
+	echo $(WASM_SRC)
 	npx webpack
-
 
 push: build-pack
 	cp ./appsscript.json ./dist
 	npx clasp push
 
-
-.PHONY: build-grue build-pack push
+.PHONY: build-pack push

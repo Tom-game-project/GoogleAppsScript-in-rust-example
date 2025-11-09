@@ -27,8 +27,10 @@ cat << EOF > .clasp.json
 }
 EOF
 
+# Compile
+make BUILD=release build-pack
 # Compile the project and push 
-make push
+make BUILD=release push
 ```
 
 ## Project Structure
@@ -57,4 +59,4 @@ This project is an example using Rust. However, jco supports other languages. Pl
 
 ## License
 
-MIT
+[MIT](./LICENSE)
