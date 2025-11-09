@@ -19,8 +19,8 @@ world my-world {
 
 	export scream: func(input: string) -> string;
 	export say-hello: func(input: string);
-	export my-func00: func();
-	export my-func01: func();
-	export my-func02: func();
-	export my-func03: func();
+	export resource-example: func();
+	export helloworld-example: func();
+	export get-script-properties-example: func();
+	export spreadsheet-example: func();
 }

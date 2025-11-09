@@ -85,36 +85,36 @@ pub unsafe fn _export_say_hello_cabi<T: Guest>(arg0: *mut u8, arg1: usize) {
 }
 #[doc(hidden)]
 #[allow(non_snake_case)]
-pub unsafe fn _export_my_func00_cabi<T: Guest>() {
+pub unsafe fn _export_resource_example_cabi<T: Guest>() {
     #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
-    T::my_func00();
+    T::resource_example();
 }
 #[doc(hidden)]
 #[allow(non_snake_case)]
-pub unsafe fn _export_my_func01_cabi<T: Guest>() {
+pub unsafe fn _export_helloworld_example_cabi<T: Guest>() {
     #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
-    T::my_func01();
+    T::helloworld_example();
 }
 #[doc(hidden)]
 #[allow(non_snake_case)]
-pub unsafe fn _export_my_func02_cabi<T: Guest>() {
+pub unsafe fn _export_get_script_properties_example_cabi<T: Guest>() {
     #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
-    T::my_func02();
+    T::get_script_properties_example();
 }
 #[doc(hidden)]
 #[allow(non_snake_case)]
-pub unsafe fn _export_my_func03_cabi<T: Guest>() {
+pub unsafe fn _export_spreadsheet_example_cabi<T: Guest>() {
     #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
-    T::my_func03();
+    T::spreadsheet_example();
 }
 pub trait Guest {
     fn variant_func00() -> CellValue;
     fn scream(input: _rt::String) -> _rt::String;
     fn say_hello(input: _rt::String) -> ();
-    fn my_func00() -> ();
-    fn my_func01() -> ();
-    fn my_func02() -> ();
-    fn my_func03() -> ();
+    fn resource_example() -> ();
+    fn helloworld_example() -> ();
+    fn get_script_properties_example() -> ();
+    fn spreadsheet_example() -> ();
 }
 #[doc(hidden)]
 macro_rules! __export_world_my_world_cabi {
@@ -132,14 +132,16 @@ macro_rules! __export_world_my_world_cabi {
         __post_return_scream::<$ty > (arg0) } } #[unsafe (export_name = "say-hello")]
         unsafe extern "C" fn export_say_hello(arg0 : * mut u8, arg1 : usize,) { unsafe {
         $($path_to_types)*:: _export_say_hello_cabi::<$ty > (arg0, arg1) } } #[unsafe
-        (export_name = "my-func00")] unsafe extern "C" fn export_my_func00() { unsafe {
-        $($path_to_types)*:: _export_my_func00_cabi::<$ty > () } } #[unsafe (export_name
-        = "my-func01")] unsafe extern "C" fn export_my_func01() { unsafe {
-        $($path_to_types)*:: _export_my_func01_cabi::<$ty > () } } #[unsafe (export_name
-        = "my-func02")] unsafe extern "C" fn export_my_func02() { unsafe {
-        $($path_to_types)*:: _export_my_func02_cabi::<$ty > () } } #[unsafe (export_name
-        = "my-func03")] unsafe extern "C" fn export_my_func03() { unsafe {
-        $($path_to_types)*:: _export_my_func03_cabi::<$ty > () } } };
+        (export_name = "resource-example")] unsafe extern "C" fn
+        export_resource_example() { unsafe { $($path_to_types)*::
+        _export_resource_example_cabi::<$ty > () } } #[unsafe (export_name =
+        "helloworld-example")] unsafe extern "C" fn export_helloworld_example() { unsafe
+        { $($path_to_types)*:: _export_helloworld_example_cabi::<$ty > () } } #[unsafe
+        (export_name = "get-script-properties-example")] unsafe extern "C" fn
+        export_get_script_properties_example() { unsafe { $($path_to_types)*::
+        _export_get_script_properties_example_cabi::<$ty > () } } #[unsafe (export_name =
+        "spreadsheet-example")] unsafe extern "C" fn export_spreadsheet_example() {
+        unsafe { $($path_to_types)*:: _export_spreadsheet_example_cabi::<$ty > () } } };
     };
 }
 #[doc(hidden)]
@@ -2097,8 +2099,8 @@ pub(crate) use __export_my_world_impl as export;
 )]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 2964] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\x95\x16\x01A\x02\x01\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 3010] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xc3\x16\x01A\x02\x01\
 A.\x01q\x02\x05empty\0\0\x0cstring-value\x01s\0\x03\0\x0acell-value\x03\0\0\x01B\
 \x04\x01m\x06\x05trace\x05debug\x04info\x04warn\x05error\x08critical\x04\0\x05le\
 vel\x03\0\0\x01@\x03\x05level\x01\x07contexts\x07messages\x01\0\x04\0\x03log\x01\
@@ -2156,10 +2158,11 @@ n\x01\x07\x01@\x01\x02ids\0\x06\x04\0\x0aopen-by-id\x01\x08\x01@\x01\x03urls\0\x
 \x04\0\x0bopen-by-url\x01\x09\x03\03gas:spreadsheet-app/gas-spreadsheet-app@0.1.\
 0-alpha\x05\x15\x01@\0\0\x01\x04\0\x0evariant-func00\x01\x16\x01@\x01\x05inputs\0\
 s\x04\0\x06scream\x01\x17\x01@\x01\x05inputs\x01\0\x04\0\x09say-hello\x01\x18\x01\
-@\0\x01\0\x04\0\x09my-func00\x01\x19\x04\0\x09my-func01\x01\x19\x04\0\x09my-func\
-02\x01\x19\x04\0\x09my-func03\x01\x19\x04\03component:googleappsscript-in-rust-e\
-xample/my-world\x04\0\x0b\x0e\x01\0\x08my-world\x03\0\0\0G\x09producers\x01\x0cp\
-rocessed-by\x02\x0dwit-component\x070.227.1\x10wit-bindgen-rust\x060.41.0";
+@\0\x01\0\x04\0\x10resource-example\x01\x19\x04\0\x12helloworld-example\x01\x19\x04\
+\0\x1dget-script-properties-example\x01\x19\x04\0\x13spreadsheet-example\x01\x19\
+\x04\03component:googleappsscript-in-rust-example/my-world\x04\0\x0b\x0e\x01\0\x08\
+my-world\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.2\
+27.1\x10wit-bindgen-rust\x060.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {

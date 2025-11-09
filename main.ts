@@ -2,10 +2,10 @@ import {
 	$init,
        	scream, 
 	sayHello,
-       	myFunc00,
-       	myFunc01,
-       	myFunc02,
-       	myFunc03,
+       	resourceExample,
+       	helloworldExample,
+        getScriptPropertiesExample,
+       	spreadsheetExample,
 	variantFunc00,
 } from "./target/jco/GoogleAppsScript_in_rust_example.js";
 import "./textencoderdecoder"
@@ -19,27 +19,27 @@ global.aaa = function() {
 	});
 }
 
-global.bbb = function () {
+global.resource_example= function () {
 	$init.then(() => {
-		myFunc00();
+		resourceExample();
 	});
 }
 
-global.ccc = function () {
+global.helloworldExample = function () {
 	$init.then(() => {
-		myFunc01();
+		helloworldExample();
 	});
 }
 
-global.ddd = function () {
+global.get_script_properties_example = function () {
 	$init.then(() => {
-		myFunc02();
+		getScriptPropertiesExample();
 	});
 }
 
-global.eee = function () {
+global.spreadsheet_example = function () {
 	$init.then(() => {
-		myFunc03();
+		spreadsheetExample();
 	});
 }
 

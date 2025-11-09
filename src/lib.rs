@@ -25,7 +25,7 @@ impl Guest for Component {
         logger::log(&logger::get_log());
     }
 
-    fn my_func00()
+    fn resource_example()
     {
         let a = example_resource::ExampleList::new();
         a 
@@ -34,12 +34,12 @@ impl Guest for Component {
         logger::log(&format!("hello world {}", a.to_string()));
     }
 
-    fn my_func01()
+    fn helloworld_example()
     {
         logger::log("hello world");
     }
 
-    fn my_func02()
+    fn get_script_properties_example()
     {
         let key = "FILE_ID";
 
@@ -49,10 +49,6 @@ impl Guest for Component {
                 .get_property(key)
         {
             logger::log(&format!("key - {} : value - {}", key, value));
-
-            //let a = GasDriveApp::new();
-            //GasDriveApp::
-
             logger::log(&format!("storage used: {}", drive_app::gas_drive_app::get_storage_used()));
 
             let file = drive_app::gas_drive_app::get_file_by_id(&value)
@@ -76,7 +72,7 @@ impl Guest for Component {
         }
     }
 
-    fn my_func03()
+    fn spreadsheet_example()
     {
         let key = "SPREADSHEET_ID";
         if let Some(value) = 
