@@ -2,6 +2,7 @@ import {
 	$init,
        	scream, 
 	sayHello,
+	handleHttpReq,
        	resourceExample,
        	helloworldExample,
         getScriptPropertiesExample,
@@ -12,39 +13,38 @@ import "./textencoderdecoder"
 
 declare const global: any;
 
+global.doGet = function(e) {
+	let r = handleHttpReq();
+	Logger.log(`arg ${e.parameter}`);
+	Logger.log(`text ${r}`);
+	return ContentService.createTextOutput(r);
+}
+
+global.doPost = function(e) {
+
+}
+
 global.aaa = function() {
-	$init.then(() => {
-		let msg = scream("hello world");
-		sayHello(msg);
-	});
+	let msg = scream("hello world");
+	sayHello(msg);
 }
 
 global.resource_example= function () {
-	$init.then(() => {
-		resourceExample();
-	});
+	resourceExample();
 }
 
 global.helloworldExample = function () {
-	$init.then(() => {
-		helloworldExample();
-	});
+	helloworldExample();
 }
 
 global.get_script_properties_example = function () {
-	$init.then(() => {
-		getScriptPropertiesExample();
-	});
+	getScriptPropertiesExample();
 }
 
 global.spreadsheet_example = function () {
-	$init.then(() => {
-		spreadsheetExample();
-	});
+	spreadsheetExample();
 }
 
 global.fff = function () {
-	$init.then(() => {
-		console.log(variantFunc00());
-	});
+	console.log(variantFunc00());
 }

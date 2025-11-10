@@ -29,7 +29,9 @@ JS_SHIMS = \
 	js/gas-spreadsheetapp.js \
 	js/gas-spreadsheetapp-range.js \
 	js/gas-spreadsheetapp-sheet.js \
-	js/gas-spreadsheetapp-spreadsheet.js
+	js/gas-spreadsheetapp-spreadsheet.js \
+	js/gas-content-service.js \
+	js/gas-content-service-text-output.js 
 
 
 # guest impls
@@ -56,7 +58,9 @@ $(JCO_OUT_DIR): $(WASM_SRC) $(JS_SHIMS)
 	--map 'gas:spreadsheet-app/gas-spreadsheet-app=./gas-spreadsheetapp.js' \
 	--map 'gas:spreadsheet-app/gas-spreadsheet=./gas-spreadsheetapp-spreadsheet.js' \
 	--map 'gas:spreadsheet-app/gas-range=./gas-spreadsheetapp-range.js' \
-	--map 'gas:spreadsheet-app/gas-sheet=./gas-spreadsheetapp-sheet.js'
+	--map 'gas:spreadsheet-app/gas-sheet=./gas-spreadsheetapp-sheet.js' \
+	--map 'gas:content-service/gas-content-service=./gas-content-service.js' \
+	--map 'gas:content-service/gas-text-output=./gas-content-service-text-output.js'
 	# ---
 	cp $(JS_SHIMS) $(JCO_OUT_DIR)
 

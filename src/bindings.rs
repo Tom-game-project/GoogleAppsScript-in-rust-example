@@ -18,6 +18,27 @@ impl ::core::fmt::Debug for CellValue {
 }
 #[doc(hidden)]
 #[allow(non_snake_case)]
+pub unsafe fn _export_handle_http_req_cabi<T: Guest>() -> *mut u8 {
+    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+    let result0 = T::handle_http_req();
+    let ptr1 = (&raw mut _RET_AREA.0).cast::<u8>();
+    let vec2 = (result0.into_bytes()).into_boxed_slice();
+    let ptr2 = vec2.as_ptr().cast::<u8>();
+    let len2 = vec2.len();
+    ::core::mem::forget(vec2);
+    *ptr1.add(::core::mem::size_of::<*const u8>()).cast::<usize>() = len2;
+    *ptr1.add(0).cast::<*mut u8>() = ptr2.cast_mut();
+    ptr1
+}
+#[doc(hidden)]
+#[allow(non_snake_case)]
+pub unsafe fn __post_return_handle_http_req<T: Guest>(arg0: *mut u8) {
+    let l0 = *arg0.add(0).cast::<*mut u8>();
+    let l1 = *arg0.add(::core::mem::size_of::<*const u8>()).cast::<usize>();
+    _rt::cabi_dealloc(l0, l1, 1);
+}
+#[doc(hidden)]
+#[allow(non_snake_case)]
 pub unsafe fn _export_variant_func00_cabi<T: Guest>() -> *mut u8 {
     #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
     let result0 = T::variant_func00();
@@ -108,6 +129,9 @@ pub unsafe fn _export_spreadsheet_example_cabi<T: Guest>() {
     T::spreadsheet_example();
 }
 pub trait Guest {
+    /// web
+    fn handle_http_req() -> _rt::String;
+    /// handle_http_req: func(data: string) -> string;
     fn variant_func00() -> CellValue;
     fn scream(input: _rt::String) -> _rt::String;
     fn say_hello(input: _rt::String) -> ();
@@ -119,10 +143,15 @@ pub trait Guest {
 #[doc(hidden)]
 macro_rules! __export_world_my_world_cabi {
     ($ty:ident with_types_in $($path_to_types:tt)*) => {
-        const _ : () = { #[unsafe (export_name = "variant-func00")] unsafe extern "C" fn
-        export_variant_func00() -> * mut u8 { unsafe { $($path_to_types)*::
-        _export_variant_func00_cabi::<$ty > () } } #[unsafe (export_name =
-        "cabi_post_variant-func00")] unsafe extern "C" fn
+        const _ : () = { #[unsafe (export_name = "handle-http-req")] unsafe extern "C" fn
+        export_handle_http_req() -> * mut u8 { unsafe { $($path_to_types)*::
+        _export_handle_http_req_cabi::<$ty > () } } #[unsafe (export_name =
+        "cabi_post_handle-http-req")] unsafe extern "C" fn
+        _post_return_handle_http_req(arg0 : * mut u8,) { unsafe { $($path_to_types)*::
+        __post_return_handle_http_req::<$ty > (arg0) } } #[unsafe (export_name =
+        "variant-func00")] unsafe extern "C" fn export_variant_func00() -> * mut u8 {
+        unsafe { $($path_to_types)*:: _export_variant_func00_cabi::<$ty > () } } #[unsafe
+        (export_name = "cabi_post_variant-func00")] unsafe extern "C" fn
         _post_return_variant_func00(arg0 : * mut u8,) { unsafe { $($path_to_types)*::
         __post_return_variant_func00::<$ty > (arg0) } } #[unsafe (export_name =
         "scream")] unsafe extern "C" fn export_scream(arg0 : * mut u8, arg1 : usize,) ->
@@ -300,6 +329,159 @@ pub mod example {
 #[rustfmt::skip]
 #[allow(dead_code, clippy::all)]
 pub mod gas {
+    pub mod content_service {
+        #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
+        pub mod gas_text_output {
+            #[used]
+            #[doc(hidden)]
+            static __FORCE_SECTION_REF: fn() = super::super::super::__link_custom_section_describing_imports;
+            use super::super::super::_rt;
+            #[derive(Debug)]
+            #[repr(transparent)]
+            pub struct GasTextOutput {
+                handle: _rt::Resource<GasTextOutput>,
+            }
+            impl GasTextOutput {
+                #[doc(hidden)]
+                pub unsafe fn from_handle(handle: u32) -> Self {
+                    Self {
+                        handle: unsafe { _rt::Resource::from_handle(handle) },
+                    }
+                }
+                #[doc(hidden)]
+                pub fn take_handle(&self) -> u32 {
+                    _rt::Resource::take_handle(&self.handle)
+                }
+                #[doc(hidden)]
+                pub fn handle(&self) -> u32 {
+                    _rt::Resource::handle(&self.handle)
+                }
+            }
+            unsafe impl _rt::WasmResource for GasTextOutput {
+                #[inline]
+                unsafe fn drop(_handle: u32) {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unreachable!();
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        #[link(
+                            wasm_import_module = "gas:content-service/gas-text-output@0.1.0-alpha"
+                        )]
+                        unsafe extern "C" {
+                            #[link_name = "[resource-drop]gas-text-output"]
+                            fn drop(_: u32);
+                        }
+                        unsafe { drop(_handle) };
+                    }
+                }
+            }
+            impl GasTextOutput {
+                #[allow(unused_unsafe, clippy::all)]
+                pub fn new() -> Self {
+                    unsafe {
+                        #[cfg(target_arch = "wasm32")]
+                        #[link(
+                            wasm_import_module = "gas:content-service/gas-text-output@0.1.0-alpha"
+                        )]
+                        unsafe extern "C" {
+                            #[link_name = "[constructor]gas-text-output"]
+                            fn wit_import0() -> i32;
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        unsafe extern "C" fn wit_import0() -> i32 {
+                            unreachable!()
+                        }
+                        let ret = unsafe { wit_import0() };
+                        unsafe { GasTextOutput::from_handle(ret as u32) }
+                    }
+                }
+            }
+            impl GasTextOutput {
+                #[allow(unused_unsafe, clippy::all)]
+                pub fn append(&self, added_content: &str) -> GasTextOutput {
+                    unsafe {
+                        let vec0 = added_content;
+                        let ptr0 = vec0.as_ptr().cast::<u8>();
+                        let len0 = vec0.len();
+                        #[cfg(target_arch = "wasm32")]
+                        #[link(
+                            wasm_import_module = "gas:content-service/gas-text-output@0.1.0-alpha"
+                        )]
+                        unsafe extern "C" {
+                            #[link_name = "[method]gas-text-output.append"]
+                            fn wit_import1(_: i32, _: *mut u8, _: usize) -> i32;
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        unsafe extern "C" fn wit_import1(
+                            _: i32,
+                            _: *mut u8,
+                            _: usize,
+                        ) -> i32 {
+                            unreachable!()
+                        }
+                        let ret = unsafe {
+                            wit_import1((self).handle() as i32, ptr0.cast_mut(), len0)
+                        };
+                        unsafe { GasTextOutput::from_handle(ret as u32) }
+                    }
+                }
+            }
+            impl GasTextOutput {
+                #[allow(unused_unsafe, clippy::all)]
+                pub fn clear(&self) -> GasTextOutput {
+                    unsafe {
+                        #[cfg(target_arch = "wasm32")]
+                        #[link(
+                            wasm_import_module = "gas:content-service/gas-text-output@0.1.0-alpha"
+                        )]
+                        unsafe extern "C" {
+                            #[link_name = "[method]gas-text-output.clear"]
+                            fn wit_import0(_: i32) -> i32;
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        unsafe extern "C" fn wit_import0(_: i32) -> i32 {
+                            unreachable!()
+                        }
+                        let ret = unsafe { wit_import0((self).handle() as i32) };
+                        unsafe { GasTextOutput::from_handle(ret as u32) }
+                    }
+                }
+            }
+        }
+        #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
+        pub mod gas_content_service {
+            #[used]
+            #[doc(hidden)]
+            static __FORCE_SECTION_REF: fn() = super::super::super::__link_custom_section_describing_imports;
+            pub type GasTextOutput = super::super::super::gas::content_service::gas_text_output::GasTextOutput;
+            #[allow(unused_unsafe, clippy::all)]
+            pub fn create_text_output(content: &str) -> GasTextOutput {
+                unsafe {
+                    let vec0 = content;
+                    let ptr0 = vec0.as_ptr().cast::<u8>();
+                    let len0 = vec0.len();
+                    #[cfg(target_arch = "wasm32")]
+                    #[link(
+                        wasm_import_module = "gas:content-service/gas-content-service@0.1.0-alpha"
+                    )]
+                    unsafe extern "C" {
+                        #[link_name = "create-text-output"]
+                        fn wit_import1(_: *mut u8, _: usize) -> i32;
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unsafe extern "C" fn wit_import1(_: *mut u8, _: usize) -> i32 {
+                        unreachable!()
+                    }
+                    let ret = unsafe { wit_import1(ptr0.cast_mut(), len0) };
+                    unsafe {
+                        super::super::super::gas::content_service::gas_text_output::GasTextOutput::from_handle(
+                            ret as u32,
+                        )
+                    }
+                }
+            }
+        }
+    }
     pub mod drive_app {
         #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
         pub mod gas_blob {
@@ -2099,9 +2281,9 @@ pub(crate) use __export_my_world_impl as export;
 )]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 3010] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xc3\x16\x01A\x02\x01\
-A.\x01q\x02\x05empty\0\0\x0cstring-value\x01s\0\x03\0\x0acell-value\x03\0\0\x01B\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 3405] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xce\x19\x01A\x02\x01\
+A5\x01q\x02\x05empty\0\0\x0cstring-value\x01s\0\x03\0\x0acell-value\x03\0\0\x01B\
 \x04\x01m\x06\x05trace\x05debug\x04info\x04warn\x05error\x08critical\x04\0\x05le\
 vel\x03\0\0\x01@\x03\x05level\x01\x07contexts\x07messages\x01\0\x04\0\x03log\x01\
 \x02\x03\0\x20wasi:logging/logging@0.1.0-draft\x05\x02\x01B\x09\x04\0\x0cexample\
@@ -2156,13 +2338,21 @@ as-spreadsheet.get-sheet-by-id\x01\x09\x01@\x02\x04self\x05\x04names\0\x08\x04\0
 eet\x03\0\x02\x01i\x01\x01i\x03\x01k\x05\x01@\x01\x04file\x04\0\x06\x04\0\x04ope\
 n\x01\x07\x01@\x01\x02ids\0\x06\x04\0\x0aopen-by-id\x01\x08\x01@\x01\x03urls\0\x06\
 \x04\0\x0bopen-by-url\x01\x09\x03\03gas:spreadsheet-app/gas-spreadsheet-app@0.1.\
-0-alpha\x05\x15\x01@\0\0\x01\x04\0\x0evariant-func00\x01\x16\x01@\x01\x05inputs\0\
-s\x04\0\x06scream\x01\x17\x01@\x01\x05inputs\x01\0\x04\0\x09say-hello\x01\x18\x01\
-@\0\x01\0\x04\0\x10resource-example\x01\x19\x04\0\x12helloworld-example\x01\x19\x04\
-\0\x1dget-script-properties-example\x01\x19\x04\0\x13spreadsheet-example\x01\x19\
-\x04\03component:googleappsscript-in-rust-example/my-world\x04\0\x0b\x0e\x01\0\x08\
-my-world\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.2\
-27.1\x10wit-bindgen-rust\x060.41.0";
+0-alpha\x05\x15\x01B\x09\x04\0\x0fgas-text-output\x03\x01\x01i\0\x01@\0\0\x01\x04\
+\0\x1c[constructor]gas-text-output\x01\x02\x01h\0\x01@\x02\x04self\x03\x0dadded-\
+contents\0\x01\x04\0\x1e[method]gas-text-output.append\x01\x04\x01@\x01\x04self\x03\
+\0\x01\x04\0\x1d[method]gas-text-output.clear\x01\x05\x03\0/gas:content-service/\
+gas-text-output@0.1.0-alpha\x05\x16\x02\x03\0\x0d\x0fgas-text-output\x01B\x05\x02\
+\x03\x02\x01\x17\x04\0\x0fgas-text-output\x03\0\0\x01i\x01\x01@\x01\x07contents\0\
+\x02\x04\0\x12create-text-output\x01\x03\x03\03gas:content-service/gas-content-s\
+ervice@0.1.0-alpha\x05\x18\x01@\0\0s\x04\0\x0fhandle-http-req\x01\x19\x01@\0\0\x01\
+\x04\0\x0evariant-func00\x01\x1a\x01@\x01\x05inputs\0s\x04\0\x06scream\x01\x1b\x01\
+@\x01\x05inputs\x01\0\x04\0\x09say-hello\x01\x1c\x01@\0\x01\0\x04\0\x10resource-\
+example\x01\x1d\x04\0\x12helloworld-example\x01\x1d\x04\0\x1dget-script-properti\
+es-example\x01\x1d\x04\0\x13spreadsheet-example\x01\x1d\x04\03component:googleap\
+psscript-in-rust-example/my-world\x04\0\x0b\x0e\x01\0\x08my-world\x03\0\0\0G\x09\
+producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.227.1\x10wit-bindgen-rus\
+t\x060.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {

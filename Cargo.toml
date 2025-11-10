@@ -12,6 +12,10 @@ wit-bindgen = { version = "0.18.0", default-features = false, features = [
 
 wit-bindgen-rt = { version = "0.43.0", features = ["bitflags"] }
 
+# for doGet, doPost 
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 
 [lib]
 crate-type = ["cdylib"]
@@ -30,3 +34,4 @@ package = "component:googleappsscript-in-rust-example"
 "gas:drive-app" = { path = "./wit/deps/google-apps-script-driveapp-0.1.0-alpha"}
 "gas:property" = { path = "./wit/deps/google-apps-script-property-0.1.0-alpha"}
 "gas:spreadsheet-app" = { path = "./wit/deps/google-apps-script-spreadsheetapp-0.1.0-alpha" }
+"gas:content-service" = { path = "./wit/deps/google-apps-script-contentservice-0.1.0-alpha" }

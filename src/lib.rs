@@ -1,4 +1,5 @@
 mod bindings;
+mod args;
 
 use bindings::example::resouceex::example_resource;
 use bindings::gas::drive_app;
@@ -6,12 +7,18 @@ use bindings::gas::logger::*;
 use bindings::gas::property::*;
 use bindings::gas::spreadsheet_app;
 use bindings::gas::spreadsheet_app::gas_range;
+use bindings::gas::content_service::gas_content_service;
+
 use bindings::Guest;
 
 struct Component;
 
 // Guestトレイトが、ホストに公開する関数
 impl Guest for Component {
+    fn handle_http_req(data: String) -> String {
+        return "hello world This is Tom".to_string();
+    }
+
     fn scream(input: String) -> String {
         let mut s = input.to_uppercase();
         s.push_str("!!1!");
@@ -79,10 +86,11 @@ impl Guest for Component {
             properties_service::get_script_properties().get_property(key)
         {
             if let Some(spreadsheet) = spreadsheet_app::gas_spreadsheet_app::open_by_id(&value) {
-                logger::log(&format!("sheet id {}", spreadsheet.get_id()));
+                logger::log(&format!("spreadsheet opened! spreadsheet id:{}", value));
                 let sheet_name = "sheet1";
                 if let Some (sheet) =spreadsheet.get_sheet_by_name(sheet_name)
                 {
+                    logger::log(&format!("sheet opened!"));
                     for i in sheet.get_data_range().get_values()
                     {
                         for j in i
@@ -99,6 +107,9 @@ impl Guest for Component {
                                 }
                                 gas_range::CellValue::BooleanValue(b) => {
                                     logger::log(&format!("boolean {:?}", b));
+                                }
+                                gas_range::CellValue::DateValue(d) => {
+                                    logger::log(&format!("date {:?}", d));
                                 }
                                 _ => {
                                     logger::log("otherwise");

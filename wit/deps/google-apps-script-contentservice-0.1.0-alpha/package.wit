@@ -1,0 +1,20 @@
+package gas:content-service@0.1.0-alpha;
+
+
+interface gas-text-output {
+	resource gas-text-output {
+		constructor();
+		append: func(added-content: string) -> gas-text-output;
+		clear: func() -> gas-text-output;
+	}
+}
+
+interface gas-content-service {
+	use gas-text-output.{gas-text-output};
+	create-text-output: func(content:string) -> gas-text-output;
+}
+
+world imports {
+	import gas-text-output;
+	import gas-content-service;
+}
