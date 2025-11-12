@@ -13,14 +13,41 @@ import "./textencoderdecoder"
 
 declare const global: any;
 
-global.doGet = function(e) {
-	let r = handleHttpReq();
-	Logger.log(`arg ${e.parameter}`);
-	Logger.log(`text ${r}`);
+global.doGet = function(e :any) {
+	Logger.log("hello world");
+	let r = handleHttpReq(JSON.stringify(e));
 	return ContentService.createTextOutput(r);
 }
 
-global.doPost = function(e) {
+global.do_get_test00 = function() {
+	let a = `
+            {
+               "parameter": {
+                 "name": "tom",
+                 "msg": "hello",
+                 "age": "21"
+               },
+               "contextPath": "",
+               "contentLength": -1,
+               "parameters": {
+                 "msg": [
+                   "hello"
+                 ],
+                 "age": [
+                   "21"
+                 ],
+                 "name": [
+                   "tom"
+                 ]
+               },
+               "queryString": "name=tom&age=21&msg=hello"
+             }
+	`	
+	let r = handleHttpReq(a);
+	Logger.log(r);
+}
+
+global.doPost = function(e: any) {
 
 }
 

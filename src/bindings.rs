@@ -18,17 +18,22 @@ impl ::core::fmt::Debug for CellValue {
 }
 #[doc(hidden)]
 #[allow(non_snake_case)]
-pub unsafe fn _export_handle_http_req_cabi<T: Guest>() -> *mut u8 {
+pub unsafe fn _export_handle_http_req_cabi<T: Guest>(
+    arg0: *mut u8,
+    arg1: usize,
+) -> *mut u8 {
     #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
-    let result0 = T::handle_http_req();
-    let ptr1 = (&raw mut _RET_AREA.0).cast::<u8>();
-    let vec2 = (result0.into_bytes()).into_boxed_slice();
-    let ptr2 = vec2.as_ptr().cast::<u8>();
-    let len2 = vec2.len();
-    ::core::mem::forget(vec2);
-    *ptr1.add(::core::mem::size_of::<*const u8>()).cast::<usize>() = len2;
-    *ptr1.add(0).cast::<*mut u8>() = ptr2.cast_mut();
-    ptr1
+    let len0 = arg1;
+    let bytes0 = _rt::Vec::from_raw_parts(arg0.cast(), len0, len0);
+    let result1 = T::handle_http_req(_rt::string_lift(bytes0));
+    let ptr2 = (&raw mut _RET_AREA.0).cast::<u8>();
+    let vec3 = (result1.into_bytes()).into_boxed_slice();
+    let ptr3 = vec3.as_ptr().cast::<u8>();
+    let len3 = vec3.len();
+    ::core::mem::forget(vec3);
+    *ptr2.add(::core::mem::size_of::<*const u8>()).cast::<usize>() = len3;
+    *ptr2.add(0).cast::<*mut u8>() = ptr3.cast_mut();
+    ptr2
 }
 #[doc(hidden)]
 #[allow(non_snake_case)]
@@ -130,7 +135,7 @@ pub unsafe fn _export_spreadsheet_example_cabi<T: Guest>() {
 }
 pub trait Guest {
     /// web
-    fn handle_http_req() -> _rt::String;
+    fn handle_http_req(data: _rt::String) -> _rt::String;
     /// handle_http_req: func(data: string) -> string;
     fn variant_func00() -> CellValue;
     fn scream(input: _rt::String) -> _rt::String;
@@ -144,9 +149,9 @@ pub trait Guest {
 macro_rules! __export_world_my_world_cabi {
     ($ty:ident with_types_in $($path_to_types:tt)*) => {
         const _ : () = { #[unsafe (export_name = "handle-http-req")] unsafe extern "C" fn
-        export_handle_http_req() -> * mut u8 { unsafe { $($path_to_types)*::
-        _export_handle_http_req_cabi::<$ty > () } } #[unsafe (export_name =
-        "cabi_post_handle-http-req")] unsafe extern "C" fn
+        export_handle_http_req(arg0 : * mut u8, arg1 : usize,) -> * mut u8 { unsafe {
+        $($path_to_types)*:: _export_handle_http_req_cabi::<$ty > (arg0, arg1) } }
+        #[unsafe (export_name = "cabi_post_handle-http-req")] unsafe extern "C" fn
         _post_return_handle_http_req(arg0 : * mut u8,) { unsafe { $($path_to_types)*::
         __post_return_handle_http_req::<$ty > (arg0) } } #[unsafe (export_name =
         "variant-func00")] unsafe extern "C" fn export_variant_func00() -> * mut u8 {
@@ -1042,6 +1047,67 @@ pub mod gas {
                     let len4 = l3;
                     let bytes4 = _rt::Vec::from_raw_parts(l2.cast(), len4, len4);
                     let result5 = _rt::string_lift(bytes4);
+                    result5
+                }
+            }
+        }
+    }
+    pub mod math {
+        #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
+        pub mod gas_math {
+            #[used]
+            #[doc(hidden)]
+            static __FORCE_SECTION_REF: fn() = super::super::super::__link_custom_section_describing_imports;
+            use super::super::super::_rt;
+            #[allow(unused_unsafe, clippy::all)]
+            pub fn random() -> f64 {
+                unsafe {
+                    #[cfg(target_arch = "wasm32")]
+                    #[link(wasm_import_module = "gas:math/gas-math@0.1.0-alpha")]
+                    unsafe extern "C" {
+                        #[link_name = "random"]
+                        fn wit_import0() -> f64;
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unsafe extern "C" fn wit_import0() -> f64 {
+                        unreachable!()
+                    }
+                    let ret = unsafe { wit_import0() };
+                    ret
+                }
+            }
+            #[allow(unused_unsafe, clippy::all)]
+            pub fn get_random_bytes(len: u64) -> _rt::Vec<u8> {
+                unsafe {
+                    #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
+                    #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
+                    struct RetArea(
+                        [::core::mem::MaybeUninit<
+                            u8,
+                        >; 2 * ::core::mem::size_of::<*const u8>()],
+                    );
+                    let mut ret_area = RetArea(
+                        [::core::mem::MaybeUninit::uninit(); 2
+                            * ::core::mem::size_of::<*const u8>()],
+                    );
+                    let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
+                    #[cfg(target_arch = "wasm32")]
+                    #[link(wasm_import_module = "gas:math/gas-math@0.1.0-alpha")]
+                    unsafe extern "C" {
+                        #[link_name = "get-random-bytes"]
+                        fn wit_import1(_: i64, _: *mut u8);
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unsafe extern "C" fn wit_import1(_: i64, _: *mut u8) {
+                        unreachable!()
+                    }
+                    unsafe { wit_import1(_rt::as_i64(&len), ptr0) };
+                    let l2 = *ptr0.add(0).cast::<*mut u8>();
+                    let l3 = *ptr0
+                        .add(::core::mem::size_of::<*const u8>())
+                        .cast::<usize>();
+                    let len4 = l3;
+                    let result5 = _rt::Vec::from_raw_parts(l2.cast(), len4, len4);
                     result5
                 }
             }
@@ -2239,6 +2305,29 @@ mod _rt {
             val != 0
         }
     }
+    pub fn as_i64<T: AsI64>(t: T) -> i64 {
+        t.as_i64()
+    }
+    pub trait AsI64 {
+        fn as_i64(self) -> i64;
+    }
+    impl<'a, T: Copy + AsI64> AsI64 for &'a T {
+        fn as_i64(self) -> i64 {
+            (*self).as_i64()
+        }
+    }
+    impl AsI64 for i64 {
+        #[inline]
+        fn as_i64(self) -> i64 {
+            self as i64
+        }
+    }
+    impl AsI64 for u64 {
+        #[inline]
+        fn as_i64(self) -> i64 {
+            self as i64
+        }
+    }
     #[cfg(target_arch = "wasm32")]
     pub fn run_ctors_once() {
         wit_bindgen_rt::run_ctors_once();
@@ -2281,9 +2370,9 @@ pub(crate) use __export_my_world_impl as export;
 )]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 3405] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xce\x19\x01A\x02\x01\
-A5\x01q\x02\x05empty\0\0\x0cstring-value\x01s\0\x03\0\x0acell-value\x03\0\0\x01B\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 3498] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xab\x1a\x01A\x02\x01\
+A7\x01q\x02\x05empty\0\0\x0cstring-value\x01s\0\x03\0\x0acell-value\x03\0\0\x01B\
 \x04\x01m\x06\x05trace\x05debug\x04info\x04warn\x05error\x08critical\x04\0\x05le\
 vel\x03\0\0\x01@\x03\x05level\x01\x07contexts\x07messages\x01\0\x04\0\x03log\x01\
 \x02\x03\0\x20wasi:logging/logging@0.1.0-draft\x05\x02\x01B\x09\x04\0\x0cexample\
@@ -2345,11 +2434,13 @@ contents\0\x01\x04\0\x1e[method]gas-text-output.append\x01\x04\x01@\x01\x04self\
 gas-text-output@0.1.0-alpha\x05\x16\x02\x03\0\x0d\x0fgas-text-output\x01B\x05\x02\
 \x03\x02\x01\x17\x04\0\x0fgas-text-output\x03\0\0\x01i\x01\x01@\x01\x07contents\0\
 \x02\x04\0\x12create-text-output\x01\x03\x03\03gas:content-service/gas-content-s\
-ervice@0.1.0-alpha\x05\x18\x01@\0\0s\x04\0\x0fhandle-http-req\x01\x19\x01@\0\0\x01\
-\x04\0\x0evariant-func00\x01\x1a\x01@\x01\x05inputs\0s\x04\0\x06scream\x01\x1b\x01\
-@\x01\x05inputs\x01\0\x04\0\x09say-hello\x01\x1c\x01@\0\x01\0\x04\0\x10resource-\
-example\x01\x1d\x04\0\x12helloworld-example\x01\x1d\x04\0\x1dget-script-properti\
-es-example\x01\x1d\x04\0\x13spreadsheet-example\x01\x1d\x04\03component:googleap\
+ervice@0.1.0-alpha\x05\x18\x01B\x05\x01@\0\0u\x04\0\x06random\x01\0\x01p}\x01@\x01\
+\x03lenw\0\x01\x04\0\x10get-random-bytes\x01\x02\x03\0\x1dgas:math/gas-math@0.1.\
+0-alpha\x05\x19\x01@\x01\x04datas\0s\x04\0\x0fhandle-http-req\x01\x1a\x01@\0\0\x01\
+\x04\0\x0evariant-func00\x01\x1b\x01@\x01\x05inputs\0s\x04\0\x06scream\x01\x1c\x01\
+@\x01\x05inputs\x01\0\x04\0\x09say-hello\x01\x1d\x01@\0\x01\0\x04\0\x10resource-\
+example\x01\x1e\x04\0\x12helloworld-example\x01\x1e\x04\0\x1dget-script-properti\
+es-example\x01\x1e\x04\0\x13spreadsheet-example\x01\x1e\x04\03component:googleap\
 psscript-in-rust-example/my-world\x04\0\x0b\x0e\x01\0\x08my-world\x03\0\0\0G\x09\
 producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.227.1\x10wit-bindgen-rus\
 t\x060.41.0";

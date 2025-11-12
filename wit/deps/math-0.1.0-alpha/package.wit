@@ -1,0 +1,10 @@
+package gas:math@0.1.0-alpha;
+
+interface gas-math {
+	random: func() -> f64;
+	get-random-bytes: func(len: u64) -> list<u8>;
+}
+
+world imports {
+	import gas-math;
+}

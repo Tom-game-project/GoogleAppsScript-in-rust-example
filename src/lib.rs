@@ -7,16 +7,28 @@ use bindings::gas::logger::*;
 use bindings::gas::property::*;
 use bindings::gas::spreadsheet_app;
 use bindings::gas::spreadsheet_app::gas_range;
-use bindings::gas::content_service::gas_content_service;
-
+use args::GasDoGetEvent;
 use bindings::Guest;
 
+use bindings::gas::math::gas_math;
 struct Component;
 
 // Guestトレイトが、ホストに公開する関数
 impl Guest for Component {
     fn handle_http_req(data: String) -> String {
-        return "hello world This is Tom".to_string();
+        //logger::log("hello world in http rq");
+        match serde_json::from_str::<GasDoGetEvent>(&data) {
+            Ok(event) => {
+                if let Some(name) = event.parameter.get("name") {
+                    format!("hello {} ! random {:?}", name, gas_math::get_random_bytes(3))
+                } else {
+                    "please enter your name!".to_string()
+                }
+            }
+            Err(e) => {
+                format!("failed to parse: {}", e)
+            }
+        }
     }
 
     fn scream(input: String) -> String {

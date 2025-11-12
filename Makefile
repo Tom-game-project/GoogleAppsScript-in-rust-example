@@ -1,11 +1,11 @@
 BUILD ?= debug
 
 ifeq ($(BUILD),release)
-    WASM_SRC := target/wasm32-wasip1/release/GoogleAppsScript_in_rust_example.wasm
-    CARGO_FLAGS := --release
+    WASM_SRC := target/wasm32-wasip2/release/GoogleAppsScript_in_rust_example.wasm
+    CARGO_FLAGS :=  --target wasm32-wasip2 --release
 else
-    WASM_SRC := target/wasm32-wasip1/debug/GoogleAppsScript_in_rust_example.wasm
-    CARGO_FLAGS :=
+    WASM_SRC := target/wasm32-wasip2/debug/GoogleAppsScript_in_rust_example.wasm
+    CARGO_FLAGS :=  --target wasm32-wasip2
 endif
 
 JCO_OUT_DIR = \
@@ -18,6 +18,7 @@ JCO_FLAGS = \
 
 # host impls
 JS_SHIMS = \
+	js/wasi-random.js \
 	js/log-host.js \
 	js/example-resouceex.js \
 	js/gas-logger.js \
@@ -31,7 +32,8 @@ JS_SHIMS = \
 	js/gas-spreadsheetapp-sheet.js \
 	js/gas-spreadsheetapp-spreadsheet.js \
 	js/gas-content-service.js \
-	js/gas-content-service-text-output.js 
+	js/gas-content-service-text-output.js \
+	js/gas-math.js
 
 
 # guest impls
@@ -40,7 +42,8 @@ RS_SRCS = \
 	src/lib.rs
 
 $(WASM_SRC): $(RS_SRCS)
-	cargo component build $(CARGO_FLAGS)
+	#cargo component build $(CARGO_FLAGS)
+	cargo build $(CARGO_FLAGS)
 
 # グルーコードの生成
 $(JCO_OUT_DIR): $(WASM_SRC) $(JS_SHIMS)
@@ -49,6 +52,7 @@ $(JCO_OUT_DIR): $(WASM_SRC) $(JS_SHIMS)
 	$(JCO_FLAGS) \
 	--map 'example:resouceex/example-resource=./example-resouceex.js' \
 	--map 'wasi:logging/logging=./log-host.js' \
+	--map 'wasi:random/random=./wasi-random.js' \
 	--map 'gas:logger/logger=./gas-logger.js' \
 	--map 'gas:drive-app/gas-drive-app=./gas-driveapp.js' \
 	--map 'gas:drive-app/gas-file=./gas-driveapp-file.js' \
@@ -60,14 +64,15 @@ $(JCO_OUT_DIR): $(WASM_SRC) $(JS_SHIMS)
 	--map 'gas:spreadsheet-app/gas-range=./gas-spreadsheetapp-range.js' \
 	--map 'gas:spreadsheet-app/gas-sheet=./gas-spreadsheetapp-sheet.js' \
 	--map 'gas:content-service/gas-content-service=./gas-content-service.js' \
-	--map 'gas:content-service/gas-text-output=./gas-content-service-text-output.js'
+	--map 'gas:content-service/gas-text-output=./gas-content-service-text-output.js' \
+	--map 'gas:math/gas-math=./gas-math.js' \
 	# ---
 	cp $(JS_SHIMS) $(JCO_OUT_DIR)
 
 # packing
 build-pack: $(JCO_OUT_DIR)
 	echo $(WASM_SRC)
-	npx webpack
+	npx webpack  --progress
 
 push: build-pack
 	cp ./appsscript.json ./dist

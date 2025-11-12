@@ -10,6 +10,7 @@ world my-world {
 	import gas:property/properties-service@0.1.0-alpha;
 	import gas:spreadsheet-app/gas-spreadsheet-app@0.1.0-alpha;
 	import gas:content-service/gas-content-service@0.1.0-alpha;
+	import gas:math/gas-math@0.1.0-alpha;
 
 	variant cell-value {
 		empty,
@@ -17,7 +18,7 @@ world my-world {
 	}
 
 	// web
-	export handle-http-req: func() -> string;
+	export handle-http-req: func(data: string) -> string;
 
 	// handle_http_req: func(data: string) -> string;
 

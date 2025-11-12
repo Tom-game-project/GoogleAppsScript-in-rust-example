@@ -22,30 +22,32 @@
 //   "queryString": "name=tom&age=21&msg=hello"
 // }
 use serde::Deserialize;
-use std::collections::HashMap;
+
+use std::collections::{BTreeMap, HashMap};
 
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")] // JSONのcamelCaseをRustのsnake_caseに自動マップ
-struct GasDoGetEvent {
+pub struct GasDoGetEvent {
     /// キーに対する単一の値 (e.parameter)
-    parameter: HashMap<String, String>,
+    pub parameter: BTreeMap<String, String>, // HashMapではうまくいかない
 
     /// コンテキストパス (e.contextPath)
-    context_path: String,
+    pub context_path: String,
 
     /// コンテンツ長 (e.contentLength)
-    content_length: i64, // -1 を受け取るため i64 (または i32)
+    pub content_length: i64, // -1 を受け取るため i64 (または i32)
 
     /// キーに対する値の配列 (e.parameters)
-    parameters: HashMap<String, Vec<String>>,
+    pub parameters: BTreeMap<String, Vec<String>>,
 
     /// クエリ文字列 (e.queryString)
-    query_string: String,
+    pub query_string: String,
 }
 
-#[test]
+#[cfg(test)]
 mod args_test {
-    #[cfg(test)]
+    use crate::args::GasDoGetEvent;
+    #[test]
     fn json_parse_test() {
         let json_input = r#"
             {
@@ -79,6 +81,8 @@ mod args_test {
                     // 値へのアクセス例
                     if let Some(name) = event.parameter.get("name") {
                         println!("\nこんにちは、{}さん！", name);
+                    } else {
+                        println!("名前が入力されていません")
                     }
                 }
                 Err(e) => {
