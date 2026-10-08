@@ -1,0 +1,20 @@
+package gas:urlfetchapp@0.1.0-alpha;
+
+interface gas-http-response {
+	resource gas-http-response {
+		constructor();
+
+        get-content-text: func() -> string;
+	}
+}
+
+interface gas-url-fetch-app {
+    use gas-http-response.{gas-http-response};
+
+    fetch: func(url: string) -> gas-http-response;
+}
+
+world imports {
+    import gas-url-fetch-app;
+    import gas-http-response;
+}

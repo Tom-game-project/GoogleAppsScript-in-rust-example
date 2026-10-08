@@ -14,7 +14,7 @@ JCO_OUT_DIR = \
 JCO_FLAGS = \
 	--base64-cutoff=99999999 \
 	--no-nodejs-compat \
-	--tla-compat
+	--tla-compat \
 
 # host impls
 JS_SHIMS = \
@@ -33,12 +33,12 @@ JS_SHIMS = \
 	js/gas-spreadsheetapp-spreadsheet.js \
 	js/gas-content-service.js \
 	js/gas-content-service-text-output.js \
+	js/gas-urlfetchapap.js \
+	js/gas-urlfetchapap-httpresponse.js \
 	js/gas-math.js
-
 
 # guest impls
 RS_SRCS = \
-	src/bindings.rs\
 	src/lib.rs
 
 $(WASM_SRC): $(RS_SRCS)
@@ -65,9 +65,12 @@ $(JCO_OUT_DIR): $(WASM_SRC) $(JS_SHIMS)
 	--map 'gas:spreadsheet-app/gas-sheet=./gas-spreadsheetapp-sheet.js' \
 	--map 'gas:content-service/gas-content-service=./gas-content-service.js' \
 	--map 'gas:content-service/gas-text-output=./gas-content-service-text-output.js' \
+	--map 'gas:urlfetchapp/gas-url-fetch-app=./gas-urlfetchapap.js' \
+	--map 'gas:urlfetchapp/gas-http-response=./gas-urlfetchapap-httpresponse.js' \
 	--map 'gas:math/gas-math=./gas-math.js' \
 	# ---
 	cp $(JS_SHIMS) $(JCO_OUT_DIR)
+	echo "success to jco transpile"
 
 # packing
 build-pack: $(JCO_OUT_DIR)

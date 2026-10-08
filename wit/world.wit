@@ -11,6 +11,7 @@ world my-world {
 	import gas:spreadsheet-app/gas-spreadsheet-app@0.1.0-alpha;
 	import gas:content-service/gas-content-service@0.1.0-alpha;
 	import gas:math/gas-math@0.1.0-alpha;
+    import gas:urlfetchapp/gas-url-fetch-app@0.1.0-alpha;
 
 	variant cell-value {
 		empty,
@@ -30,4 +31,5 @@ world my-world {
 	export helloworld-example: func();
 	export get-script-properties-example: func();
 	export spreadsheet-example: func();
+    export http-request-test: func();
 }

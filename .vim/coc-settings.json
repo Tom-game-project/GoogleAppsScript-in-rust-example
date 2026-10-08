@@ -1,0 +1,10 @@
+{
+  "rust-analyzer.procMacro.enable": true,
+  "rust-analyzer.procMacro.attributes.enable": true,
+
+  "rust-analyzer.cargo.buildScripts.enable": true,
+
+  "rust-analyzer.cargo.target": "wasm32-wasip2",
+
+  "rust-analyzer.check.command": "check"
+}

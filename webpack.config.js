@@ -1,5 +1,6 @@
 const path = require('path');
 const GasPlugin = require('gas-webpack-plugin');
+const webpack = require('webpack');
 
 module.exports = {
   mode: 'production',
@@ -47,6 +48,9 @@ module.exports = {
   },
   plugins: [
     new GasPlugin(),
+    new webpack.NormalModuleReplacementPlugin(/^wasi:/, (resource) => {
+      resource.request = path.resolve(__dirname, 'js/wasi_stub.js');
+    }),
   ],
 };
 

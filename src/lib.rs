@@ -1,16 +1,26 @@
-mod bindings;
 mod args;
 
+mod bindings {
+wit_bindgen::generate!({
+    world: "my-world",
+    //with: { "component:googleappsscript-in-rust-example": generate },
+    path: "./wit",
+    generate_all
+});
+}
+
+use args::GasDoGetEvent;
+
+use bindings::Guest;
 use bindings::example::resouceex::example_resource;
-use bindings::gas::drive_app;
-use bindings::gas::logger::*;
-use bindings::gas::property::*;
+use bindings::gas::logger::logger;
+use bindings::gas::math::gas_math;
+use bindings::gas::property::properties_service;
 use bindings::gas::spreadsheet_app;
 use bindings::gas::spreadsheet_app::gas_range;
-use args::GasDoGetEvent;
-use bindings::Guest;
+use bindings::gas::drive_app;
+use bindings::gas::urlfetchapp::{gas_url_fetch_app};
 
-use bindings::gas::math::gas_math;
 struct Component;
 
 // Guestトレイトが、ホストに公開する関数
@@ -149,6 +159,12 @@ impl Guest for Component {
     fn variant_func00() -> bindings::CellValue {
         // valiant型をjsとやり取りする際の方法
         bindings::CellValue::StringValue("hello world".to_string())
+    }
+
+    fn http_request_test() {
+        let res = gas_url_fetch_app::fetch("https://jsonplaceholder.typicode.com/posts/1");
+        let res_text = res.get_content_text();
+        logger::log(&res_text);
     }
 }
 

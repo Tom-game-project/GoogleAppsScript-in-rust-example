@@ -1,13 +1,14 @@
 import { 
-	$init,
-       	scream, 
-	sayHello,
-	handleHttpReq,
-       	resourceExample,
-       	helloworldExample,
-        getScriptPropertiesExample,
-       	spreadsheetExample,
-	variantFunc00,
+    $init,
+    scream, 
+    sayHello,
+    handleHttpReq,
+    resourceExample,
+    helloworldExample,
+    getScriptPropertiesExample,
+    spreadsheetExample,
+    variantFunc00,
+    httpRequestTest
 } from "./target/jco/GoogleAppsScript_in_rust_example.js";
 import "./textencoderdecoder"
 
@@ -74,4 +75,8 @@ global.spreadsheet_example = function () {
 
 global.fff = function () {
 	console.log(variantFunc00());
+}
+
+global.http_request_test = function () {
+    httpRequestTest();
 }
