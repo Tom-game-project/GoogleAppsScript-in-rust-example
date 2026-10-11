@@ -23,7 +23,7 @@
 // }
 use serde::Deserialize;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap};
 
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")] // JSONのcamelCaseをRustのsnake_caseに自動マップ
@@ -36,6 +36,9 @@ pub struct GasDoGetEvent {
 
     /// コンテンツ長 (e.contentLength)
     pub content_length: i64, // -1 を受け取るため i64 (または i32)
+
+    #[serde(default)]
+    pub path_info: Option<String>,
 
     /// キーに対する値の配列 (e.parameters)
     pub parameters: BTreeMap<String, Vec<String>>,

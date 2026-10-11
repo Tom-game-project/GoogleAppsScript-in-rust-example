@@ -3,7 +3,6 @@ mod args;
 mod bindings {
 wit_bindgen::generate!({
     world: "my-world",
-    //with: { "component:googleappsscript-in-rust-example": generate },
     path: "./wit",
     generate_all
 });
@@ -20,23 +19,32 @@ use bindings::gas::spreadsheet_app;
 use bindings::gas::spreadsheet_app::gas_range;
 use bindings::gas::drive_app;
 use bindings::gas::urlfetchapp::{gas_url_fetch_app};
+use bindings::gas::content_service::gas_content_service;
+
+use crate::bindings::gas::content_service::{gas_text_output::{
+    GasTextOutput,
+    MimeType,
+}};
 
 struct Component;
 
 // Guestトレイトが、ホストに公開する関数
 impl Guest for Component {
-    fn handle_http_req(data: String) -> String {
+    // doGetはここから入る
+    fn rs_do_get(data: String) -> GasTextOutput {
         //logger::log("hello world in http rq");
         match serde_json::from_str::<GasDoGetEvent>(&data) {
             Ok(event) => {
-                if let Some(name) = event.parameter.get("name") {
-                    format!("hello {} ! random {:?}", name, gas_math::get_random_bytes(3))
-                } else {
-                    "please enter your name!".to_string()
-                }
+                gas_content_service::create_text_output(
+                    &format!("{:?}", event)
+                )
+                .set_mime_type(MimeType::Text)
             }
             Err(e) => {
-                format!("failed to parse: {}", e)
+                gas_content_service::create_text_output(
+                    &format!("failed to parse: {}", e)
+                )
+                .set_mime_type(MimeType::Text)
             }
         }
     }

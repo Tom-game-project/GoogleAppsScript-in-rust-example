@@ -1,6 +1,6 @@
 BUILD ?= debug
 
-ifeq ($(BUILD),release)
+ifeq ($(BUILD), release)
     WASM_SRC := target/wasm32-wasip2/release/GoogleAppsScript_in_rust_example.wasm
     CARGO_FLAGS :=  --target wasm32-wasip2 --release
 else
@@ -31,28 +31,26 @@ JS_SHIMS = \
 	js/gas-spreadsheetapp-range.js \
 	js/gas-spreadsheetapp-sheet.js \
 	js/gas-spreadsheetapp-spreadsheet.js \
-	js/gas-content-service.js \
-	js/gas-content-service-text-output.js \
+	js/gas-content-service.ts \
+	js/gas-content-service-text-output.ts \
 	js/gas-urlfetchapap.js \
 	js/gas-urlfetchapap-httpresponse.js \
-	js/gas-math.js
+	js/gas-math.js \
+	js/wasi_stub.js
 
 # guest impls
 RS_SRCS = \
 	src/lib.rs
 
 $(WASM_SRC): $(RS_SRCS)
-	#cargo component build $(CARGO_FLAGS)
 	cargo build $(CARGO_FLAGS)
 
 # グルーコードの生成
 $(JCO_OUT_DIR): $(WASM_SRC) $(JS_SHIMS)
-	npx jco transpile $(WASM_SRC) \
+	pnpm exec jco transpile $(WASM_SRC) \
 	-o $(JCO_OUT_DIR) \
 	$(JCO_FLAGS) \
 	--map 'example:resouceex/example-resource=./example-resouceex.js' \
-	--map 'wasi:logging/logging=./log-host.js' \
-	--map 'wasi:random/random=./wasi-random.js' \
 	--map 'gas:logger/logger=./gas-logger.js' \
 	--map 'gas:drive-app/gas-drive-app=./gas-driveapp.js' \
 	--map 'gas:drive-app/gas-file=./gas-driveapp-file.js' \
@@ -63,11 +61,15 @@ $(JCO_OUT_DIR): $(WASM_SRC) $(JS_SHIMS)
 	--map 'gas:spreadsheet-app/gas-spreadsheet=./gas-spreadsheetapp-spreadsheet.js' \
 	--map 'gas:spreadsheet-app/gas-range=./gas-spreadsheetapp-range.js' \
 	--map 'gas:spreadsheet-app/gas-sheet=./gas-spreadsheetapp-sheet.js' \
-	--map 'gas:content-service/gas-content-service=./gas-content-service.js' \
-	--map 'gas:content-service/gas-text-output=./gas-content-service-text-output.js' \
+	--map 'gas:content-service/gas-content-service=./gas-content-service.ts' \
+	--map 'gas:content-service/gas-text-output=./gas-content-service-text-output.ts' \
 	--map 'gas:urlfetchapp/gas-url-fetch-app=./gas-urlfetchapap.js' \
 	--map 'gas:urlfetchapp/gas-http-response=./gas-urlfetchapap-httpresponse.js' \
 	--map 'gas:math/gas-math=./gas-math.js' \
+	--map 'wasi:logging/logging=./log-host.js' \
+	--map 'wasi:random/random=./wasi-random.js' \
+	--map 'wasi:io/poll=./wasi_stub.js' \
+	--map 'wasi:io/poll@0.2.0=./wasi_stub.js' \
 	# ---
 	cp $(JS_SHIMS) $(JCO_OUT_DIR)
 	echo "success to jco transpile"
@@ -75,10 +77,10 @@ $(JCO_OUT_DIR): $(WASM_SRC) $(JS_SHIMS)
 # packing
 build-pack: $(JCO_OUT_DIR)
 	echo $(WASM_SRC)
-	npx webpack  --progress
+	pnpm exec webpack  --progress
 
 push: build-pack
 	cp ./appsscript.json ./dist
-	npx clasp push
+	pnpm exec clasp push
 
 .PHONY: build-pack push

@@ -11,18 +11,18 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
-    "@bytecodealliance/jco": "^1.15.3",
     "@bytecodealliance/preview2-shim": "^0.15.1",
     "@google/clasp": "^3.1.1",
     "@types/google-apps-script": "^1.0.100"
   },
   "devDependencies": {
-    "@babel/cli": "^8.0.6",
+    "@babel/cli": "^7.29.7",
     "@babel/core": "^7.28.3",
     "@babel/plugin-proposal-class-properties": "^7.18.6",
     "@babel/plugin-proposal-private-methods": "^7.18.6",
     "@babel/plugin-proposal-private-property-in-object": "^7.21.11",
     "@babel/preset-env": "^7.28.3",
+    "@bytecodealliance/jco": "^1.15.3",
     "babel-loader": "^10.0.0",
     "babel-plugin-transform-bigint-to-jsbi": "^1.0.3",
     "gas-webpack-plugin": "^2.6.0",

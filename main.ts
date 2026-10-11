@@ -2,22 +2,24 @@ import {
     $init,
     scream, 
     sayHello,
-    handleHttpReq,
+    rsDoGet,
     resourceExample,
     helloworldExample,
     getScriptPropertiesExample,
     spreadsheetExample,
     variantFunc00,
-    httpRequestTest
+    httpRequestTest,
 } from "./target/jco/GoogleAppsScript_in_rust_example.js";
 import "./textencoderdecoder"
 
+import { GasTextOutput } from "./js/gas-content-service-text-output"
+
 declare const global: any;
 
-global.doGet = function(e :any) {
-	Logger.log("hello world");
-	let r = handleHttpReq(JSON.stringify(e));
-	return ContentService.createTextOutput(r);
+global.doGet = function(e :GoogleAppsScript.Events.DoGet) : GoogleAppsScript.Content.TextOutput {
+    let r = rsDoGet(JSON.stringify(e)) as unknown as GasTextOutput;
+
+    return r.rawTextOutput;
 }
 
 global.do_get_test00 = function() {
@@ -44,7 +46,7 @@ global.do_get_test00 = function() {
                "queryString": "name=tom&age=21&msg=hello"
              }
 	`	
-	let r = handleHttpReq(a);
+	let r = rsDoGet(a);
 	Logger.log(r);
 }
 

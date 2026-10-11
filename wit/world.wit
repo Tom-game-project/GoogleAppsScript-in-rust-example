@@ -9,7 +9,10 @@ world my-world {
 	import gas:drive-app/gas-drive-app@0.1.0-alpha;
 	import gas:property/properties-service@0.1.0-alpha;
 	import gas:spreadsheet-app/gas-spreadsheet-app@0.1.0-alpha;
-	import gas:content-service/gas-content-service@0.1.0-alpha;
+
+    import gas:content-service/gas-content-service@0.1.0-alpha;
+    use gas:content-service/gas-text-output@0.1.0-alpha.{gas-text-output};
+
 	import gas:math/gas-math@0.1.0-alpha;
     import gas:urlfetchapp/gas-url-fetch-app@0.1.0-alpha;
 
@@ -19,9 +22,7 @@ world my-world {
 	}
 
 	// web
-	export handle-http-req: func(data: string) -> string;
-
-	// handle_http_req: func(data: string) -> string;
+	export rs-do-get: func(data: string) -> gas-text-output;
 
 	export variant-func00: func() -> cell-value;
 

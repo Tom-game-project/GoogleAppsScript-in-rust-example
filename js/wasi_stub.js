@@ -28,4 +28,20 @@ export class OutputStream {
   }
 }
 export class Error {}
-export class Pollable {}
+
+export class Pollable {
+  ready() {
+    return true;
+  }
+  block() {
+    // 同期環境なので何もしない
+  }
+}
+
+/**
+ * pollable のリストを受け取り、準備完了したインデックスを返す
+ */
+export function poll(pollables) {
+  // すべて即座に完了しているものとしてインデックスの配列を返す
+  return pollables.map((_, index) => index);
+}

@@ -1,20 +1,33 @@
 package gas:content-service@0.1.0-alpha;
 
-
 interface gas-text-output {
+    enum mime-type {
+        text,
+        csv,
+        ical,
+        javascript,
+        json,
+        rss,
+        vcard,
+        xml,
+    }
+
 	resource gas-text-output {
 		constructor();
 		append: func(added-content: string) -> gas-text-output;
 		clear: func() -> gas-text-output;
+        set-mime-type: func(mime: mime-type) -> gas-text-output;
+        download-as-file: func(filename: string) -> gas-text-output;
 	}
 }
 
 interface gas-content-service {
-	use gas-text-output.{gas-text-output};
+	use gas-text-output.{gas-text-output, mime-type};
 	create-text-output: func(content:string) -> gas-text-output;
 }
 
 world imports {
+    // import raw-text-output;
 	import gas-text-output;
 	import gas-content-service;
 }
