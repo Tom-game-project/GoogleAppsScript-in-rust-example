@@ -66,7 +66,8 @@ JS_SHIMS = \
 # guest impls
 RS_SRCS = \
 	src/lib.rs \
-	src/args.rs
+	src/args.rs \
+	src/git_server.rs
 
 $(WASM_SRC): $(RS_SRCS)
 	cargo build $(CARGO_FLAGS)
@@ -200,4 +201,13 @@ push: build-pack
 	cp ./appsscript.json ./dist
 	pnpm exec clasp push
 
-.PHONY: build-pack push
+install-git-remote-gas:
+	mkdir -p $(HOME)/.local/bin
+	cp ./tools/git-remote-gas $(HOME)/.local/bin/git-remote-gas
+	chmod +x $(HOME)/.local/bin/git-remote-gas
+	@echo "Installed git-remote-gas to $(HOME)/.local/bin/git-remote-gas"
+
+test-git-e2e:
+	python3 ./tools/test_gas_git_e2e.py
+
+.PHONY: build-pack push install-git-remote-gas test-git-e2e

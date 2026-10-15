@@ -56,8 +56,10 @@ world my-world {
 		string-value(string),
 	}
 
-	// web
+	// web (doGet / doPost & Git Smart HTTP v1 endpoints)
 	export rs-do-get: func(data: string) -> gas-text-output;
+	export rs-do-post: func(data: string) -> gas-text-output;
+	export git-init-repo: func(repo: option<string>) -> string;
 
 	export variant-func00: func() -> cell-value;
 

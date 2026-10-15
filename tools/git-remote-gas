@@ -1,0 +1,584 @@
+#!/usr/bin/env python3
+"""
+git-remote-gas: Git remote helper for Google Apps Script (GAS) Web Apps.
+
+Handles:
+1. URL normalization: keeps `/exec` intact (avoids `/exec/info/refs` 404s).
+2. HTTP 302 redirects across `script.google.com` and `script.googleusercontent.com`
+   (including converting POST -> GET on 302 redirect to `/macros/echo`).
+3. Step-by-step authentication fallback:
+   - Step 1: Anonymous request (works immediately if Web App is deployed for "Anyone").
+   - Step 2: Cached credentials / `~/.clasprc.json` OAuth token (with auto-refresh).
+   - Step 3: Interactive browser login prompt if authentication fails or 404/403 occurs.
+"""
+
+import base64
+import http.cookiejar
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import webbrowser
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+
+AUTH_CACHE_PATH = Path.home() / ".config" / "git-remote-gas" / "auth.json"
+CLASPRC_PATH = Path.home() / ".clasprc.json"
+
+
+def log_err(msg: str) -> None:
+    sys.stderr.write(f"[git-remote-gas] {msg}\n")
+    sys.stderr.flush()
+
+
+def normalize_gas_url(base_url: str, sub_path: str, query_params: Dict[str, str]) -> str:
+    """
+    GAS Web Apps return 404 if extra path segments like `/info/refs` are appended
+    after `/exec` or `/dev`. We preserve the `/exec` endpoint and pass `git_path`
+    and `service` as query parameters.
+    """
+    parsed = urllib.parse.urlparse(base_url)
+    existing_qs = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
+    existing_qs["git_path"] = sub_path
+    existing_qs.update(query_params)
+    new_query = urllib.parse.urlencode(existing_qs)
+    return urllib.parse.urlunparse(
+        (parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, "")
+    )
+
+
+class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+class GasAuthManager:
+    """Manages OAuth tokens, cookies, and interactive browser login fallback."""
+
+    def __init__(self, remote_url: str):
+        self.remote_url = remote_url
+        self.cookie_jar = http.cookiejar.CookieJar()
+
+    def get_env_auth_headers(self) -> Dict[str, str]:
+        headers: Dict[str, str] = {}
+        token = os.environ.get("GAS_GIT_TOKEN", "").strip()
+        cookie = os.environ.get("GAS_GIT_COOKIE", "").strip()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        if cookie:
+            headers["Cookie"] = cookie
+        return headers
+
+    def load_cached_auth(self) -> Dict[str, str]:
+        if not AUTH_CACHE_PATH.exists():
+            return {}
+        try:
+            data = json.loads(AUTH_CACHE_PATH.read_text(encoding="utf-8"))
+            headers: Dict[str, str] = {}
+            if data.get("token"):
+                headers["Authorization"] = f"Bearer {data['token']}"
+            if data.get("cookie"):
+                headers["Cookie"] = data["cookie"]
+            return headers
+        except Exception:
+            return {}
+
+    def save_cached_auth(self, token: Optional[str] = None, cookie: Optional[str] = None) -> None:
+        AUTH_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        data = {}
+        if AUTH_CACHE_PATH.exists():
+            try:
+                data = json.loads(AUTH_CACHE_PATH.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+        if token is not None:
+            data["token"] = token
+        if cookie is not None:
+            data["cookie"] = cookie
+        AUTH_CACHE_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        try:
+            os.chmod(AUTH_CACHE_PATH, 0o600)
+        except OSError:
+            pass
+
+    def get_clasp_bearer_token(self) -> Optional[str]:
+        """Reads ~/.clasprc.json and refreshes the access_token if expired."""
+        if not CLASPRC_PATH.exists():
+            return None
+        try:
+            raw = json.loads(CLASPRC_PATH.read_text(encoding="utf-8"))
+            # Support both clasp v2 (token top-level) and clasp v3 (tokens.default)
+            token_obj = raw.get("token") or raw.get("tokens", {}).get("default") or raw
+            access_token = token_obj.get("access_token")
+            refresh_token = token_obj.get("refresh_token")
+            expiry_date = token_obj.get("expiry_date", 0)
+            client_id = token_obj.get("client_id") or raw.get("oauth2ClientSettings", {}).get("clientId")
+            client_secret = token_obj.get("client_secret") or raw.get("oauth2ClientSettings", {}).get("clientSecret")
+
+            now_ms = int(time.time() * 1000)
+            if refresh_token and client_id and client_secret and (not access_token or now_ms >= expiry_date - 60_000):
+                refreshed = self._refresh_oauth_token(client_id, client_secret, refresh_token)
+                if refreshed:
+                    return refreshed
+            return access_token
+        except Exception:
+            return None
+
+    def _refresh_oauth_token(self, client_id: str, client_secret: str, refresh_token: str) -> Optional[str]:
+        body = urllib.parse.urlencode(
+            {
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "refresh_token": refresh_token,
+                "grant_type": "refresh_token",
+            }
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            "https://oauth2.googleapis.com/token",
+            data=body,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+                return payload.get("access_token")
+        except Exception:
+            return None
+
+    def prompt_browser_login(self, target_url: str) -> Optional[Dict[str, str]]:
+        """
+        Opens the browser or prompts the user when GAS returns 404/401/403 or
+        redirects to accounts.google.com.
+        """
+        log_err("============================================================")
+        log_err("Google Apps Script Web App へのアクセス認証が必要です。")
+        log_err(f"対象 URL: {target_url}")
+        log_err("------------------------------------------------------------")
+        log_err("【原因として考えられること】")
+        log_err("  1. Webアプリのアクセス権限が「自分のみ」等になっており認証が必要")
+        log_err("  2. ブラウザで未承認の初回実行、またはデプロイIDの不一致")
+        log_err("============================================================")
+
+        # Check if we have an interactive terminal via /dev/tty
+        try:
+            tty_in = open("/dev/tty", "r", encoding="utf-8")
+            tty_out = open("/dev/tty", "w", encoding="utf-8")
+        except OSError:
+            log_err("非対話環境のためプロンプトを表示できません。")
+            log_err("ブラウザで上記URLを開いて動作確認するか、GAS_GIT_TOKEN / GAS_GIT_COOKIE を設定してください。")
+            return None
+
+        with tty_in, tty_out:
+            tty_out.write(
+                "\n認証方法を選択してください:\n"
+                "  [1] ブラウザで URL を開いて確認・ログインする (推奨)\n"
+                "  [2] gcloud / clasp で OAuth アクセストークンを取得する\n"
+                "  [3] ブラウザの Cookie (SID=...) または Bearer トークンを手動入力する\n"
+                "  [q] 中止\n"
+                "選択 [1/2/3/q] (デフォルト: 1): "
+            )
+            tty_out.flush()
+            choice = tty_in.readline().strip() or "1"
+
+            if choice == "q":
+                return None
+
+            if choice == "1":
+                tty_out.write(f"\nブラウザで {target_url} を開いています...\n")
+                tty_out.flush()
+                webbrowser.open(target_url)
+                tty_out.write(
+                    "\n1. ブラウザでログイン・権限承認を行い、ページが表示されることを確認してください。\n"
+                    "2. もしデプロイ設定が「全員 (Anyone)」であれば、そのまま Enter を押すと再試行します。\n"
+                    "3. 「自分のみ (Only myself)」の場合は、ブラウザの開発者ツール (Networkタブ) から\n"
+                    "   Cookie ヘッダー値 (または Bearer トークン) を貼り付けて Enter を押してください:\n"
+                    "入力 (空のまま Enter で匿名再試行): "
+                )
+                tty_out.flush()
+                user_val = tty_in.readline().strip()
+                if not user_val:
+                    return {}
+                if "=" in user_val and not user_val.lower().startswith("bearer "):
+                    self.save_cached_auth(cookie=user_val)
+                    return {"Cookie": user_val}
+                token = user_val.removeprefix("Bearer ").removeprefix("bearer ").strip()
+                self.save_cached_auth(token=token)
+                return {"Authorization": f"Bearer {token}"}
+
+            if choice == "2":
+                tty_out.write("\n`gcloud auth application-default login` または `clasp login` を実行します...\n")
+                tty_out.flush()
+                try:
+                    proc = subprocess.run(
+                        ["gcloud", "auth", "print-access-token"],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    if proc.returncode == 0 and proc.stdout.strip():
+                        token = proc.stdout.strip()
+                        self.save_cached_auth(token=token)
+                        return {"Authorization": f"Bearer {token}"}
+                except FileNotFoundError:
+                    pass
+
+                subprocess.run(["pnpm", "exec", "clasp", "login"], check=False)
+                token = self.get_clasp_bearer_token()
+                if token:
+                    self.save_cached_auth(token=token)
+                    return {"Authorization": f"Bearer {token}"}
+                return None
+
+            if choice == "3":
+                tty_out.write("\nCookie 文字列 (例: SID=...) または Bearer トークンを入力してください: ")
+                tty_out.flush()
+                user_val = tty_in.readline().strip()
+                if not user_val:
+                    return None
+                if "=" in user_val and not user_val.lower().startswith("bearer "):
+                    self.save_cached_auth(cookie=user_val)
+                    return {"Cookie": user_val}
+                token = user_val.removeprefix("Bearer ").removeprefix("bearer ").strip()
+                self.save_cached_auth(token=token)
+                return {"Authorization": f"Bearer {token}"}
+
+        return None
+
+
+class GasHttpClient:
+    def __init__(self, base_url: str):
+        self.base_url = base_url.rstrip("/")
+        self.auth = GasAuthManager(self.base_url)
+
+    def request(
+        self,
+        method: str,
+        sub_path: str,
+        query_params: Dict[str, str],
+        body: Optional[bytes] = None,
+        content_type: Optional[str] = None,
+    ) -> bytes:
+        url = normalize_gas_url(self.base_url, sub_path, query_params)
+
+        # Build candidate auth strategies in order:
+        # 1. Explicit env var if set
+        # 2. Anonymous (no Authorization header! Prevents 404 on "Anyone" deployments)
+        # 3. Cached auth from ~/.config/git-remote-gas/auth.json
+        # 4. Clasp OAuth token from ~/.clasprc.json
+        strategies: List[Tuple[str, Dict[str, str]]] = []
+        env_headers = self.auth.get_env_auth_headers()
+        if env_headers:
+            strategies.append(("env", env_headers))
+
+        strategies.append(("anonymous", {}))
+
+        cached_headers = self.auth.load_cached_auth()
+        if cached_headers:
+            strategies.append(("cached", cached_headers))
+
+        clasp_token = self.auth.get_clasp_bearer_token()
+        if clasp_token:
+            strategies.append(("clasp", {"Authorization": f"Bearer {clasp_token}"}))
+
+        last_error: Optional[Exception] = None
+
+        for label, auth_headers in strategies:
+            try:
+                return self._execute_with_redirects(url, method, body, content_type, auth_headers)
+            except PermissionError as e:
+                last_error = e
+                continue
+
+        # All automatic strategies failed -> trigger interactive browser login prompt
+        interactive_headers = self.auth.prompt_browser_login(url)
+        if interactive_headers is not None:
+            try:
+                return self._execute_with_redirects(url, method, body, content_type, interactive_headers)
+            except Exception as e:
+                last_error = e
+
+        raise RuntimeError(f"Failed to access GAS Git Server ({url}): {last_error}")
+
+    def _execute_with_redirects(
+        self,
+        url: str,
+        method: str,
+        body: Optional[bytes],
+        content_type: Optional[str],
+        auth_headers: Dict[str, str],
+        max_redirects: int = 10,
+    ) -> bytes:
+        opener = urllib.request.build_opener(
+            NoRedirectHandler(),
+            urllib.request.HTTPCookieProcessor(self.auth.cookie_jar),
+        )
+        curr_url = url
+        curr_method = method
+        curr_body = body
+
+        for _ in range(max_redirects):
+            headers = {
+                "User-Agent": "git-remote-gas/0.2",
+                "Accept": "*/*",
+            }
+            if content_type and curr_body is not None:
+                headers["Content-Type"] = content_type
+            # Only send Authorization to script.google.com, not to googleusercontent echo
+            parsed_curr = urllib.parse.urlparse(curr_url)
+            if "googleusercontent.com" not in parsed_curr.netloc:
+                headers.update(auth_headers)
+            elif "Cookie" in auth_headers:
+                headers["Cookie"] = auth_headers["Cookie"]
+
+            req = urllib.request.Request(curr_url, data=curr_body, headers=headers, method=curr_method)
+            try:
+                with opener.open(req, timeout=60) as resp:
+                    status = resp.getcode()
+                    raw = resp.read()
+            except urllib.error.HTTPError as e:
+                status = e.code
+                headers_map = e.headers
+                if status in (301, 302, 303, 307, 308):
+                    location = headers_map.get("Location")
+                    if not location:
+                        raise RuntimeError(f"HTTP {status} without Location header")
+                    next_url = urllib.parse.urljoin(curr_url, location)
+                    if "accounts.google.com" in next_url or "ServiceLogin" in next_url:
+                        raise PermissionError(f"Redirected to Google Login ({next_url})")
+                    # GAS Web App redirects POST /exec -> 302 GET /macros/echo
+                    if status in (301, 302, 303):
+                        curr_method = "GET"
+                        curr_body = None
+                    curr_url = next_url
+                    continue
+                if status in (401, 403, 404):
+                    raise PermissionError(f"HTTP {status}: {e.reason}")
+                raise RuntimeError(f"HTTP error {status} from GAS: {e.reason}")
+
+            # Check if response is an HTML login page disguised as 200 OK
+            if raw.lstrip().startswith((b"<!DOCTYPE html", b"<html", b"<HTML")):
+                text_preview = raw[:1024].decode("utf-8", errors="ignore")
+                if "accounts.google.com" in text_preview or "ServiceLogin" in text_preview or "Google Drive" in text_preview:
+                    raise PermissionError("Received Google HTML login page instead of Git response")
+
+            return self._decode_gas_payload(raw)
+
+        raise RuntimeError("Exceeded maximum redirects while communicating with GAS")
+
+    @staticmethod
+    def _decode_gas_payload(raw: bytes) -> bytes:
+        """
+         GAS ContentService only returns text. Our Rust server can return either
+        base64-encoded packets (prefixed with `GAS_GIT_B64:` or pure base64) or raw pkt-lines.
+        """
+        trimmed = raw.strip()
+        if trimmed.startswith(b"GAS_GIT_B64:"):
+            return base64.b64decode(trimmed[len(b"GAS_GIT_B64:") :])
+        # If it already looks like a Git pkt-line (4 hex digits like `001e# service=`)
+        if len(raw) >= 4:
+            try:
+                int(raw[:4].decode("ascii"), 16)
+                return raw
+            except ValueError:
+                pass
+        try:
+            decoded = base64.b64decode(trimmed, validate=True)
+            if len(decoded) >= 4:
+                return decoded
+        except Exception:
+            pass
+        return raw
+
+
+def parse_refs_from_advertisement(data: bytes) -> Tuple[List[Tuple[str, str]], Optional[str]]:
+    """Parses Smart HTTP v1 pkt-line ref advertisement."""
+    idx = 0
+    refs: List[Tuple[str, str]] = []
+    symref_head: Optional[str] = None
+
+    while idx + 4 <= len(data):
+        pkt_len_hex = data[idx : idx + 4].decode("ascii", errors="replace")
+        idx += 4
+        if pkt_len_hex == "0000":
+            continue
+        pkt_len = int(pkt_len_hex, 16)
+        if pkt_len <= 4:
+            continue
+        payload = data[idx : idx + pkt_len - 4]
+        idx += pkt_len - 4
+
+        if payload.startswith(b"#"):
+            continue
+
+        line = payload.rstrip(b"\r\n")
+        caps: List[str] = []
+        if b"\x00" in line:
+            ref_part, cap_part = line.split(b"\x00", 1)
+            caps = cap_part.decode("utf-8", errors="replace").split()
+        else:
+            ref_part = line
+
+        for c in caps:
+            if c.startswith("symref=HEAD:"):
+                symref_head = c.split(":", 1)[1]
+
+        parts = ref_part.decode("utf-8", errors="replace").split(" ", 1)
+        if len(parts) == 2:
+            oid, refname = parts
+            refs.append((oid, refname))
+
+    return refs, symref_head
+
+
+def main() -> int:
+    if len(sys.argv) < 3:
+        log_err("Usage: git-remote-gas <remote-name> <url>")
+        return 1
+
+    raw_url = sys.argv[2]
+    if raw_url.startswith("gas::"):
+        raw_url = raw_url[len("gas::") :]
+
+    client = GasHttpClient(raw_url)
+    cached_refs: Optional[Tuple[List[Tuple[str, str]], Optional[str]]] = None
+
+    def get_refs(for_push: bool = False) -> Tuple[List[Tuple[str, str]], Optional[str]]:
+        nonlocal cached_refs
+        if cached_refs is not None and not for_push:
+            return cached_refs
+        service = "git-receive-pack" if for_push else "git-upload-pack"
+        adv = client.request("GET", "/info/refs", {"service": service})
+        parsed = parse_refs_from_advertisement(adv)
+        if not for_push:
+            cached_refs = parsed
+        return parsed
+
+    while True:
+        line = sys.stdin.readline()
+        if not line:
+            break
+        line = line.rstrip("\r\n")
+
+        if line == "capabilities":
+            sys.stdout.write("fetch\npush\n\n")
+            sys.stdout.flush()
+
+        elif line.startswith("list"):
+            for_push = "for-push" in line
+            try:
+                refs, symref_head = get_refs(for_push=for_push)
+            except Exception as e:
+                log_err(str(e))
+                return 1
+
+            if symref_head:
+                sys.stdout.write(f"@{symref_head} HEAD\n")
+            for oid, refname in refs:
+                sys.stdout.write(f"{oid} {refname}\n")
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+
+        elif line.startswith("fetch "):
+            wants: List[str] = []
+            while line.startswith("fetch "):
+                parts = line.split()
+                if len(parts) >= 2:
+                    wants.append(parts[1])
+                line = sys.stdin.readline().rstrip("\r\n")
+
+            req_lines = bytearray()
+            for oid in wants:
+                pkt = f"want {oid}\n".encode("ascii")
+                req_lines.extend(f"{len(pkt) + 4:04x}".encode("ascii") + pkt)
+            req_lines.extend(b"00000009done\n")
+
+            resp = client.request(
+                "POST",
+                "/git-upload-pack",
+                {"service": "git-upload-pack", "encoding": "base64"},
+                body=base64.b64encode(bytes(req_lines)),
+                content_type="text/plain",
+            )
+            # Extract packfile after NAK / ACK pkt-lines
+            pack_idx = resp.find(b"PACK")
+            if pack_idx == -1:
+                raise RuntimeError("No PACK signature found in upload-pack response")
+            pack_data = resp[pack_idx:]
+            proc = subprocess.run(["git", "index-pack", "--stdin", "--fix-thin"], input=pack_data, check=False)
+            if proc.returncode != 0:
+                return proc.returncode
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+
+        elif line.startswith("push "):
+            specs: List[str] = []
+            while line.startswith("push "):
+                specs.append(line[len("push ") :])
+                line = sys.stdin.readline().rstrip("\r\n")
+
+            refs, _ = get_refs(for_push=True)
+            remote_map = {refname: oid for oid, refname in refs}
+
+            cmds = bytearray()
+            rev_args: List[str] = []
+            results: List[str] = []
+
+            for spec in specs:
+                force = spec.startswith("+")
+                clean_spec = spec[1:] if force else spec
+                src, dst = clean_spec.split(":", 1)
+                old_oid = remote_map.get(dst, "0" * 40)
+                if src == "":
+                    new_oid = "0" * 40
+                else:
+                    new_oid = (
+                        subprocess.check_output(["git", "rev-parse", src], text=True).strip()
+                    )
+                    rev_args.append(new_oid)
+                    if old_oid != "0" * 40:
+                        rev_args.append(f"^{old_oid}")
+
+                cmd_str = f"{old_oid} {new_oid} {dst}\x00report-status\n"
+                pkt = cmd_str.encode("utf-8")
+                cmds.extend(f"{len(pkt) + 4:04x}".encode("ascii") + pkt)
+                results.append(dst)
+
+            cmds.extend(b"0000")
+
+            pack_data = b""
+            if rev_args:
+                pack_proc = subprocess.run(
+                    ["git", "pack-objects", "--stdout", "--revs"],
+                    input=("\n".join(rev_args) + "\n").encode("utf-8"),
+                    capture_output=True,
+                    check=True,
+                )
+                pack_data = pack_proc.stdout
+
+            full_payload = bytes(cmds) + pack_data
+            client.request(
+                "POST",
+                "/git-receive-pack",
+                {"service": "git-receive-pack", "encoding": "base64"},
+                body=base64.b64encode(full_payload),
+                content_type="text/plain",
+            )
+            for dst in results:
+                sys.stdout.write(f"ok {dst}\n")
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+
+        elif line == "":
+            break
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

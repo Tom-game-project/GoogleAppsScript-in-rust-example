@@ -1,4 +1,5 @@
 mod args;
+pub mod git_server;
 
 mod bindings {
     wit_bindgen::generate!({
@@ -9,7 +10,7 @@ mod bindings {
     });
 }
 
-use args::GasDoGetEvent;
+use args::{GasDoGetEvent, GasDoPostEvent};
 
 use bindings::Guest;
 use bindings::example::resouceex::example_resource;
@@ -33,13 +34,49 @@ struct Component;
 
 // Guestトレイトが、ホストに公開する関数
 impl Guest for Component {
-    // doGetはここから入る
+    // doGetはここから入る (Git Smart HTTP v1 の /info/refs リクエストも処理)
     fn rs_do_get(data: String) -> GasTextOutput {
         match serde_json::from_str::<GasDoGetEvent>(&data) {
-            Ok(event) => gas_content_service::create_text_output(&format!("{:?}", event))
-                .set_mime_type(MimeType::Text),
+            Ok(event) => {
+                if let Some(git_output) = git_server::try_handle_do_get(&event) {
+                    return git_output;
+                }
+                gas_content_service::create_text_output(&format!("{:?}", event))
+                    .set_mime_type(MimeType::Text)
+            }
             Err(e) => gas_content_service::create_text_output(&format!("failed to parse: {}", e))
                 .set_mime_type(MimeType::Text),
+        }
+    }
+
+    // doPostはここから入る (Git Smart HTTP v1 の git-upload-pack / git-receive-pack を処理)
+    fn rs_do_post(data: String) -> GasTextOutput {
+        match serde_json::from_str::<GasDoPostEvent>(&data) {
+            Ok(event) => git_server::handle_do_post(&event),
+            Err(e) => gas_content_service::create_text_output(&format!("failed to parse post: {}", e))
+                .set_mime_type(MimeType::Text),
+        }
+    }
+
+    // GAS エディタから手動で Git リポジトリを初期化するヘルパー関数
+    fn git_init_repo(repo: Option<String>) -> String {
+        let repo_name = repo.as_deref().unwrap_or("default");
+        let store = git_server::GasGitStore::new(repo_name);
+        match store.ensure_initialized() {
+            Ok(oid) => {
+                let msg = format!(
+                    "Initialized GAS Git repository '{}' at HEAD -> refs/heads/main ({})",
+                    repo_name,
+                    oid.to_hex()
+                );
+                logger::log(&msg);
+                msg
+            }
+            Err(err) => {
+                let msg = format!("Failed to initialize GAS Git repository '{}': {}", repo_name, err);
+                logger::log(&msg);
+                msg
+            }
         }
     }
 

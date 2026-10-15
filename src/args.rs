@@ -1,51 +1,54 @@
-// url =
-//     /exec?name=tom&age=100&msg=hello
-//{
-//   "parameter": {
-//     "name": "tom",
-//     "msg": "hello",
-//     "age": "21"
-//   },
-//   "contextPath": "",
-//   "contentLength": -1,
-//   "parameters": {
-//     "msg": [
-//       "hello"
-//     ],
-//     "age": [
-//       "21"
-//     ],
-//     "name": [
-//       "tom"
-//     ]
-//   },
-//   "queryString": "name=tom&age=21&msg=hello"
-// }
 use serde::Deserialize;
+use std::collections::BTreeMap;
 
-use std::collections::{BTreeMap};
+/// GAS `doPost(e)` の `e.postData` ペイロード定義
+#[derive(Deserialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct GasPostData {
+    #[serde(default)]
+    pub contents: String,
+    #[serde(default)]
+    pub length: i64,
+    #[serde(default, rename = "type")]
+    pub content_type: String,
+    #[serde(default)]
+    pub name: String,
+}
 
-#[derive(Deserialize, Debug)]
-#[serde(rename_all = "camelCase")] // JSONのcamelCaseをRustのsnake_caseに自動マップ
+/// GAS `doGet(e)` / `doPost(e)` のイベント構造体
+#[derive(Deserialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct GasDoGetEvent {
     /// キーに対する単一の値 (e.parameter)
-    pub parameter: BTreeMap<String, String>, // HashMapではうまくいかない
+    #[serde(default)]
+    pub parameter: BTreeMap<String, String>,
 
     /// コンテキストパス (e.contextPath)
+    #[serde(default)]
     pub context_path: String,
 
     /// コンテンツ長 (e.contentLength)
-    pub content_length: i64, // -1 を受け取るため i64 (または i32)
+    #[serde(default)]
+    pub content_length: i64,
 
+    /// パス情報 (e.pathInfo)
     #[serde(default)]
     pub path_info: Option<String>,
 
     /// キーに対する値の配列 (e.parameters)
+    #[serde(default)]
     pub parameters: BTreeMap<String, Vec<String>>,
 
     /// クエリ文字列 (e.queryString)
+    #[serde(default)]
     pub query_string: String,
+
+    /// POST データ (doPost の場合のみ存在)
+    #[serde(default)]
+    pub post_data: Option<GasPostData>,
 }
+
+pub type GasDoPostEvent = GasDoGetEvent;
 
 #[cfg(test)]
 mod args_test {
@@ -76,21 +79,18 @@ mod args_test {
              }
             "#;
 
-            // JSON文字列をパースして構造体にマッピング
-            match serde_json::from_str::<GasDoGetEvent>(json_input) {
-                Ok(event) => {
-                    println!("パース成功: {:#?}", event);
-                    
-                    // 値へのアクセス例
-                    if let Some(name) = event.parameter.get("name") {
-                        println!("\nこんにちは、{}さん！", name);
-                    } else {
-                        println!("名前が入力されていません")
-                    }
-                }
-                Err(e) => {
-                    println!("パース失敗: {}", e);
+        match serde_json::from_str::<GasDoGetEvent>(json_input) {
+            Ok(event) => {
+                println!("パース成功: {:#?}", event);
+                if let Some(name) = event.parameter.get("name") {
+                    println!("\nこんにちは、{}さん！", name);
+                } else {
+                    println!("名前が入力されていません")
                 }
             }
+            Err(e) => {
+                println!("パース失敗: {}", e);
+            }
+        }
     }
 }

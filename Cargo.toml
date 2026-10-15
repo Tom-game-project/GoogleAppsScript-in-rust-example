@@ -3,52 +3,56 @@ name = "GoogleAppsScript-in-rust-example"
 version = "0.1.0"
 edition = "2024"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
-[dependencies]
-wit-bindgen = { version = "0.62.0", default-features = false, features = [
-    "realloc", "macros"
-] }
-
-# for doGet, doPost
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-
 [lib]
 crate-type = ["cdylib"]
 
-[package.metadata.component]
-package = "component:googleappsscript-in-rust-example"
+[dependencies]
+wit-bindgen = { version = "0.62.0", default-features = false , features = ["realloc", "macros"] }
 
-[package.metadata.component.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+base64 = "0.22"
+
+# gitoxide crates via Cargo (crates.io)
+gix-hash = "0.22"
+gix-object = "0.56"
+gix-packetline = { version = "0.21", default-features = false, features = ["blocking-io"] }
+gix-zlib = "0.1"
+gix-actor = "0.39"
+gix-date = "0.14"
+gix-validate = "0.11"
+
+[package.metadata.component]
+package = "component:google-apps-script"
+
+[package.metadata.component.target]
+path = "wit"
+world = "gas"
 
 [package.metadata.component.target.dependencies]
-# Official WASI Proposals
-"wasi:logging" = { path = "./wit/deps/wasi-logging-0.1.0-draft" }
-"wasi:random" = { path = "./wit/deps/wasi-random" }
-"wasi:clocks" = { path = "./wit/deps/wasi-clocks" }
-"wasi:cli" = { path = "./wit/deps/wasi-cli" }
-"wasi:filesystem" = { path = "./wit/deps/wasi-filesystem" }
-"wasi:sockets" = { path = "./wit/deps/wasi-sockets" }
-"wasi:http" = { path = "./wit/deps/wasi-http" }
+"gas:logger" = { path = "wit/deps/google-apps-script-logger-0.1.0-alpha" }
+"gas:property" = { path = "wit/deps/google-apps-script-property-0.1.0-alpha" }
+"gas:content-service" = { path = "wit/deps/google-apps-script-contentservice-0.1.0-alpha" }
+"gas:drive-app" = { path = "wit/deps/google-apps-script-driveapp-0.1.0-alpha" }
+"gas:spreadsheet-app" = { path = "wit/deps/google-apps-script-spreadsheetapp-0.1.0-alpha" }
+"gas:urlfetchapp" = { path = "wit/deps/google-apps-script-urlfetchapp-0.1.0-alpha" }
+"gas:utilities" = { path = "wit/deps/google-apps-script-utilities-0.1.0-alpha" }
+"gas:html-service" = { path = "wit/deps/google-apps-script-htmlservice-0.1.0-alpha" }
+"gas:cache-service" = { path = "wit/deps/google-apps-script-cacheservice-0.1.0-alpha" }
+"gas:lock-service" = { path = "wit/deps/google-apps-script-lockservice-0.1.0-alpha" }
+"gas:session" = { path = "wit/deps/google-apps-script-session-0.1.0-alpha" }
+"gas:mail-app" = { path = "wit/deps/google-apps-script-mailapp-0.1.0-alpha" }
+"gas:gmail-app" = { path = "wit/deps/google-apps-script-gmailapp-0.1.0-alpha" }
+"gas:calendar-app" = { path = "wit/deps/google-apps-script-calendarapp-0.1.0-alpha" }
+"gas:document-app" = { path = "wit/deps/google-apps-script-documentapp-0.1.0-alpha" }
+"gas:script-app" = { path = "wit/deps/google-apps-script-scriptapp-0.1.0-alpha" }
+"example:math" = { path = "wit/deps/math-0.1.0-alpha" }
+"example:resouceex" = { path = "wit/deps/resource-example" }
+"wasi:logging" = { path = "wit/deps/wasi-logging-0.1.0-draft" }
+"wasi:random" = { path = "wit/deps/wasi-random" }
+"wasi:clocks" = { path = "wit/deps/wasi-clocks" }
+"wasi:cli" = { path = "wit/deps/wasi-cli" }
+"wasi:filesystem" = { path = "wit/deps/wasi-filesystem" }
+"wasi:http" = { path = "wit/deps/wasi-http" }
+"wasi:sockets" = { path = "wit/deps/wasi-sockets" }
 
-"example:resouceex" = { path = "./wit/deps/resource-example" }
-
-# Google Apps Script WIT packages
-"gas:logger" = { path = "./wit/deps/google-apps-script-logger-0.1.0-alpha" }
-"gas:drive-app" = { path = "./wit/deps/google-apps-script-driveapp-0.1.0-alpha" }
-"gas:property" = { path = "./wit/deps/google-apps-script-property-0.1.0-alpha" }
-"gas:spreadsheet-app" = { path = "./wit/deps/google-apps-script-spreadsheetapp-0.1.0-alpha" }
-"gas:content-service" = { path = "./wit/deps/google-apps-script-contentservice-0.1.0-alpha" }
-"gas:urlfetchapp" = { path = "./wit/deps/google-apps-script-urlfetchapp-0.1.0-alpha" }
-"gas:utilities" = { path = "./wit/deps/google-apps-script-utilities-0.1.0-alpha" }
-"gas:html-service" = { path = "./wit/deps/google-apps-script-htmlservice-0.1.0-alpha" }
-"gas:cache-service" = { path = "./wit/deps/google-apps-script-cacheservice-0.1.0-alpha" }
-"gas:lock-service" = { path = "./wit/deps/google-apps-script-lockservice-0.1.0-alpha" }
-"gas:session" = { path = "./wit/deps/google-apps-script-session-0.1.0-alpha" }
-"gas:mail-app" = { path = "./wit/deps/google-apps-script-mailapp-0.1.0-alpha" }
-"gas:gmail-app" = { path = "./wit/deps/google-apps-script-gmailapp-0.1.0-alpha" }
-"gas:calendar-app" = { path = "./wit/deps/google-apps-script-calendarapp-0.1.0-alpha" }
-"gas:document-app" = { path = "./wit/deps/google-apps-script-documentapp-0.1.0-alpha" }
-"gas:script-app" = { path = "./wit/deps/google-apps-script-scriptapp-0.1.0-alpha" }
-"gas:math" = { path = "./wit/deps/math-0.1.0-alpha" }

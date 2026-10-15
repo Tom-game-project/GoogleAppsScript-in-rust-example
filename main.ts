@@ -3,6 +3,8 @@ import {
     scream,
     sayHello,
     rsDoGet,
+    rsDoPost,
+    gitInitRepo,
     resourceExample,
     helloworldExample,
     getScriptPropertiesExample,
@@ -21,7 +23,8 @@ import { GasHtmlOutput } from "./js/gas-html-service-output";
 interface GasGlobal {
     doGet: (e: GoogleAppsScript.Events.DoGet) => GoogleAppsScript.Content.TextOutput;
     do_get_test00: () => void;
-    doPost: (e: GoogleAppsScript.Events.DoPost) => void;
+    doPost: (e: GoogleAppsScript.Events.DoPost) => GoogleAppsScript.Content.TextOutput;
+    git_init_repo: () => string;
     aaa: () => void;
     resource_example: () => void;
     helloworldExample: () => void;
@@ -45,31 +48,29 @@ global.do_get_test00 = function(): void {
     const a = `
             {
                "parameter": {
-                 "name": "tom",
-                 "msg": "hello",
-                 "age": "21"
+                 "service": "git-upload-pack"
                },
                "contextPath": "",
                "contentLength": -1,
                "parameters": {
-                 "msg": [
-                   "hello"
-                 ],
-                 "age": [
-                   "21"
-                 ],
-                 "name": [
-                   "tom"
+                 "service": [
+                   "git-upload-pack"
                  ]
                },
-               "queryString": "name=tom&age=21&msg=hello"
+               "queryString": "service=git-upload-pack"
              }
     `;
-    const r = rsDoGet(a);
-    Logger.log(r);
+    const r = rsDoGet(a) as unknown as GasTextOutput;
+    Logger.log(r.getContent());
 };
 
-global.doPost = function(_e: GoogleAppsScript.Events.DoPost): void {
+global.doPost = function(e: GoogleAppsScript.Events.DoPost): GoogleAppsScript.Content.TextOutput {
+    const r = rsDoPost(JSON.stringify(e)) as unknown as GasTextOutput;
+    return r.rawTextOutput;
+};
+
+global.git_init_repo = function(): string {
+    return gitInitRepo(undefined);
 };
 
 global.aaa = function(): void {
