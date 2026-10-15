@@ -18,42 +18,42 @@ JCO_FLAGS = \
 
 # host impls
 JS_SHIMS = \
-	js/wasi-random.js \
-	js/log-host.js \
-	js/example-resouceex.js \
-	js/gas-logger.js \
-	js/gas-driveapp.js \
-	js/gas-driveapp-file.js \
-	js/gas-driveapp-blob.js \
-	js/gas-property-properties.js \
-	js/gas-property-properties-service.js \
-	js/gas-spreadsheetapp.js \
-	js/gas-spreadsheetapp-range.js \
-	js/gas-spreadsheetapp-sheet.js \
-	js/gas-spreadsheetapp-spreadsheet.js \
+	js/wasi-random.ts \
+	js/log-host.ts \
+	js/example-resouceex.ts \
+	js/gas-logger.ts \
+	js/gas-driveapp.ts \
+	js/gas-driveapp-file.ts \
+	js/gas-driveapp-blob.ts \
+	js/gas-property-properties.ts \
+	js/gas-property-properties-service.ts \
+	js/gas-spreadsheetapp.ts \
+	js/gas-spreadsheetapp-range.ts \
+	js/gas-spreadsheetapp-sheet.ts \
+	js/gas-spreadsheetapp-spreadsheet.ts \
 	js/gas-content-service.ts \
 	js/gas-content-service-text-output.ts \
-	js/gas-urlfetchapp.js \
-	js/gas-urlfetchapp-httpresponse.js \
-	js/gas-utilities.js \
-	js/gas-html-service.js \
-	js/gas-html-service-output.js \
-	js/gas-cache-service.js \
-	js/gas-cache-service-cache.js \
-	js/gas-lock-service.js \
-	js/gas-lock-service-lock.js \
-	js/gas-session.js \
-	js/gas-mail-app.js \
-	js/gas-gmail-app.js \
-	js/gas-gmail-types.js \
-	js/gas-calendar-app.js \
-	js/gas-calendar-types.js \
-	js/gas-document-app.js \
-	js/gas-document-types.js \
-	js/gas-script-app.js \
-	js/gas-script-types.js \
-	js/gas-math.js \
-	js/wasi_stub.js
+	js/gas-urlfetchapp.ts \
+	js/gas-urlfetchapp-httpresponse.ts \
+	js/gas-utilities.ts \
+	js/gas-html-service.ts \
+	js/gas-html-service-output.ts \
+	js/gas-cache-service.ts \
+	js/gas-cache-service-cache.ts \
+	js/gas-lock-service.ts \
+	js/gas-lock-service-lock.ts \
+	js/gas-session.ts \
+	js/gas-mail-app.ts \
+	js/gas-gmail-app.ts \
+	js/gas-gmail-types.ts \
+	js/gas-calendar-app.ts \
+	js/gas-calendar-types.ts \
+	js/gas-document-app.ts \
+	js/gas-document-types.ts \
+	js/gas-script-app.ts \
+	js/gas-script-types.ts \
+	js/gas-math.ts \
+	js/wasi_stub.ts
 
 # guest impls
 RS_SRCS = \
@@ -68,44 +68,44 @@ $(JCO_OUT_DIR): $(WASM_SRC) $(JS_SHIMS)
 	pnpm exec jco transpile $(WASM_SRC) \
 	-o $(JCO_OUT_DIR) \
 	$(JCO_FLAGS) \
-	--map 'example:resouceex/example-resource=./example-resouceex.js' \
-	--map 'gas:logger/logger=./gas-logger.js' \
-	--map 'gas:drive-app/gas-drive-app=./gas-driveapp.js' \
-	--map 'gas:drive-app/gas-file=./gas-driveapp-file.js' \
-	--map 'gas:drive-app/gas-access=./gas-driveapp-file.js' \
-	--map 'gas:drive-app/gas-blob=./gas-driveapp-blob.js' \
-	--map 'gas:property/properties=./gas-property-properties.js' \
-	--map 'gas:property/properties-service=./gas-property-properties-service.js' \
-	--map 'gas:spreadsheet-app/gas-spreadsheet-app=./gas-spreadsheetapp.js' \
-	--map 'gas:spreadsheet-app/gas-spreadsheet=./gas-spreadsheetapp-spreadsheet.js' \
-	--map 'gas:spreadsheet-app/gas-range=./gas-spreadsheetapp-range.js' \
-	--map 'gas:spreadsheet-app/gas-sheet=./gas-spreadsheetapp-sheet.js' \
+	--map 'example:resouceex/example-resource=./example-resouceex.ts' \
+	--map 'gas:logger/logger=./gas-logger.ts' \
+	--map 'gas:drive-app/gas-drive-app=./gas-driveapp.ts' \
+	--map 'gas:drive-app/gas-file=./gas-driveapp-file.ts' \
+	--map 'gas:drive-app/gas-access=./gas-driveapp-file.ts' \
+	--map 'gas:drive-app/gas-blob=./gas-driveapp-blob.ts' \
+	--map 'gas:property/properties=./gas-property-properties.ts' \
+	--map 'gas:property/properties-service=./gas-property-properties-service.ts' \
+	--map 'gas:spreadsheet-app/gas-spreadsheet-app=./gas-spreadsheetapp.ts' \
+	--map 'gas:spreadsheet-app/gas-spreadsheet=./gas-spreadsheetapp-spreadsheet.ts' \
+	--map 'gas:spreadsheet-app/gas-range=./gas-spreadsheetapp-range.ts' \
+	--map 'gas:spreadsheet-app/gas-sheet=./gas-spreadsheetapp-sheet.ts' \
 	--map 'gas:content-service/gas-content-service=./gas-content-service.ts' \
 	--map 'gas:content-service/gas-text-output=./gas-content-service-text-output.ts' \
-	--map 'gas:urlfetchapp/gas-url-fetch-app=./gas-urlfetchapp.js' \
-	--map 'gas:urlfetchapp/gas-http-response=./gas-urlfetchapp-httpresponse.js' \
-	--map 'gas:utilities/gas-utilities=./gas-utilities.js' \
-	--map 'gas:html-service/gas-html-service=./gas-html-service.js' \
-	--map 'gas:html-service/gas-html-output=./gas-html-service-output.js' \
-	--map 'gas:cache-service/gas-cache-service=./gas-cache-service.js' \
-	--map 'gas:cache-service/gas-cache=./gas-cache-service-cache.js' \
-	--map 'gas:lock-service/gas-lock-service=./gas-lock-service.js' \
-	--map 'gas:lock-service/gas-lock=./gas-lock-service-lock.js' \
-	--map 'gas:session/gas-session=./gas-session.js' \
-	--map 'gas:mail-app/gas-mail-app=./gas-mail-app.js' \
-	--map 'gas:gmail-app/gas-gmail-app=./gas-gmail-app.js' \
-	--map 'gas:gmail-app/gas-gmail-types=./gas-gmail-types.js' \
-	--map 'gas:calendar-app/gas-calendar-app=./gas-calendar-app.js' \
-	--map 'gas:calendar-app/gas-calendar-types=./gas-calendar-types.js' \
-	--map 'gas:document-app/gas-document-app=./gas-document-app.js' \
-	--map 'gas:document-app/gas-document-types=./gas-document-types.js' \
-	--map 'gas:script-app/gas-script-app=./gas-script-app.js' \
-	--map 'gas:script-app/gas-script-types=./gas-script-types.js' \
-	--map 'gas:math/gas-math=./gas-math.js' \
-	--map 'wasi:logging/logging=./log-host.js' \
-	--map 'wasi:random/random=./wasi-random.js' \
-	--map 'wasi:io/poll=./wasi_stub.js' \
-	--map 'wasi:io/poll@0.2.0=./wasi_stub.js'
+	--map 'gas:urlfetchapp/gas-url-fetch-app=./gas-urlfetchapp.ts' \
+	--map 'gas:urlfetchapp/gas-http-response=./gas-urlfetchapp-httpresponse.ts' \
+	--map 'gas:utilities/gas-utilities=./gas-utilities.ts' \
+	--map 'gas:html-service/gas-html-service=./gas-html-service.ts' \
+	--map 'gas:html-service/gas-html-output=./gas-html-service-output.ts' \
+	--map 'gas:cache-service/gas-cache-service=./gas-cache-service.ts' \
+	--map 'gas:cache-service/gas-cache=./gas-cache-service-cache.ts' \
+	--map 'gas:lock-service/gas-lock-service=./gas-lock-service.ts' \
+	--map 'gas:lock-service/gas-lock=./gas-lock-service-lock.ts' \
+	--map 'gas:session/gas-session=./gas-session.ts' \
+	--map 'gas:mail-app/gas-mail-app=./gas-mail-app.ts' \
+	--map 'gas:gmail-app/gas-gmail-app=./gas-gmail-app.ts' \
+	--map 'gas:gmail-app/gas-gmail-types=./gas-gmail-types.ts' \
+	--map 'gas:calendar-app/gas-calendar-app=./gas-calendar-app.ts' \
+	--map 'gas:calendar-app/gas-calendar-types=./gas-calendar-types.ts' \
+	--map 'gas:document-app/gas-document-app=./gas-document-app.ts' \
+	--map 'gas:document-app/gas-document-types=./gas-document-types.ts' \
+	--map 'gas:script-app/gas-script-app=./gas-script-app.ts' \
+	--map 'gas:script-app/gas-script-types=./gas-script-types.ts' \
+	--map 'gas:math/gas-math=./gas-math.ts' \
+	--map 'wasi:logging/logging=./log-host.ts' \
+	--map 'wasi:random/random=./wasi-random.ts' \
+	--map 'wasi:io/poll=./wasi_stub.ts' \
+	--map 'wasi:io/poll@0.2.0=./wasi_stub.ts'
 	cp $(JS_SHIMS) $(JCO_OUT_DIR)
 	echo "success to jco transpile"
 

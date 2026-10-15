@@ -1,11 +1,11 @@
 (function () {
   // --- TextEncoder (encode / encodeInto) ---
-  class PolyfillTextEncoder {
-    get encoding() {
+  class PolyfillTextEncoder implements TextEncoder {
+    get encoding(): string {
       return "utf-8";
     }
 
-    encode(input: string = ""): Uint8Array {
+    encode(input: string = ""): Uint8Array<ArrayBuffer> {
       const bytes: number[] = [];
       for (let i = 0; i < input.length; i++) {
         const cp = input.codePointAt(i)!;
@@ -29,10 +29,13 @@
           i++; // サロゲートペアをスキップ
         }
       }
-      return new Uint8Array(bytes);
+      const buffer = new ArrayBuffer(bytes.length);
+      const u8 = new Uint8Array(buffer);
+      u8.set(bytes);
+      return u8;
     }
 
-    encodeInto(source: string, destination: Uint8Array): { read: number; written: number } {
+    encodeInto(source: string, destination: Uint8Array): TextEncoderEncodeIntoResult {
       let read = 0;
       let written = 0;
       const destLen = destination.length;
@@ -72,18 +75,18 @@
   }
 
   if (!globalThis.TextEncoder) {
-    globalThis.TextEncoder = PolyfillTextEncoder as any;
+    globalThis.TextEncoder = PolyfillTextEncoder as unknown as typeof TextEncoder;
   } else if (!globalThis.TextEncoder.prototype.encodeInto) {
     globalThis.TextEncoder.prototype.encodeInto = PolyfillTextEncoder.prototype.encodeInto;
   }
 
   // --- TextDecoder (utf-8 / utf-16le) ---
-  class PolyfillTextDecoder {
+  class PolyfillTextDecoder implements TextDecoder {
     private _encoding: string;
     private _fatal: boolean;
     private _ignoreBOM: boolean;
 
-    constructor(label: string = "utf-8", options: any = {}) {
+    constructor(label: string = "utf-8", options: TextDecoderOptions = {}) {
       this._fatal = !!options.fatal;
       this._ignoreBOM = !!options.ignoreBOM;
 
@@ -95,17 +98,17 @@
       }
     }
 
-    get encoding() {
+    get encoding(): string {
       return this._encoding;
     }
-    get fatal() {
+    get fatal(): boolean {
       return this._fatal;
     }
-    get ignoreBOM() {
+    get ignoreBOM(): boolean {
       return this._ignoreBOM;
     }
 
-    decode(input: BufferSource = new Uint8Array()): string {
+    decode(input: BufferSource = new Uint8Array(), _options?: TextDecodeOptions): string {
       let bytes: Uint8Array;
       if (input instanceof Uint8Array) {
         bytes = input;
@@ -116,7 +119,7 @@
           input.byteLength
         );
       } else {
-        bytes = new Uint8Array(input as ArrayBuffer);
+        bytes = new Uint8Array(input);
       }
 
       if (bytes.length === 0) return "";
@@ -128,12 +131,12 @@
         const CHUNK = 0x4000;
         for (let i = 0; i < len; i += CHUNK) {
           const end = Math.min(i + CHUNK, len);
-          const codes = new Uint16Array(end - i);
+          const codes: number[] = new Array(end - i);
           for (let j = 0; j < codes.length; j++) {
             const byteIdx = (i + j) * 2;
             codes[j] = bytes[byteIdx] | (bytes[byteIdx + 1] << 8);
           }
-          chars.push(String.fromCharCode.apply(null, codes as any));
+          chars.push(String.fromCharCode(...codes));
         }
         return chars.join("");
       }
@@ -167,24 +170,30 @@
   }
 
   // GAS 標準の TextDecoder は utf-16le で例外を投げるため常にポリフィルを優先
-  globalThis.TextDecoder = PolyfillTextDecoder as any;
+  globalThis.TextDecoder = PolyfillTextDecoder as unknown as typeof TextDecoder;
 })();
 
 // --- atob / atobBytes (Base64 decode) ---
 (() => {
-  if (!('atob' in globalThis)) {
+  interface GlobalWithBase64 {
+    atob?: (b64: string) => string;
+    atobBytes?: (b64: string) => Uint8Array;
+  }
+
+  const g = globalThis as unknown as GlobalWithBase64;
+  if (!("atob" in g)) {
     const decodeTable = new Int16Array(256).fill(-1);
-    const abc = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+    const abc = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     for (let i = 0; i < abc.length; i++) decodeTable[abc.charCodeAt(i)] = i;
-    decodeTable['-'.charCodeAt(0)] = 62;
-    decodeTable['_'.charCodeAt(0)] = 63;
+    decodeTable["-".charCodeAt(0)] = 62;
+    decodeTable["_".charCodeAt(0)] = 63;
 
     function _decodeBase64ToBytes(b64: string): Uint8Array {
-      const s = b64.replace(/\s+/g, '');
+      const s = b64.replace(/\s+/g, "");
       if (s.length === 0) return new Uint8Array(0);
-      if (s.length % 4 === 1) throw new Error('Invalid base64 length');
+      if (s.length % 4 === 1) throw new Error("Invalid base64 length");
 
-      let validLen = s.indexOf('=');
+      let validLen = s.indexOf("=");
       if (validLen === -1) validLen = s.length;
       const placeHolders = validLen === s.length ? 0 : (4 - (validLen % 4)) % 4;
 
@@ -201,13 +210,13 @@
         const c3 = i < validLen ? decodeTable[s.charCodeAt(i++)] : 0;
 
         if (c0 < 0 || c1 < 0 || (i - 2 < validLen && c2 < 0) || (i - 1 < validLen && c3 < 0)) {
-          throw new Error('Invalid base64 character');
+          throw new Error("Invalid base64 character");
         }
 
         const triplet = (c0 << 18) | (c1 << 12) | (c2 << 6) | c3;
-        if (o < outLen) out[o++] = (triplet >> 16) & 0xFF;
-        if (o < outLen) out[o++] = (triplet >> 8) & 0xFF;
-        if (o < outLen) out[o++] = triplet & 0xFF;
+        if (o < outLen) out[o++] = (triplet >> 16) & 0xff;
+        if (o < outLen) out[o++] = (triplet >> 8) & 0xff;
+        if (o < outLen) out[o++] = triplet & 0xff;
       }
       return out;
     }
@@ -215,10 +224,9 @@
     function atobImpl(b64: string): string {
       const bytes = _decodeBase64ToBytes(String(b64));
       const CHUNK = 0x8000;
-      let out = '';
+      let out = "";
       for (let i = 0; i < bytes.length; i += CHUNK) {
-        // @ts-ignore
-        out += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK) as any);
+        out += String.fromCharCode(...Array.from(bytes.subarray(i, i + CHUNK)));
       }
       return out;
     }
@@ -227,9 +235,7 @@
       return _decodeBase64ToBytes(String(b64));
     }
 
-    // @ts-ignore
-    globalThis.atob = atobImpl;
-    // @ts-ignore
-    globalThis.atobBytes = atobBytesImpl;
+    g.atob = atobImpl;
+    g.atobBytes = atobBytesImpl;
   }
 })();

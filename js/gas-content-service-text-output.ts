@@ -1,13 +1,15 @@
+// gas:content-service/gas-text-output@0.1.0-alpha
+
 export type MimeType =
-	| 'atom'
-	| 'csv'
-	| 'ical'
-	| 'javascript'
-	| 'json'
-	| 'rss'
-	| 'text'
-	| 'vcard'
-	| 'xml';
+	| "atom"
+	| "csv"
+	| "ical"
+	| "javascript"
+	| "json"
+	| "rss"
+	| "text"
+	| "vcard"
+	| "xml";
 
 export class GasTextOutput {
 	public readonly rawTextOutput: GoogleAppsScript.Content.TextOutput;
@@ -48,24 +50,24 @@ export class GasTextOutput {
 		const raw = this.rawTextOutput.getMimeType();
 		switch (raw) {
 			case ContentService.MimeType.ATOM:
-				return 'atom';
+				return "atom";
 			case ContentService.MimeType.CSV:
-				return 'csv';
+				return "csv";
 			case ContentService.MimeType.ICAL:
-				return 'ical';
+				return "ical";
 			case ContentService.MimeType.JAVASCRIPT:
-				return 'javascript';
+				return "javascript";
 			case ContentService.MimeType.JSON:
-				return 'json';
+				return "json";
 			case ContentService.MimeType.RSS:
-				return 'rss';
+				return "rss";
 			case ContentService.MimeType.VCARD:
-				return 'vcard';
+				return "vcard";
 			case ContentService.MimeType.XML:
-				return 'xml';
+				return "xml";
 			case ContentService.MimeType.TEXT:
 			default:
-				return 'text';
+				return "text";
 		}
 	}
 

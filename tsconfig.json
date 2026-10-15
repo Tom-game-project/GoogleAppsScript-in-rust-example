@@ -16,10 +16,13 @@
     "allowJs": true
   },
   "include": [
+    "./main.ts",
+    "./textencoderdecoder.ts",
+    "./js/**/*.ts",
+    "./target/jco/**/*.ts",
     "./target/jco/**/*.js"
   ],
   "exclude": [
     "node_modules"
   ]
 }
-

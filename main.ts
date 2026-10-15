@@ -17,15 +17,30 @@ import "./textencoderdecoder";
 import { GasTextOutput } from "./js/gas-content-service-text-output";
 import { GasHtmlOutput } from "./js/gas-html-service-output";
 
-declare const global: any;
+interface GasGlobal {
+    doGet: (e: GoogleAppsScript.Events.DoGet) => GoogleAppsScript.Content.TextOutput;
+    do_get_test00: () => void;
+    doPost: (e: GoogleAppsScript.Events.DoPost) => void;
+    aaa: () => void;
+    resource_example: () => void;
+    helloworldExample: () => void;
+    get_script_properties_example: () => void;
+    spreadsheet_example: () => void;
+    fff: () => void;
+    http_request_test: () => void;
+    utilities_example: () => void;
+    html_service_example: () => GoogleAppsScript.HTML.HtmlOutput;
+}
+
+declare const global: GasGlobal;
 
 global.doGet = function(e: GoogleAppsScript.Events.DoGet): GoogleAppsScript.Content.TextOutput {
-    let r = rsDoGet(JSON.stringify(e)) as unknown as GasTextOutput;
+    const r = rsDoGet(JSON.stringify(e)) as unknown as GasTextOutput;
     return r.rawTextOutput;
 };
 
-global.do_get_test00 = function() {
-    let a = `
+global.do_get_test00 = function(): void {
+    const a = `
             {
                "parameter": {
                  "name": "tom",
@@ -38,7 +53,7 @@ global.do_get_test00 = function() {
                  "msg": [
                    "hello"
                  ],
-               "age": [
+                 "age": [
                    "21"
                  ],
                  "name": [
@@ -48,47 +63,47 @@ global.do_get_test00 = function() {
                "queryString": "name=tom&age=21&msg=hello"
              }
     `;
-    let r = rsDoGet(a);
+    const r = rsDoGet(a);
     Logger.log(r);
 };
 
-global.doPost = function(e: any) {
+global.doPost = function(_e: GoogleAppsScript.Events.DoPost): void {
 };
 
-global.aaa = function() {
-    let msg = scream("hello world");
+global.aaa = function(): void {
+    const msg = scream("hello world");
     sayHello(msg);
 };
 
-global.resource_example = function() {
+global.resource_example = function(): void {
     resourceExample();
 };
 
-global.helloworldExample = function() {
+global.helloworldExample = function(): void {
     helloworldExample();
 };
 
-global.get_script_properties_example = function() {
+global.get_script_properties_example = function(): void {
     getScriptPropertiesExample();
 };
 
-global.spreadsheet_example = function() {
+global.spreadsheet_example = function(): void {
     spreadsheetExample();
 };
 
-global.fff = function() {
+global.fff = function(): void {
     console.log(variantFunc00());
 };
 
-global.http_request_test = function() {
+global.http_request_test = function(): void {
     httpRequestTest();
 };
 
-global.utilities_example = function() {
+global.utilities_example = function(): void {
     utilitiesExample();
 };
 
 global.html_service_example = function(): GoogleAppsScript.HTML.HtmlOutput {
-    let out = htmlServiceExample() as unknown as GasHtmlOutput;
+    const out = htmlServiceExample() as unknown as GasHtmlOutput;
     return out.rawHtmlOutput;
 };

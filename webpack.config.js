@@ -17,30 +17,37 @@ module.exports = {
     rules: [
       {
         test: /\.ts$/,
-        use: 'ts-loader',
+        use: [
+          {
+            loader: 'babel-loader',
+            options: {
+              compact: false,
+            },
+          },
+          'ts-loader',
+        ],
         exclude: /node_modules/,
       },
       {
         test: /\.js$/,
-        // exclude: /node_modules\/(?!@bytecodealliance\/preview2-shim)/,
-	exclude: (modulePath) => {
-    // node_modules以下なら一旦除外
-    if (/node_modules/.test(modulePath)) {
-      // ただし、@bytecodealliance/preview2-shim は含める
-      if (/node_modules\/@bytecodealliance\/preview2-shim/.test(modulePath)) {
-        return false; // exclude しない
-      }
-      return true; // exclude する
-    }
-    return false; // exclude しない（自前コードなど）
-  },
+        exclude: (modulePath) => {
+          // node_modules以下なら一旦除外
+          if (/node_modules/.test(modulePath)) {
+            // ただし、@bytecodealliance/preview2-shim は含める
+            if (/node_modules\/@bytecodealliance\/preview2-shim/.test(modulePath)) {
+              return false; // exclude しない
+            }
+            return true; // exclude する
+          }
+          return false; // exclude しない（自前コードなど）
+        },
         use: {
-          loader: "babel-loader",
-	  options: {
-            compact: false
-	  }
-        }
-      }
+          loader: 'babel-loader',
+          options: {
+            compact: false,
+          },
+        },
+      },
     ],
   },
   resolve: {
@@ -49,8 +56,7 @@ module.exports = {
   plugins: [
     new GasPlugin(),
     new webpack.NormalModuleReplacementPlugin(/^wasi:/, (resource) => {
-      resource.request = path.resolve(__dirname, 'js/wasi_stub.js');
+      resource.request = path.resolve(__dirname, 'js/wasi_stub.ts');
     }),
   ],
 };
-
