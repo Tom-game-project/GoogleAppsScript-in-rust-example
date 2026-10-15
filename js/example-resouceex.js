@@ -1,7 +1,7 @@
 // このファイルは、WITファイルで定義された 'builder' インターフェースの
 // 具体的な実装を提供します。
 
-export const ExampleList = class ExampleList {
+export class ExampleList {
     _value = '';
 
     constructor() {

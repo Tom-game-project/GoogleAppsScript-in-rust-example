@@ -16,11 +16,7 @@
     "@types/google-apps-script": "^1.0.100"
   },
   "devDependencies": {
-    "@babel/cli": "^7.29.7",
     "@babel/core": "^7.28.3",
-    "@babel/plugin-proposal-class-properties": "^7.18.6",
-    "@babel/plugin-proposal-private-methods": "^7.18.6",
-    "@babel/plugin-proposal-private-property-in-object": "^7.21.11",
     "@babel/preset-env": "^7.28.3",
     "@bytecodealliance/jco": "^1.15.3",
     "babel-loader": "^10.0.0",

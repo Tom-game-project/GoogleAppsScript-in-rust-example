@@ -1,0 +1,32 @@
+package gas:mail-app@0.1.0-alpha;
+
+use gas:drive-app/gas-blob@0.1.0-alpha;
+
+/// https://developers.google.com/apps-script/reference/mail/mail-app
+interface gas-mail-app {
+	use gas-blob.{gas-blob};
+
+	record mail-advanced-parameters {
+		attachments: option<list<gas-blob>>,
+		bcc: option<string>,
+		cc: option<string>,
+		html-body: option<string>,
+		name: option<string>,
+		no-reply: option<bool>,
+		reply-to: option<string>,
+	}
+
+	record mail-message {
+		recipient: string,
+		subject: string,
+		body: string,
+		options: option<mail-advanced-parameters>,
+	}
+
+	get-remaining-daily-quota: func() -> s32;
+	send-email: func(message: mail-message);
+}
+
+world imports {
+	import gas-mail-app;
+}

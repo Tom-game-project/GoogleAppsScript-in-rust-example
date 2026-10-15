@@ -1,22 +1,20 @@
+// gas:property/properties-service@0.1.0-alpha
 import { Properties } from "./gas-property-properties";
 
-export const getUserProperties = function ()
-{
-	const f = PropertiesService.getUserProperties()
+export function getDocumentProperties() {
+	const p = PropertiesService.getDocumentProperties();
+	if (p === null || p === undefined) {
+		return undefined;
+	}
+	return new Properties(p);
+};
 
-	return new Properties(f);
-}
+export function getScriptProperties() {
+	const p = PropertiesService.getScriptProperties();
+	return new Properties(p);
+};
 
-export const getScriptProperties = function ()
-{
-	const f = PropertiesService.getScriptProperties()
-
-	return new Properties(f);
-}
-
-export const getDocumentProperties = function ()
-{
-	const f = PropertiesService.getDocumentProperties();
-
-	return new Properties(f);
-}
+export function getUserProperties() {
+	const p = PropertiesService.getUserProperties();
+	return new Properties(p);
+};

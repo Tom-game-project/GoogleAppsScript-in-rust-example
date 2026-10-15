@@ -1,0 +1,91 @@
+package gas:html-service@0.1.0-alpha;
+
+use gas:drive-app/gas-blob@0.1.0-alpha;
+
+/// https://developers.google.com/apps-script/reference/html/html-output
+/// https://developers.google.com/apps-script/reference/html/html-template
+interface gas-html-output {
+	use gas-blob.{gas-blob};
+
+	/// https://developers.google.com/apps-script/reference/html/sandbox-mode
+	enum sandbox-mode {
+		emulated,
+		iframe,
+		native,
+	}
+
+	/// https://developers.google.com/apps-script/reference/html/x-frame-options-mode
+	enum x-frame-options-mode {
+		allowall,
+		default-mode,
+	}
+
+	variant html-source {
+		html(string),
+		blob(gas-blob),
+	}
+
+	/// https://developers.google.com/apps-script/reference/html/html-output-meta-tag
+	resource gas-html-output-meta-tag {
+		constructor();
+		get-content: func() -> string;
+		get-name: func() -> string;
+	}
+
+	resource gas-html-output {
+		constructor();
+		add-meta-tag: func(name: string, content: string) -> gas-html-output;
+		append: func(added-content: string) -> gas-html-output;
+		append-untrusted: func(added-content: string) -> gas-html-output;
+		as-template: func() -> gas-html-template;
+		clear: func() -> gas-html-output;
+		get-as: func(content-type: string) -> gas-blob;
+		get-blob: func() -> gas-blob;
+		get-content: func() -> string;
+		get-favicon-url: func() -> option<string>;
+		get-height: func() -> option<s32>;
+		get-meta-tags: func() -> list<gas-html-output-meta-tag>;
+		get-title: func() -> string;
+		get-width: func() -> option<s32>;
+		set-content: func(content: string) -> gas-html-output;
+		set-favicon-url: func(icon-url: string) -> gas-html-output;
+		set-height: func(height: s32) -> gas-html-output;
+		set-sandbox-mode: func(mode: sandbox-mode) -> gas-html-output;
+		set-title: func(title: string) -> gas-html-output;
+		set-width: func(width: s32) -> gas-html-output;
+		set-x-frame-options-mode: func(mode: x-frame-options-mode) -> gas-html-output;
+	}
+
+	resource gas-html-template {
+		constructor();
+		evaluate: func() -> gas-html-output;
+		get-code: func() -> string;
+		get-code-with-comments: func() -> string;
+		get-raw-content: func() -> string;
+		set-property: func(key: string, value: string) -> gas-html-template;
+		set-json-properties: func(json-object: string) -> gas-html-template;
+	}
+}
+
+/// https://developers.google.com/apps-script/reference/html/html-service
+interface gas-html-service {
+	use gas-html-output.{
+		gas-html-output,
+		gas-html-template,
+		gas-html-output-meta-tag,
+		sandbox-mode,
+		x-frame-options-mode,
+		html-source,
+	};
+
+	create-html-output: func(source: option<html-source>) -> gas-html-output;
+	create-html-output-from-file: func(filename: string) -> gas-html-output;
+	create-template: func(source: html-source) -> gas-html-template;
+	create-template-from-file: func(filename: string) -> gas-html-template;
+	get-user-agent: func() -> string;
+}
+
+world imports {
+	import gas-html-output;
+	import gas-html-service;
+}

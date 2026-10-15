@@ -4,17 +4,31 @@ world my-world {
 	import wasi:logging/logging@0.1.0-draft;
 	import example:resouceex/example-resource;
 
-	// for google apps script api
+	// Google Apps Script APIs
 	import gas:logger/logger@0.1.0-alpha;
 	import gas:drive-app/gas-drive-app@0.1.0-alpha;
 	import gas:property/properties-service@0.1.0-alpha;
 	import gas:spreadsheet-app/gas-spreadsheet-app@0.1.0-alpha;
 
-    import gas:content-service/gas-content-service@0.1.0-alpha;
-    use gas:content-service/gas-text-output@0.1.0-alpha.{gas-text-output};
+	import gas:content-service/gas-content-service@0.1.0-alpha;
+	use gas:content-service/gas-text-output@0.1.0-alpha.{gas-text-output};
 
 	import gas:math/gas-math@0.1.0-alpha;
-    import gas:urlfetchapp/gas-url-fetch-app@0.1.0-alpha;
+	import gas:urlfetchapp/gas-url-fetch-app@0.1.0-alpha;
+
+	import gas:utilities/gas-utilities@0.1.0-alpha;
+
+	import gas:html-service/gas-html-service@0.1.0-alpha;
+	use gas:html-service/gas-html-output@0.1.0-alpha.{gas-html-output};
+
+	import gas:cache-service/gas-cache-service@0.1.0-alpha;
+	import gas:lock-service/gas-lock-service@0.1.0-alpha;
+	import gas:session/gas-session@0.1.0-alpha;
+	import gas:mail-app/gas-mail-app@0.1.0-alpha;
+	import gas:gmail-app/gas-gmail-app@0.1.0-alpha;
+	import gas:calendar-app/gas-calendar-app@0.1.0-alpha;
+	import gas:document-app/gas-document-app@0.1.0-alpha;
+	import gas:script-app/gas-script-app@0.1.0-alpha;
 
 	variant cell-value {
 		empty,
@@ -32,5 +46,7 @@ world my-world {
 	export helloworld-example: func();
 	export get-script-properties-example: func();
 	export spreadsheet-example: func();
-    export http-request-test: func();
+	export http-request-test: func();
+	export utilities-example: func();
+	export html-service-example: func() -> gas-html-output;
 }

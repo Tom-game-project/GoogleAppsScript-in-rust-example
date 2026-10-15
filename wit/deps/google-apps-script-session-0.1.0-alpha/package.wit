@@ -1,0 +1,18 @@
+package gas:session@0.1.0-alpha;
+
+use gas:drive-app/gas-file@0.1.0-alpha;
+
+/// https://developers.google.com/apps-script/reference/base/session
+interface gas-session {
+	use gas-file.{gas-user};
+
+	get-active-user: func() -> gas-user;
+	get-active-user-locale: func() -> string;
+	get-effective-user: func() -> gas-user;
+	get-script-time-zone: func() -> string;
+	get-temporary-active-user-key: func() -> string;
+}
+
+world imports {
+	import gas-session;
+}

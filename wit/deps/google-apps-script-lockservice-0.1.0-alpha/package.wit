@@ -1,0 +1,26 @@
+package gas:lock-service@0.1.0-alpha;
+
+/// https://developers.google.com/apps-script/reference/lock/lock
+interface gas-lock {
+	resource gas-lock {
+		constructor();
+		has-lock: func() -> bool;
+		release-lock: func();
+		try-lock: func(timeout-in-millis: s32) -> bool;
+		wait-lock: func(timeout-in-millis: s32);
+	}
+}
+
+/// https://developers.google.com/apps-script/reference/lock/lock-service
+interface gas-lock-service {
+	use gas-lock.{gas-lock};
+
+	get-document-lock: func() -> option<gas-lock>;
+	get-script-lock: func() -> gas-lock;
+	get-user-lock: func() -> gas-lock;
+}
+
+world imports {
+	import gas-lock;
+	import gas-lock-service;
+}

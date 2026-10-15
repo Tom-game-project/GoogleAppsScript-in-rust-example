@@ -1,0 +1,73 @@
+package gas:script-app@0.1.0-alpha;
+
+/// https://developers.google.com/apps-script/reference/script
+interface gas-script-types {
+	enum auth-mode {
+		custom-function,
+		full,
+		limited,
+		none,
+	}
+
+	enum authorization-status {
+		not-required,
+		required,
+	}
+
+	enum event-type {
+		clock,
+		on-change,
+		on-edit,
+		on-event-updated,
+		on-form-submit,
+		on-open,
+	}
+
+	enum trigger-source {
+		calendar,
+		clock,
+		documents,
+		forms,
+		spreadsheets,
+	}
+
+	resource gas-authorization-info {
+		constructor();
+		get-authorization-status: func() -> authorization-status;
+		get-authorization-url: func() -> option<string>;
+	}
+
+	resource gas-trigger {
+		constructor();
+		get-event-type: func() -> event-type;
+		get-handler-function: func() -> string;
+		get-trigger-source: func() -> trigger-source;
+		get-trigger-source-id: func() -> option<string>;
+		get-unique-id: func() -> string;
+	}
+}
+
+/// https://developers.google.com/apps-script/reference/script/script-app
+interface gas-script-app {
+	use gas-script-types.{
+		auth-mode,
+		authorization-status,
+		event-type,
+		trigger-source,
+		gas-authorization-info,
+		gas-trigger,
+	};
+
+	delete-trigger: func(trigger: borrow<gas-trigger>);
+	get-authorization-info: func(auth-mode: auth-mode) -> gas-authorization-info;
+	get-identity-token: func() -> string;
+	get-oauth-token: func() -> string;
+	get-project-triggers: func() -> list<gas-trigger>;
+	get-script-id: func() -> string;
+	invalidate-auth: func();
+}
+
+world imports {
+	import gas-script-types;
+	import gas-script-app;
+}

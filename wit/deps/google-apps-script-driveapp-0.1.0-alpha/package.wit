@@ -1,46 +1,232 @@
 package gas:drive-app@0.1.0-alpha;
 
+/// https://developers.google.com/apps-script/reference/base/blob
 interface gas-blob {
 	resource gas-blob {
 		constructor();
+		copy-blob: func() -> gas-blob;
+		get-as: func(content-type: string) -> gas-blob;
 		get-bytes: func() -> list<u8>;
+		get-content-type: func() -> option<string>;
+		get-data-as-string: func(charset: option<string>) -> string;
+		get-name: func() -> option<string>;
+		is-google-type: func() -> bool;
 		set-bytes: func(data: list<u8>) -> gas-blob;
-		get-data-as-string: func() -> string;
+		set-content-type: func(content-type: string) -> gas-blob;
+		set-content-type-from-extension: func() -> gas-blob;
+		set-data-from-string: func(data: string, charset: option<string>) -> gas-blob;
+		set-name: func(name: string) -> gas-blob;
 	}
 }
 
+/// https://developers.google.com/apps-script/reference/drive/access
+/// https://developers.google.com/apps-script/reference/drive/permission
 interface gas-access {
 	enum gas-access {
-	    anyone,
-	    anyone-with-link,
-	    domain,
-	    domain-with-link,
-	    private,
+		anyone,
+		anyone-with-link,
+		domain,
+		domain-with-link,
+		private,
+	}
+
+	enum gas-permission {
+		comment,
+		edit,
+		none,
+		organizer,
+		file-organizer,
+		owner,
+		view,
 	}
 }
 
+/// https://developers.google.com/apps-script/reference/drive/file
+/// https://developers.google.com/apps-script/reference/drive/folder
 interface gas-file {
 	use gas-blob.{gas-blob};
-	use gas-access.{gas-access};
+	use gas-access.{gas-access, gas-permission};
+
+	resource gas-user {
+		constructor();
+		get-domain: func() -> string;
+		get-email: func() -> string;
+		get-name: func() -> string;
+		get-photo-url: func() -> option<string>;
+	}
+
+	record text-file-spec {
+		name: string,
+		content: string,
+		mime-type: option<string>,
+	}
+
+	variant create-file-input {
+		from-blob(gas-blob),
+		from-text(text-file-spec),
+	}
+
+	record make-copy-options {
+		name: option<string>,
+		destination: option<gas-folder>,
+	}
 
 	resource gas-file {
 		constructor();
-		get-name: func() -> string;
+		add-commenter: func(email-address: string) -> gas-file;
+		add-commenters: func(email-addresses: list<string>) -> gas-file;
+		add-editor: func(email-address: string) -> gas-file;
+		add-editors: func(email-addresses: list<string>) -> gas-file;
+		add-viewer: func(email-address: string) -> gas-file;
+		add-viewers: func(email-addresses: list<string>) -> gas-file;
+		get-access: func(email: string) -> gas-permission;
+		get-as: func(content-type: string) -> gas-blob;
 		get-blob: func() -> gas-blob;
+		get-date-created: func() -> s64;
+		get-description: func() -> option<string>;
+		get-download-url: func() -> option<string>;
+		get-editors: func() -> list<gas-user>;
+		get-id: func() -> string;
+		get-last-updated: func() -> s64;
+		get-mime-type: func() -> string;
+		get-name: func() -> string;
+		get-owner: func() -> option<gas-user>;
+		get-parents: func() -> gas-folder-iterator;
+		get-sharing-access: func() -> gas-access;
+		get-sharing-permission: func() -> gas-permission;
+		get-size: func() -> s64;
+		get-target-id: func() -> option<string>;
+		get-target-mime-type: func() -> option<string>;
+		get-thumbnail: func() -> option<gas-blob>;
+		get-url: func() -> string;
+		get-viewers: func() -> list<gas-user>;
+		is-shareable-by-editors: func() -> bool;
+		is-starred: func() -> bool;
+		is-trashed: func() -> bool;
+		make-copy: func(options: option<make-copy-options>) -> gas-file;
+		move-to: func(destination: borrow<gas-folder>) -> gas-file;
+		remove-commenter: func(email-address: string) -> gas-file;
+		remove-editor: func(email-address: string) -> gas-file;
+		remove-viewer: func(email-address: string) -> gas-file;
+		revoke-permissions: func(email-address: string) -> gas-file;
 		set-content: func(content: string) -> gas-file;
-		get-sharing-access: func () -> gas-access;
+		set-description: func(description: string) -> gas-file;
+		set-name: func(name: string) -> gas-file;
+		set-owner: func(email-address: string) -> gas-file;
+		set-shareable-by-editors: func(shareable: bool) -> gas-file;
+		set-sharing: func(access-type: gas-access, permission-type: gas-permission) -> gas-file;
+		set-starred: func(starred: bool) -> gas-file;
+		set-trashed: func(trashed: bool) -> gas-file;
+	}
+
+	resource gas-folder {
+		constructor();
+		add-editor: func(email-address: string) -> gas-folder;
+		add-editors: func(email-addresses: list<string>) -> gas-folder;
+		add-file: func(child: borrow<gas-file>) -> gas-folder;
+		add-folder: func(child: borrow<gas-folder>) -> gas-folder;
+		add-viewer: func(email-address: string) -> gas-folder;
+		add-viewers: func(email-addresses: list<string>) -> gas-folder;
+		create-file: func(input: create-file-input) -> gas-file;
+		create-folder: func(name: string) -> gas-folder;
+		create-shortcut: func(target-id: string) -> gas-file;
+		get-access: func(email: string) -> gas-permission;
+		get-date-created: func() -> s64;
+		get-description: func() -> option<string>;
+		get-editors: func() -> list<gas-user>;
+		get-files: func() -> gas-file-iterator;
+		get-files-by-name: func(name: string) -> gas-file-iterator;
+		get-files-by-type: func(mime-type: string) -> gas-file-iterator;
+		get-folders: func() -> gas-folder-iterator;
+		get-folders-by-name: func(name: string) -> gas-folder-iterator;
+		get-id: func() -> string;
+		get-last-updated: func() -> s64;
+		get-name: func() -> string;
+		get-owner: func() -> option<gas-user>;
+		get-parents: func() -> gas-folder-iterator;
+		get-sharing-access: func() -> gas-access;
+		get-sharing-permission: func() -> gas-permission;
+		get-size: func() -> s64;
+		get-url: func() -> string;
+		get-viewers: func() -> list<gas-user>;
+		is-shareable-by-editors: func() -> bool;
+		is-starred: func() -> bool;
+		is-trashed: func() -> bool;
+		move-to: func(destination: borrow<gas-folder>) -> gas-folder;
+		remove-editor: func(email-address: string) -> gas-folder;
+		remove-file: func(child: borrow<gas-file>) -> gas-folder;
+		remove-folder: func(child: borrow<gas-folder>) -> gas-folder;
+		remove-viewer: func(email-address: string) -> gas-folder;
+		revoke-permissions: func(email-address: string) -> gas-folder;
+		search-files: func(params: string) -> gas-file-iterator;
+		search-folders: func(params: string) -> gas-folder-iterator;
+		set-description: func(description: string) -> gas-folder;
+		set-name: func(name: string) -> gas-folder;
+		set-owner: func(email-address: string) -> gas-folder;
+		set-shareable-by-editors: func(shareable: bool) -> gas-folder;
+		set-sharing: func(access-type: gas-access, permission-type: gas-permission) -> gas-folder;
+		set-starred: func(starred: bool) -> gas-folder;
+		set-trashed: func(trashed: bool) -> gas-folder;
+	}
+
+	resource gas-file-iterator {
+		constructor();
+		get-continuation-token: func() -> string;
+		has-next: func() -> bool;
+		next: func() -> gas-file;
+	}
+
+	resource gas-folder-iterator {
+		constructor();
+		get-continuation-token: func() -> string;
+		has-next: func() -> bool;
+		next: func() -> gas-folder;
 	}
 }
 
+/// https://developers.google.com/apps-script/reference/drive/drive-app
 interface gas-drive-app {
-	use gas-file.{gas-file};
+	use gas-blob.{gas-blob};
+	use gas-access.{gas-access, gas-permission};
+	use gas-file.{
+		gas-user,
+		gas-file,
+		gas-folder,
+		gas-file-iterator,
+		gas-folder-iterator,
+		create-file-input,
+		text-file-spec,
+		make-copy-options,
+	};
 
+	add-file: func(child: borrow<gas-file>) -> gas-folder;
+	add-folder: func(child: borrow<gas-folder>) -> gas-folder;
+	continue-file-iterator: func(continuation-token: string) -> gas-file-iterator;
+	continue-folder-iterator: func(continuation-token: string) -> gas-folder-iterator;
+	create-file: func(input: create-file-input) -> gas-file;
+	create-folder: func(name: string) -> gas-folder;
+	create-shortcut: func(target-id: string) -> gas-file;
 	get-file-by-id: func(id: string) -> option<gas-file>;
+	get-files: func() -> gas-file-iterator;
+	get-files-by-name: func(name: string) -> gas-file-iterator;
+	get-files-by-type: func(mime-type: string) -> gas-file-iterator;
+	get-folder-by-id: func(id: string) -> option<gas-folder>;
+	get-folders: func() -> gas-folder-iterator;
+	get-folders-by-name: func(name: string) -> gas-folder-iterator;
+	get-root-folder: func() -> gas-folder;
+	get-storage-limit: func() -> s64;
 	get-storage-used: func() -> s64;
+	get-trashed-files: func() -> gas-file-iterator;
+	get-trashed-folders: func() -> gas-folder-iterator;
+	remove-file: func(child: borrow<gas-file>) -> gas-folder;
+	remove-folder: func(child: borrow<gas-folder>) -> gas-folder;
+	search-files: func(params: string) -> gas-file-iterator;
+	search-folders: func(params: string) -> gas-folder-iterator;
 }
 
 world imports {
 	import gas-blob;
+	import gas-access;
 	import gas-file;
 	import gas-drive-app;
 }

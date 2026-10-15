@@ -1,0 +1,144 @@
+package gas:gmail-app@0.1.0-alpha;
+
+use gas:drive-app/gas-blob@0.1.0-alpha;
+
+/// https://developers.google.com/apps-script/reference/gmail
+interface gas-gmail-types {
+	use gas-blob.{gas-blob};
+
+	record gmail-advanced-options {
+		attachments: option<list<gas-blob>>,
+		bcc: option<string>,
+		cc: option<string>,
+		from-address: option<string>,
+		html-body: option<string>,
+		name: option<string>,
+		no-reply: option<bool>,
+		reply-to: option<string>,
+	}
+
+	resource gas-gmail-label {
+		constructor();
+		delete-label: func();
+		get-name: func() -> string;
+		get-threads: func(start: option<s32>, max: option<s32>) -> list<gas-gmail-thread>;
+		get-unread-count: func() -> s32;
+	}
+
+	resource gas-gmail-message {
+		constructor();
+		forward: func(recipient: string, options: option<gmail-advanced-options>) -> gas-gmail-message;
+		get-attachments: func() -> list<gas-blob>;
+		get-bcc: func() -> string;
+		get-body: func() -> string;
+		get-cc: func() -> string;
+		get-date: func() -> s64;
+		get-from: func() -> string;
+		get-header: func(name: string) -> string;
+		get-id: func() -> string;
+		get-plain-body: func() -> string;
+		get-raw-content: func() -> string;
+		get-reply-to: func() -> string;
+		get-subject: func() -> string;
+		get-thread: func() -> gas-gmail-thread;
+		get-to: func() -> string;
+		is-draft: func() -> bool;
+		is-in-chats: func() -> bool;
+		is-in-inbox: func() -> bool;
+		is-in-spam: func() -> bool;
+		is-in-trash: func() -> bool;
+		is-starred: func() -> bool;
+		is-unread: func() -> bool;
+		mark-read: func() -> gas-gmail-message;
+		mark-unread: func() -> gas-gmail-message;
+		move-to-trash: func() -> gas-gmail-message;
+		refresh: func() -> gas-gmail-message;
+		reply: func(body: string, options: option<gmail-advanced-options>) -> gas-gmail-message;
+		reply-all: func(body: string, options: option<gmail-advanced-options>) -> gas-gmail-message;
+		star: func() -> gas-gmail-message;
+		unstar: func() -> gas-gmail-message;
+	}
+
+	resource gas-gmail-thread {
+		constructor();
+		add-label: func(label: borrow<gas-gmail-label>) -> gas-gmail-thread;
+		create-draft-reply: func(body: string, options: option<gmail-advanced-options>) -> gas-gmail-draft;
+		create-draft-reply-all: func(body: string, options: option<gmail-advanced-options>) -> gas-gmail-draft;
+		get-first-message-subject: func() -> string;
+		get-id: func() -> string;
+		get-labels: func() -> list<gas-gmail-label>;
+		get-last-message-date: func() -> s64;
+		get-message-count: func() -> s32;
+		get-messages: func() -> list<gas-gmail-message>;
+		get-permalink: func() -> string;
+		has-starred-messages: func() -> bool;
+		is-important: func() -> bool;
+		is-in-chats: func() -> bool;
+		is-in-inbox: func() -> bool;
+		is-in-priority-inbox: func() -> bool;
+		is-in-spam: func() -> bool;
+		is-in-trash: func() -> bool;
+		is-unread: func() -> bool;
+		mark-important: func() -> gas-gmail-thread;
+		mark-read: func() -> gas-gmail-thread;
+		mark-unimportant: func() -> gas-gmail-thread;
+		mark-unread: func() -> gas-gmail-thread;
+		move-to-archive: func() -> gas-gmail-thread;
+		move-to-inbox: func() -> gas-gmail-thread;
+		move-to-spam: func() -> gas-gmail-thread;
+		move-to-trash: func() -> gas-gmail-thread;
+		refresh: func() -> gas-gmail-thread;
+		remove-label: func(label: borrow<gas-gmail-label>) -> gas-gmail-thread;
+		reply: func(body: string, options: option<gmail-advanced-options>) -> gas-gmail-thread;
+		reply-all: func(body: string, options: option<gmail-advanced-options>) -> gas-gmail-thread;
+	}
+
+	resource gas-gmail-draft {
+		constructor();
+		delete-draft: func();
+		get-id: func() -> string;
+		get-message: func() -> gas-gmail-message;
+		get-message-id: func() -> string;
+		send: func() -> gas-gmail-message;
+		update: func(recipient: string, subject: string, body: string, options: option<gmail-advanced-options>) -> gas-gmail-draft;
+	}
+}
+
+/// https://developers.google.com/apps-script/reference/gmail/gmail-app
+interface gas-gmail-app {
+	use gas-gmail-types.{
+		gas-gmail-label,
+		gas-gmail-message,
+		gas-gmail-thread,
+		gas-gmail-draft,
+		gmail-advanced-options,
+	};
+
+	create-draft: func(recipient: string, subject: string, body: string, options: option<gmail-advanced-options>) -> gas-gmail-draft;
+	create-label: func(name: string) -> gas-gmail-label;
+	delete-label: func(label: borrow<gas-gmail-label>);
+	get-aliases: func() -> list<string>;
+	get-draft: func(draft-id: string) -> gas-gmail-draft;
+	get-draft-messages: func() -> list<gas-gmail-message>;
+	get-drafts: func() -> list<gas-gmail-draft>;
+	get-inbox-threads: func(start: option<s32>, max: option<s32>) -> list<gas-gmail-thread>;
+	get-inbox-unread-count: func() -> s32;
+	get-message-by-id: func(id: string) -> option<gas-gmail-message>;
+	get-priority-inbox-threads: func(start: option<s32>, max: option<s32>) -> list<gas-gmail-thread>;
+	get-priority-inbox-unread-count: func() -> s32;
+	get-spam-threads: func(start: option<s32>, max: option<s32>) -> list<gas-gmail-thread>;
+	get-spam-unread-count: func() -> s32;
+	get-starred-threads: func(start: option<s32>, max: option<s32>) -> list<gas-gmail-thread>;
+	get-starred-unread-count: func() -> s32;
+	get-thread-by-id: func(id: string) -> option<gas-gmail-thread>;
+	get-trash-threads: func(start: option<s32>, max: option<s32>) -> list<gas-gmail-thread>;
+	get-user-label-by-name: func(name: string) -> option<gas-gmail-label>;
+	get-user-labels: func() -> list<gas-gmail-label>;
+	search: func(query: string, start: option<s32>, max: option<s32>) -> list<gas-gmail-thread>;
+	send-email: func(recipient: string, subject: string, body: string, options: option<gmail-advanced-options>);
+}
+
+world imports {
+	import gas-gmail-types;
+	import gas-gmail-app;
+}

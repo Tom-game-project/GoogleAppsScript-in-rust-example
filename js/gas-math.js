@@ -1,4 +1,4 @@
-export const random = function () {
+export function random() {
 	return Math.random();
 }
 

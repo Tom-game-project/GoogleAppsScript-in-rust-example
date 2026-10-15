@@ -1,0 +1,153 @@
+package gas:calendar-app@0.1.0-alpha;
+
+/// https://developers.google.com/apps-script/reference/calendar
+interface gas-calendar-types {
+	enum guest-status {
+		invited,
+		maybe,
+		no,
+		owner,
+		yes,
+	}
+
+	enum visibility {
+		confidential,
+		default-visibility,
+		private,
+		public,
+	}
+
+	record event-options {
+		description: option<string>,
+		location: option<string>,
+		guests: option<string>,
+		send-invites: option<bool>,
+	}
+
+	resource gas-event-guest {
+		constructor();
+		get-additional-guests: func() -> s32;
+		get-email: func() -> string;
+		get-guest-status: func() -> guest-status;
+		get-name: func() -> string;
+	}
+
+	resource gas-calendar-event {
+		constructor();
+		add-email-reminder: func(minutes-before: s32) -> gas-calendar-event;
+		add-guest: func(email: string) -> gas-calendar-event;
+		add-popup-reminder: func(minutes-before: s32) -> gas-calendar-event;
+		anyone-can-add-self: func() -> bool;
+		delete-event: func();
+		get-all-day-end-date: func() -> s64;
+		get-all-day-start-date: func() -> s64;
+		get-color: func() -> string;
+		get-creators: func() -> list<string>;
+		get-date-created: func() -> s64;
+		get-description: func() -> string;
+		get-email-reminders: func() -> list<s32>;
+		get-end-time: func() -> s64;
+		get-guest-by-email: func(email: string) -> option<gas-event-guest>;
+		get-guest-list: func(include-owner: option<bool>) -> list<gas-event-guest>;
+		get-id: func() -> string;
+		get-last-updated: func() -> s64;
+		get-location: func() -> string;
+		get-my-status: func() -> guest-status;
+		get-original-calendar-id: func() -> string;
+		get-popup-reminders: func() -> list<s32>;
+		get-start-time: func() -> s64;
+		get-tag: func(key: string) -> option<string>;
+		get-title: func() -> string;
+		get-visibility: func() -> visibility;
+		guests-can-invite-others: func() -> bool;
+		guests-can-modify: func() -> bool;
+		guests-can-see-guests: func() -> bool;
+		is-all-day-event: func() -> bool;
+		is-owned-by-me: func() -> bool;
+		is-recurring-event: func() -> bool;
+		remove-all-reminders: func() -> gas-calendar-event;
+		remove-guest: func(email: string) -> gas-calendar-event;
+		set-all-day-date: func(date-epoch-millis: s64) -> gas-calendar-event;
+		set-all-day-dates: func(start-date-epoch-millis: s64, end-date-epoch-millis: s64) -> gas-calendar-event;
+		set-anyone-can-add-self: func(anyone-can-add-self: bool) -> gas-calendar-event;
+		set-color: func(color: string) -> gas-calendar-event;
+		set-description: func(description: string) -> gas-calendar-event;
+		set-guests-can-invite-others: func(guests-can-invite-others: bool) -> gas-calendar-event;
+		set-guests-can-modify: func(guests-can-modify: bool) -> gas-calendar-event;
+		set-guests-can-see-guests: func(guests-can-see-guests: bool) -> gas-calendar-event;
+		set-location: func(location: string) -> gas-calendar-event;
+		set-my-status: func(status: guest-status) -> gas-calendar-event;
+		set-tag: func(key: string, value: string) -> gas-calendar-event;
+		set-time: func(start-time-epoch-millis: s64, end-time-epoch-millis: s64) -> gas-calendar-event;
+		set-title: func(title: string) -> gas-calendar-event;
+		set-visibility: func(visibility: visibility) -> gas-calendar-event;
+	}
+
+	resource gas-calendar {
+		constructor();
+		create-all-day-event: func(title: string, start-date-epoch-millis: s64, end-date-epoch-millis: option<s64>, options: option<event-options>) -> gas-calendar-event;
+		create-event: func(title: string, start-time-epoch-millis: s64, end-time-epoch-millis: s64, options: option<event-options>) -> gas-calendar-event;
+		create-event-from-description: func(description: string) -> gas-calendar-event;
+		delete-calendar: func();
+		get-color: func() -> string;
+		get-description: func() -> string;
+		get-event-by-id: func(i-cal-id: string) -> option<gas-calendar-event>;
+		get-events: func(start-time-epoch-millis: s64, end-time-epoch-millis: s64, options: option<string>) -> list<gas-calendar-event>;
+		get-events-for-day: func(date-epoch-millis: s64, options: option<string>) -> list<gas-calendar-event>;
+		get-id: func() -> string;
+		get-name: func() -> string;
+		get-time-zone: func() -> string;
+		is-hidden: func() -> bool;
+		is-my-primary-calendar: func() -> bool;
+		is-owned-by-me: func() -> bool;
+		is-selected: func() -> bool;
+		set-color: func(color: string) -> gas-calendar;
+		set-description: func(description: string) -> gas-calendar;
+		set-hidden: func(hidden: bool) -> gas-calendar;
+		set-name: func(name: string) -> gas-calendar;
+		set-selected: func(selected: bool) -> gas-calendar;
+		set-time-zone: func(time-zone: string) -> gas-calendar;
+	}
+}
+
+/// https://developers.google.com/apps-script/reference/calendar/calendar-app
+interface gas-calendar-app {
+	use gas-calendar-types.{
+		guest-status,
+		visibility,
+		event-options,
+		gas-event-guest,
+		gas-calendar-event,
+		gas-calendar,
+	};
+
+	create-all-day-event: func(title: string, start-date-epoch-millis: s64, end-date-epoch-millis: option<s64>, options: option<event-options>) -> gas-calendar-event;
+	create-calendar: func(name: string, options: option<event-options>) -> gas-calendar;
+	create-event: func(title: string, start-time-epoch-millis: s64, end-time-epoch-millis: s64, options: option<event-options>) -> gas-calendar-event;
+	create-event-from-description: func(description: string) -> gas-calendar-event;
+	get-all-calendars: func() -> list<gas-calendar>;
+	get-all-owned-calendars: func() -> list<gas-calendar>;
+	get-calendar-by-id: func(id: string) -> option<gas-calendar>;
+	get-calendars-by-name: func(name: string) -> list<gas-calendar>;
+	get-color: func() -> string;
+	get-default-calendar: func() -> gas-calendar;
+	get-description: func() -> string;
+	get-event-by-id: func(i-cal-id: string) -> option<gas-calendar-event>;
+	get-events: func(start-time-epoch-millis: s64, end-time-epoch-millis: s64, options: option<string>) -> list<gas-calendar-event>;
+	get-events-for-day: func(date-epoch-millis: s64, options: option<string>) -> list<gas-calendar-event>;
+	get-id: func() -> string;
+	get-name: func() -> string;
+	get-owned-calendar-by-id: func(id: string) -> option<gas-calendar>;
+	get-owned-calendars-by-name: func(name: string) -> list<gas-calendar>;
+	get-time-zone: func() -> string;
+	set-color: func(color: string) -> gas-calendar;
+	set-description: func(description: string) -> gas-calendar;
+	set-name: func(name: string) -> gas-calendar;
+	set-time-zone: func(time-zone: string) -> gas-calendar;
+	subscribe-to-calendar: func(id: string) -> gas-calendar;
+}
+
+world imports {
+	import gas-calendar-types;
+	import gas-calendar-app;
+}

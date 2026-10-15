@@ -1,0 +1,28 @@
+package gas:cache-service@0.1.0-alpha;
+
+/// https://developers.google.com/apps-script/reference/cache/cache
+interface gas-cache {
+	resource gas-cache {
+		constructor();
+		get: func(key: string) -> option<string>;
+		get-all: func(keys: list<string>) -> list<tuple<string, string>>;
+		put: func(key: string, value: string, expiration-in-seconds: option<s32>);
+		put-all: func(values: list<tuple<string, string>>, expiration-in-seconds: option<s32>);
+		remove: func(key: string);
+		remove-all: func(keys: list<string>);
+	}
+}
+
+/// https://developers.google.com/apps-script/reference/cache/cache-service
+interface gas-cache-service {
+	use gas-cache.{gas-cache};
+
+	get-document-cache: func() -> option<gas-cache>;
+	get-script-cache: func() -> gas-cache;
+	get-user-cache: func() -> gas-cache;
+}
+
+world imports {
+	import gas-cache;
+	import gas-cache-service;
+}

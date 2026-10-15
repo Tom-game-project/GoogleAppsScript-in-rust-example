@@ -1,19 +1,26 @@
 package gas:property@0.1.0-alpha;
 
+/// https://developers.google.com/apps-script/reference/properties/properties
 interface properties {
 	resource properties {
 		constructor();
-		get-property: func(key:string) -> option<string>;
+		delete-all-properties: func() -> properties;
+		delete-property: func(key: string) -> properties;
 		get-keys: func() -> list<string>;
+		get-properties: func() -> list<tuple<string, string>>;
+		get-property: func(key: string) -> option<string>;
+		set-properties: func(properties: list<tuple<string, string>>, delete-all-others: option<bool>) -> properties;
+		set-property: func(key: string, value: string) -> properties;
 	}
 }
 
+/// https://developers.google.com/apps-script/reference/properties/properties-service
 interface properties-service {
 	use properties.{properties};
 
-	get-user-properties: func() -> properties;
+	get-document-properties: func() -> option<properties>;
 	get-script-properties: func() -> properties;
-	get-document-properties: func() -> properties;
+	get-user-properties: func() -> properties;
 }
 
 world imports {

@@ -1,0 +1,182 @@
+package gas:document-app@0.1.0-alpha;
+
+use gas:drive-app/gas-blob@0.1.0-alpha;
+
+/// https://developers.google.com/apps-script/reference/document
+interface gas-document-types {
+	use gas-blob.{gas-blob};
+
+	enum paragraph-heading {
+		normal,
+		heading1,
+		heading2,
+		heading3,
+		heading4,
+		heading5,
+		heading6,
+		title,
+		subtitle,
+	}
+
+	enum horizontal-alignment {
+		left,
+		center,
+		right,
+		justify,
+	}
+
+	resource gas-text {
+		constructor();
+		append-text: func(text: string) -> gas-text;
+		clear: func() -> gas-text;
+		delete-text: func(start-offset: s32, end-offset-inclusive: s32) -> gas-text;
+		get-background-color: func(offset: option<s32>) -> option<string>;
+		get-font-family: func(offset: option<s32>) -> option<string>;
+		get-font-size: func(offset: option<s32>) -> option<s32>;
+		get-foreground-color: func(offset: option<s32>) -> option<string>;
+		get-link-url: func(offset: option<s32>) -> option<string>;
+		get-text: func() -> string;
+		insert-text: func(offset: s32, text: string) -> gas-text;
+		is-bold: func(offset: option<s32>) -> option<bool>;
+		is-italic: func(offset: option<s32>) -> option<bool>;
+		is-strikethrough: func(offset: option<s32>) -> option<bool>;
+		is-underline: func(offset: option<s32>) -> option<bool>;
+		replace-text: func(search-pattern: string, replacement: string) -> gas-text;
+		set-background-color: func(color: option<string>) -> gas-text;
+		set-bold: func(bold: bool) -> gas-text;
+		set-font-family: func(font-family-name: string) -> gas-text;
+		set-font-size: func(size: s32) -> gas-text;
+		set-foreground-color: func(color: string) -> gas-text;
+		set-italic: func(italic: bool) -> gas-text;
+		set-link-url: func(url: option<string>) -> gas-text;
+		set-strikethrough: func(strikethrough: bool) -> gas-text;
+		set-text: func(text: string) -> gas-text;
+		set-underline: func(underline: bool) -> gas-text;
+	}
+
+	resource gas-paragraph {
+		constructor();
+		append-text: func(text: string) -> gas-text;
+		clear: func() -> gas-paragraph;
+		edit-as-text: func() -> gas-text;
+		get-alignment: func() -> option<horizontal-alignment>;
+		get-heading: func() -> paragraph-heading;
+		get-indent-end: func() -> f64;
+		get-indent-first-line: func() -> f64;
+		get-indent-start: func() -> f64;
+		get-line-spacing: func() -> f64;
+		get-link-url: func() -> option<string>;
+		get-text: func() -> string;
+		replace-text: func(search-pattern: string, replacement: string) -> gas-paragraph;
+		set-alignment: func(alignment: horizontal-alignment) -> gas-paragraph;
+		set-heading: func(heading: paragraph-heading) -> gas-paragraph;
+		set-indent-end: func(indent-end: f64) -> gas-paragraph;
+		set-indent-first-line: func(indent-first-line: f64) -> gas-paragraph;
+		set-indent-start: func(indent-start: f64) -> gas-paragraph;
+		set-line-spacing: func(multiplier: f64) -> gas-paragraph;
+		set-link-url: func(url: option<string>) -> gas-paragraph;
+		set-text: func(text: string);
+	}
+
+	resource gas-table-cell {
+		constructor();
+		clear: func() -> gas-table-cell;
+		edit-as-text: func() -> gas-text;
+		get-background-color: func() -> option<string>;
+		get-text: func() -> string;
+		set-background-color: func(color: option<string>) -> gas-table-cell;
+		set-text: func(text: string) -> gas-table-cell;
+	}
+
+	resource gas-table-row {
+		constructor();
+		append-table-cell: func(text-contents: option<string>) -> gas-table-cell;
+		clear: func() -> gas-table-row;
+		get-cell: func(cell-index: s32) -> gas-table-cell;
+		get-num-cells: func() -> s32;
+		get-text: func() -> string;
+		remove-cell: func(cell-index: s32) -> gas-table-cell;
+	}
+
+	resource gas-table {
+		constructor();
+		append-table-row: func() -> gas-table-row;
+		clear: func() -> gas-table;
+		get-border-color: func() -> option<string>;
+		get-border-width: func() -> f64;
+		get-cell: func(row-index: s32, cell-index: s32) -> gas-table-cell;
+		get-num-rows: func() -> s32;
+		get-row: func(row-index: s32) -> gas-table-row;
+		get-text: func() -> string;
+		remove-row: func(row-index: s32) -> gas-table-row;
+		set-border-color: func(color: string) -> gas-table;
+		set-border-width: func(width: f64) -> gas-table;
+	}
+
+	resource gas-body {
+		constructor();
+		append-horizontal-rule: func();
+		append-page-break: func();
+		append-paragraph: func(text: string) -> gas-paragraph;
+		append-table: func(cells: option<list<list<string>>>) -> gas-table;
+		clear: func() -> gas-body;
+		edit-as-text: func() -> gas-text;
+		get-heading-attributes: func(paragraph-heading: paragraph-heading) -> list<tuple<string, string>>;
+		get-margin-bottom: func() -> f64;
+		get-margin-left: func() -> f64;
+		get-margin-right: func() -> f64;
+		get-margin-top: func() -> f64;
+		get-page-height: func() -> f64;
+		get-page-width: func() -> f64;
+		get-paragraphs: func() -> list<gas-paragraph>;
+		get-tables: func() -> list<gas-table>;
+		get-text: func() -> string;
+		replace-text: func(search-pattern: string, replacement: string) -> gas-body;
+		set-margin-bottom: func(margin: f64) -> gas-body;
+		set-margin-left: func(margin: f64) -> gas-body;
+		set-margin-right: func(margin: f64) -> gas-body;
+		set-margin-top: func(margin: f64) -> gas-body;
+		set-page-height: func(page-height: f64) -> gas-body;
+		set-page-width: func(page-width: f64) -> gas-body;
+		set-text: func(text: string) -> gas-body;
+	}
+
+	resource gas-document {
+		constructor();
+		get-as: func(content-type: string) -> gas-blob;
+		get-blob: func() -> gas-blob;
+		get-body: func() -> gas-body;
+		get-id: func() -> string;
+		get-language: func() -> string;
+		get-name: func() -> string;
+		get-url: func() -> string;
+		save-and-close: func();
+		set-language: func(language-code: string) -> gas-document;
+		set-name: func(name: string) -> gas-document;
+	}
+}
+
+/// https://developers.google.com/apps-script/reference/document/document-app
+interface gas-document-app {
+	use gas-document-types.{
+		paragraph-heading,
+		horizontal-alignment,
+		gas-text,
+		gas-paragraph,
+		gas-table-cell,
+		gas-table-row,
+		gas-table,
+		gas-body,
+		gas-document,
+	};
+
+	create: func(name: string) -> gas-document;
+	get-active-document: func() -> option<gas-document>;
+	open-by-id: func(id: string) -> option<gas-document>;
+	open-by-url: func(url: string) -> option<gas-document>;
+}
+
+world imports {
+	import gas-document-types;
+	import gas-document-app;
+}

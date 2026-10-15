@@ -1,20 +1,78 @@
 package gas:urlfetchapp@0.1.0-alpha;
 
+use gas:drive-app/gas-blob@0.1.0-alpha;
+
+/// https://developers.google.com/apps-script/reference/url-fetch/http-response
 interface gas-http-response {
+	use gas-blob.{gas-blob};
+
+	enum http-method {
+		get,
+		delete,
+		patch,
+		post,
+		put,
+	}
+
+	variant http-payload {
+		text(string),
+		bytes(list<u8>),
+		form-data(list<tuple<string, string>>),
+		blob(gas-blob),
+	}
+
+	record url-fetch-request-options {
+		content-type: option<string>,
+		headers: option<list<tuple<string, string>>>,
+		method: option<http-method>,
+		payload: option<http-payload>,
+		use-intranet: option<bool>,
+		validate-https-certificates: option<bool>,
+		follow-redirects: option<bool>,
+		mute-http-exceptions: option<bool>,
+		escaping: option<bool>,
+	}
+
+	record url-fetch-request {
+		url: string,
+		params: option<url-fetch-request-options>,
+	}
+
+	variant header-value {
+		single(string),
+		multiple(list<string>),
+	}
+
 	resource gas-http-response {
 		constructor();
 
-        get-content-text: func() -> string;
+		get-all-headers: func() -> list<tuple<string, header-value>>;
+		get-as: func(content-type: string) -> gas-blob;
+		get-blob: func() -> gas-blob;
+		get-content: func() -> list<u8>;
+		get-content-text: func(charset: option<string>) -> string;
+		get-headers: func() -> list<tuple<string, string>>;
+		get-response-code: func() -> s32;
 	}
 }
 
+/// https://developers.google.com/apps-script/reference/url-fetch/url-fetch-app
 interface gas-url-fetch-app {
-    use gas-http-response.{gas-http-response};
+	use gas-http-response.{
+		gas-http-response,
+		http-method,
+		http-payload,
+		url-fetch-request-options,
+		url-fetch-request,
+		header-value,
+	};
 
-    fetch: func(url: string) -> gas-http-response;
+	fetch: func(url: string, params: option<url-fetch-request-options>) -> gas-http-response;
+	fetch-all: func(requests: list<url-fetch-request>) -> list<gas-http-response>;
+	get-request: func(url: string, params: option<url-fetch-request-options>) -> list<tuple<string, string>>;
 }
 
 world imports {
-    import gas-url-fetch-app;
-    import gas-http-response;
+	import gas-url-fetch-app;
+	import gas-http-response;
 }

@@ -1,17 +1,13 @@
-// gas::logger@0.1.0-alpha
-//
-//
-export const log = function (data)
-{
+// gas:logger@0.1.0-alpha
+
+export function log(data) {
 	Logger.log(data);
-}
+};
 
-export const clear = function ()
-{
+export function clear() {
 	Logger.clear();
-}
+};
 
-export const getLog = function ()
-{
+export function getLog() {
 	return Logger.getLog();
-}
+};

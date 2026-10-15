@@ -1,0 +1,76 @@
+package gas:utilities@0.1.0-alpha;
+
+use gas:drive-app/gas-blob@0.1.0-alpha;
+
+/// https://developers.google.com/apps-script/reference/utilities/utilities
+interface gas-utilities {
+	use gas-blob.{gas-blob};
+
+	/// https://developers.google.com/apps-script/reference/utilities/charset
+	enum charset {
+		us-ascii,
+		utf8,
+	}
+
+	/// https://developers.google.com/apps-script/reference/utilities/digest-algorithm
+	enum digest-algorithm {
+		md2,
+		md5,
+		sha1,
+		sha256,
+		sha384,
+		sha512,
+	}
+
+	/// https://developers.google.com/apps-script/reference/utilities/mac-algorithm
+	enum mac-algorithm {
+		hmac-md5,
+		hmac-sha1,
+		hmac-sha256,
+		hmac-sha384,
+		hmac-sha512,
+	}
+
+	/// https://developers.google.com/apps-script/reference/utilities/rsa-algorithm
+	enum rsa-algorithm {
+		rsa-sha1,
+		rsa-sha256,
+	}
+
+	variant binary-or-string-input {
+		bytes(list<u8>),
+		text(string),
+		text-with-charset(tuple<string, charset>),
+	}
+
+	variant hmac-input {
+		bytes(tuple<list<u8>, list<u8>>),
+		text(tuple<string, string>),
+		text-with-charset(tuple<string, string, charset>),
+	}
+
+	base64-decode: func(encoded: string, charset: option<charset>) -> list<u8>;
+	base64-decode-web-safe: func(encoded: string, charset: option<charset>) -> list<u8>;
+	base64-encode: func(data: binary-or-string-input) -> string;
+	base64-encode-web-safe: func(data: binary-or-string-input) -> string;
+	compute-digest: func(algorithm: digest-algorithm, value: binary-or-string-input) -> list<u8>;
+	compute-hmac-sha256-signature: func(input: hmac-input) -> list<u8>;
+	compute-hmac-signature: func(algorithm: mac-algorithm, input: hmac-input) -> list<u8>;
+	compute-rsa-sha1-signature: func(value: string, key: string, charset: option<charset>) -> list<u8>;
+	compute-rsa-sha256-signature: func(value: string, key: string, charset: option<charset>) -> list<u8>;
+	compute-rsa-signature: func(algorithm: rsa-algorithm, value: string, key: string, charset: option<charset>) -> list<u8>;
+	format-date: func(date-epoch-millis: s64, time-zone: string, format: string) -> string;
+	format-string: func(template: string, args: list<string>) -> string;
+	get-uuid: func() -> string;
+	gzip: func(blob: borrow<gas-blob>, name: option<string>) -> gas-blob;
+	new-blob: func(data: binary-or-string-input, content-type: option<string>, name: option<string>) -> gas-blob;
+	parse-csv: func(csv: string, delimiter: option<char>) -> list<list<string>>;
+	sleep: func(milliseconds: s32);
+	ungzip: func(blob: borrow<gas-blob>) -> gas-blob;
+	unzip: func(blob: borrow<gas-blob>) -> list<gas-blob>;
+	zip: func(blobs: list<gas-blob>, name: option<string>) -> gas-blob;
+}
+
+world imports {
+	import gas-utilities;
+}

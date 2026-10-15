@@ -10,10 +10,7 @@ wit-bindgen = { version = "0.62.0", default-features = false, features = [
     "realloc", "macros"
 ] }
 
-# wit-bindgen-rt = { version = "0.43.0", features = ["bitflags", "macro"] }
-
-# for doGet, doPost 
-
+# for doGet, doPost
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
@@ -27,13 +24,23 @@ package = "component:googleappsscript-in-rust-example"
 
 [package.metadata.component.target.dependencies]
 "wasi:logging" = { path = "./wit/deps/wasi-logging-0.1.0-draft" }
-# "wasi:random" = { path = "./wit/deps/wasi-random-0.1.0-draft" }
-"example:resouceex" = { path = "./wit/deps/resource-example"}
+"example:resouceex" = { path = "./wit/deps/resource-example" }
 
-# google apps script wit 
-"gas:logger" = { path = "./wit/deps/google-apps-script-logger-0.1.0-alpha"}
-"gas:drive-app" = { path = "./wit/deps/google-apps-script-driveapp-0.1.0-alpha"}
-"gas:property" = { path = "./wit/deps/google-apps-script-property-0.1.0-alpha"}
+# Google Apps Script WIT packages
+"gas:logger" = { path = "./wit/deps/google-apps-script-logger-0.1.0-alpha" }
+"gas:drive-app" = { path = "./wit/deps/google-apps-script-driveapp-0.1.0-alpha" }
+"gas:property" = { path = "./wit/deps/google-apps-script-property-0.1.0-alpha" }
 "gas:spreadsheet-app" = { path = "./wit/deps/google-apps-script-spreadsheetapp-0.1.0-alpha" }
 "gas:content-service" = { path = "./wit/deps/google-apps-script-contentservice-0.1.0-alpha" }
-"gas:math" = {path = "./wit/deps/math-0.1.0-alpha"}
+"gas:urlfetchapp" = { path = "./wit/deps/google-apps-script-urlfetchapp-0.1.0-alpha" }
+"gas:utilities" = { path = "./wit/deps/google-apps-script-utilities-0.1.0-alpha" }
+"gas:html-service" = { path = "./wit/deps/google-apps-script-htmlservice-0.1.0-alpha" }
+"gas:cache-service" = { path = "./wit/deps/google-apps-script-cacheservice-0.1.0-alpha" }
+"gas:lock-service" = { path = "./wit/deps/google-apps-script-lockservice-0.1.0-alpha" }
+"gas:session" = { path = "./wit/deps/google-apps-script-session-0.1.0-alpha" }
+"gas:mail-app" = { path = "./wit/deps/google-apps-script-mailapp-0.1.0-alpha" }
+"gas:gmail-app" = { path = "./wit/deps/google-apps-script-gmailapp-0.1.0-alpha" }
+"gas:calendar-app" = { path = "./wit/deps/google-apps-script-calendarapp-0.1.0-alpha" }
+"gas:document-app" = { path = "./wit/deps/google-apps-script-documentapp-0.1.0-alpha" }
+"gas:script-app" = { path = "./wit/deps/google-apps-script-scriptapp-0.1.0-alpha" }
+"gas:math" = { path = "./wit/deps/math-0.1.0-alpha" }

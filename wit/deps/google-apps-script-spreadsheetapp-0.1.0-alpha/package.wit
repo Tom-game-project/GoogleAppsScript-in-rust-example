@@ -9,54 +9,277 @@ interface gas-range {
 		string-value(string),
 		number-value(f64),
 		boolean-value(bool),
-		// TODO
-		date-value(string),
-		otherwise-value, // ERR
+		/// Unix epoch milliseconds (Date.getTime())
+		date-value(s64),
+		otherwise-value,
+	}
+
+	record clear-options {
+		comments-only: option<bool>,
+		contents-only: option<bool>,
+		format-only: option<bool>,
+		validations-only: option<bool>,
+		skip-filtered-rows: option<bool>,
+	}
+
+	record copy-to-options {
+		contents-only: option<bool>,
+		format-only: option<bool>,
+		transposed: option<bool>,
+	}
+
+	record sort-spec {
+		column: s32,
+		ascending: bool,
+	}
+
+	record grid-range-selector {
+		row: s32,
+		column: s32,
+		num-rows: option<s32>,
+		num-columns: option<s32>,
+	}
+
+	variant range-selector {
+		a1-notation(string),
+		grid(grid-range-selector),
 	}
 
 	resource gas-range {
 		constructor();
 
-		// https://developers.google.com/apps-script/reference/spreadsheet/range?hl=ja#getValues()
+		activate: func() -> gas-range;
+		break-apart: func() -> gas-range;
+		can-edit: func() -> bool;
+		check: func() -> gas-range;
+		clear: func(options: option<clear-options>) -> gas-range;
+		clear-content: func() -> gas-range;
+		clear-format: func() -> gas-range;
+		clear-note: func() -> gas-range;
+		copy-to: func(destination: borrow<gas-range>, options: option<copy-to-options>);
+		get-a1-notation: func() -> string;
+		get-background: func() -> string;
+		get-backgrounds: func() -> list<list<string>>;
+		get-cell: func(row: s32, column: s32) -> gas-range;
+		get-column: func() -> s32;
+		get-display-value: func() -> string;
+		get-display-values: func() -> list<list<string>>;
+		get-font-color: func() -> string;
+		get-font-colors: func() -> list<list<string>>;
+		get-font-family: func() -> string;
+		get-font-size: func() -> s32;
+		get-font-style: func() -> string;
+		get-font-weight: func() -> string;
+		get-formula: func() -> string;
+		get-formulas: func() -> list<list<string>>;
+		get-height: func() -> s32;
+		get-horizontal-alignment: func() -> string;
+		get-last-column: func() -> s32;
+		get-last-row: func() -> s32;
+		get-note: func() -> string;
+		get-notes: func() -> list<list<string>>;
+		get-num-columns: func() -> s32;
+		get-num-rows: func() -> s32;
+		get-number-format: func() -> string;
+		get-number-formats: func() -> list<list<string>>;
+		get-row: func() -> s32;
+		get-value: func() -> cell-value;
 		get-values: func() -> list<list<cell-value>>;
+		get-vertical-alignment: func() -> string;
+		get-width: func() -> s32;
+		get-wrap: func() -> bool;
+		is-blank: func() -> bool;
+		is-checked: func() -> option<bool>;
+		is-part-of-merge: func() -> bool;
+		merge: func() -> gas-range;
+		merge-across: func() -> gas-range;
+		merge-vertically: func() -> gas-range;
+		move-to: func(target: borrow<gas-range>);
+		offset: func(row-offset: s32, column-offset: s32, num-rows: option<s32>, num-columns: option<s32>) -> gas-range;
+		set-background: func(color: option<string>) -> gas-range;
+		set-backgrounds: func(color: list<list<option<string>>>) -> gas-range;
+		set-font-color: func(color: option<string>) -> gas-range;
+		set-font-colors: func(colors: list<list<option<string>>>) -> gas-range;
+		set-font-family: func(font-family: option<string>) -> gas-range;
+		set-font-size: func(size: s32) -> gas-range;
+		set-font-style: func(font-style: option<string>) -> gas-range;
+		set-font-weight: func(font-weight: option<string>) -> gas-range;
+		set-formula: func(formula: string) -> gas-range;
+		set-formulas: func(formulas: list<list<string>>) -> gas-range;
+		set-horizontal-alignment: func(alignment: option<string>) -> gas-range;
+		set-note: func(note: option<string>) -> gas-range;
+		set-notes: func(notes: list<list<string>>) -> gas-range;
+		set-number-format: func(number-format: string) -> gas-range;
+		set-number-formats: func(number-formats: list<list<string>>) -> gas-range;
+		set-value: func(value: cell-value) -> gas-range;
+		set-values: func(values: list<list<cell-value>>) -> gas-range;
+		set-vertical-alignment: func(alignment: option<string>) -> gas-range;
+		set-wrap: func(is-wrap-enabled: bool) -> gas-range;
+		sort: func(sort-specs: list<sort-spec>) -> gas-range;
+		trim-whitespace: func() -> gas-range;
+		uncheck: func() -> gas-range;
 	}
 }
 
 /// https://developers.google.com/apps-script/reference/spreadsheet/sheet
 interface gas-sheet {
-	use gas-range.{gas-range};
+	use gas-range.{
+		gas-range,
+		cell-value,
+		clear-options,
+		grid-range-selector,
+		range-selector,
+	};
 
 	resource gas-sheet {
 		constructor();
 
+		activate: func() -> gas-sheet;
+		append-row: func(row-contents: list<cell-value>) -> gas-sheet;
+		auto-resize-column: func(column-position: s32) -> gas-sheet;
+		auto-resize-columns: func(start-column: s32, num-columns: s32) -> gas-sheet;
+		clear: func(options: option<clear-options>) -> gas-sheet;
+		clear-contents: func() -> gas-sheet;
+		clear-formats: func() -> gas-sheet;
+		clear-notes: func() -> gas-sheet;
+		delete-column: func(column-position: s32) -> gas-sheet;
+		delete-columns: func(column-position: s32, how-many: s32);
+		delete-row: func(row-position: s32) -> gas-sheet;
+		delete-rows: func(row-position: s32, how-many: s32);
+		get-active-cell: func() -> gas-range;
+		get-active-range: func() -> option<gas-range>;
+		get-column-width: func(column-position: s32) -> s32;
 		get-data-range: func() -> gas-range;
+		get-frozen-columns: func() -> s32;
+		get-frozen-rows: func() -> s32;
+		get-index: func() -> s32;
+		get-last-column: func() -> s32;
+		get-last-row: func() -> s32;
+		get-max-columns: func() -> s32;
+		get-max-rows: func() -> s32;
+		get-name: func() -> string;
+		get-range: func(selector: range-selector) -> gas-range;
+		get-row-height: func(row-position: s32) -> s32;
+		get-sheet-id: func() -> s32;
+		get-sheet-name: func() -> string;
+		get-sheet-values: func(start-row: s32, start-column: s32, num-rows: s32, num-columns: s32) -> list<list<cell-value>>;
+		get-tab-color: func() -> option<string>;
+		hide-column: func(column: borrow<gas-range>);
+		hide-columns: func(column-index: s32, num-columns: option<s32>);
+		hide-row: func(row: borrow<gas-range>);
+		hide-rows: func(row-index: s32, num-rows: option<s32>);
+		hide-sheet: func() -> gas-sheet;
+		insert-column-after: func(after-position: s32) -> gas-sheet;
+		insert-column-before: func(before-position: s32) -> gas-sheet;
+		insert-columns: func(column-index: s32, num-columns: option<s32>);
+		insert-columns-after: func(after-position: s32, how-many: s32) -> gas-sheet;
+		insert-columns-before: func(before-position: s32, how-many: s32) -> gas-sheet;
+		insert-row-after: func(after-position: s32) -> gas-sheet;
+		insert-row-before: func(before-position: s32) -> gas-sheet;
+		insert-rows: func(row-index: s32, num-rows: option<s32>);
+		insert-rows-after: func(after-position: s32, how-many: s32) -> gas-sheet;
+		insert-rows-before: func(before-position: s32, how-many: s32) -> gas-sheet;
+		is-column-hidden-by-user: func(column-position: s32) -> bool;
+		is-row-hidden-by-filter: func(row-position: s32) -> bool;
+		is-row-hidden-by-user: func(row-position: s32) -> bool;
+		is-sheet-hidden: func() -> bool;
+		set-active-range: func(range: borrow<gas-range>) -> gas-range;
+		set-active-selection: func(selector: range-selector) -> gas-range;
+		set-column-width: func(column-position: s32, width: s32) -> gas-sheet;
+		set-column-widths: func(start-column: s32, num-columns: s32, width: s32) -> gas-sheet;
+		set-frozen-columns: func(columns: s32);
+		set-frozen-rows: func(rows: s32);
+		set-name: func(name: string) -> gas-sheet;
+		set-row-height: func(row-position: s32, height: s32) -> gas-sheet;
+		set-row-heights: func(start-row: s32, num-rows: s32, height: s32) -> gas-sheet;
+		set-tab-color: func(color: option<string>) -> gas-sheet;
+		show-columns: func(column-index: s32, num-columns: option<s32>);
+		show-rows: func(row-index: s32, num-rows: option<s32>);
+		show-sheet: func() -> gas-sheet;
+		sort: func(column-position: s32, ascending: option<bool>) -> gas-sheet;
 	}
 }
 
 /// https://developers.google.com/apps-script/reference/spreadsheet/spreadsheet
 interface gas-spreadsheet {
+	use gas-range.{gas-range, cell-value, range-selector};
 	use gas-sheet.{gas-sheet};
 
-	resource gas-spreadsheet{
+	record insert-sheet-options {
+		sheet-name: option<string>,
+		sheet-index: option<s32>,
+		template: option<gas-sheet>,
+	}
+
+	resource gas-spreadsheet {
 		constructor();
 
-		get-id:func() -> string;
-		get-sheet-by-id: func(id:string) -> option<gas-sheet>;
-		get-sheet-by-name: func(name:string) -> option<gas-sheet>;
+		append-row: func(row-contents: list<cell-value>) -> gas-sheet;
+		copy: func(name: string) -> gas-spreadsheet;
+		delete-active-sheet: func() -> gas-sheet;
+		delete-column: func(column-position: s32) -> gas-sheet;
+		delete-columns: func(column-position: s32, how-many: s32);
+		delete-row: func(row-position: s32) -> gas-sheet;
+		delete-rows: func(row-position: s32, how-many: s32);
+		delete-sheet: func(sheet: borrow<gas-sheet>);
+		duplicate-active-sheet: func() -> gas-sheet;
+		get-active-cell: func() -> gas-range;
+		get-active-range: func() -> option<gas-range>;
+		get-active-sheet: func() -> gas-sheet;
+		get-id: func() -> string;
+		get-last-column: func() -> s32;
+		get-last-row: func() -> s32;
+		get-name: func() -> string;
+		get-num-sheets: func() -> s32;
+		get-range: func(a1-notation: string) -> gas-range;
+		get-range-by-name: func(name: string) -> option<gas-range>;
+		get-sheet-by-id: func(id: s32) -> option<gas-sheet>;
+		get-sheet-by-name: func(name: string) -> option<gas-sheet>;
+		get-sheet-id: func() -> s32;
+		get-sheet-name: func() -> string;
+		get-sheets: func() -> list<gas-sheet>;
+		get-spreadsheet-locale: func() -> string;
+		get-spreadsheet-time-zone: func() -> string;
+		get-url: func() -> string;
+		insert-sheet: func(options: option<insert-sheet-options>) -> gas-sheet;
+		move-active-sheet: func(pos: s32);
+		remove-named-range: func(name: string);
+		rename: func(new-name: string);
+		rename-active-sheet: func(new-name: string);
+		set-active-range: func(range: borrow<gas-range>) -> gas-range;
+		set-active-selection: func(selector: range-selector) -> gas-range;
+		set-active-sheet: func(sheet: borrow<gas-sheet>, restore-selection: option<bool>) -> gas-sheet;
+		set-named-range: func(name: string, range: borrow<gas-range>);
+		set-spreadsheet-locale: func(locale: string);
+		set-spreadsheet-time-zone: func(timezone: string);
+		toast: func(msg: string, title: option<string>, timeout-seconds: option<f64>);
 	}
 }
 
 /// https://developers.google.com/apps-script/reference/spreadsheet/spreadsheet-app
 interface gas-spreadsheet-app {
 	use gas-file.{gas-file};
+	use gas-range.{gas-range};
+	use gas-sheet.{gas-sheet};
 	use gas-spreadsheet.{gas-spreadsheet};
 
+	create: func(name: string, rows: option<s32>, columns: option<s32>) -> gas-spreadsheet;
+	flush: func();
+	get-active: func() -> option<gas-spreadsheet>;
+	get-active-range: func() -> option<gas-range>;
+	get-active-sheet: func() -> option<gas-sheet>;
+	get-active-spreadsheet: func() -> option<gas-spreadsheet>;
 	open: func(file: gas-file) -> option<gas-spreadsheet>;
 	open-by-id: func(id: string) -> option<gas-spreadsheet>;
 	open-by-url: func(url: string) -> option<gas-spreadsheet>;
+	set-active-range: func(range: borrow<gas-range>) -> gas-range;
+	set-active-sheet: func(sheet: borrow<gas-sheet>, restore-selection: option<bool>) -> gas-sheet;
+	set-active-spreadsheet: func(new-active-spreadsheet: borrow<gas-spreadsheet>);
 }
 
 world imports {
+	import gas-range;
+	import gas-sheet;
 	import gas-spreadsheet;
 	import gas-spreadsheet-app;
 }
