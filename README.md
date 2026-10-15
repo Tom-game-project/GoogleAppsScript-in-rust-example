@@ -27,6 +27,20 @@ All WIT definitions are located under `wit/deps/` and paired with strictly-typed
 - `gas:document-app` (`js/gas-document-app.ts`, `js/gas-document-types.ts`): Google Docs creation and editing
 - `gas:script-app` (`js/gas-script-app.ts`, `js/gas-script-types.ts`): script metadata, OAuth token, triggers, and authorization state
 
+## WASI Proposals Support on Google Apps Script
+
+All WASI WIT files under `wit/deps/wasi-*` (`wasi-random`, `wasi-clocks`, `wasi-cli`, `wasi-filesystem`, `wasi-sockets`, `wasi-http`, plus `wasi-logging-0.1.0-draft`) follow the official [WebAssembly/WASI](https://github.com/WebAssembly/WASI) proposal definitions verbatim:
+
+- **Implemented on GAS**:
+  - `wasi:random/{random, insecure, insecure-seed}` (`js/wasi-random.ts`): CSPRNG random bytes/u64 via `Utilities.getUuid()` + `Utilities.computeDigest(SHA_256)` (`random`), fast PRNG via `Math.random()` (`insecure`), and 128-bit hash seed (`insecure-seed`).
+  - `wasi:clocks/{types, system-clock, timezone}` & `wasi:clocks/wall-clock` (`js/wasi-clocks.ts`, `js/wasi-wall-clock.ts`): Current Unix epoch time (`Date.now()`), IANA timezone ID (`Session.getScriptTimeZone()`), and exact UTC offset in nanoseconds at any instant (`Utilities.formatDate(date, tz, "Z")`).
+  - `wasi:clocks/monotonic-clock` (`js/wasi-monotonic-clock.ts`): Synchronous monotonic nanosecond clock (`now`, `get-resolution`, `resolution`).
+  - `wasi:cli/{environment, exit, terminal-*}` (`js/wasi-cli.ts`): Script Properties exposed as environment variables (`PropertiesService.getScriptProperties().getProperties()`), `get-initial-cwd` returning `none` (`undefined`), `get-terminal-*` returning `none` (`undefined`) per WASI spec, and `exit` / `exit-with-code` halting execution with a descriptive exception.
+  - `wasi:cli/{stdout, stderr}` & `wasi:io/streams` (`OutputStream`) (`js/wasi-cli.ts`, `js/wasi-io.ts`): Line-buffered UTF-8 output from Rust `println!` / `eprintln!` routed to `Logger.log` and `console.error`.
+  - `wasi:logging/logging` (`js/log-host.ts`): Level-aware logging (`console.debug`, `console.info`, `console.warn`, `console.error`).
+- **Explicitly Unimplemented on GAS (`WasiNotImplementedError`)**:
+  - Features that cannot be faithfully reproduced in GAS's synchronous, non-POSIX sandbox—such as `wasi:filesystem/*` (POSIX file descriptors/paths), `wasi:sockets/*` (raw TCP/UDP sockets and DNS lookup), `wasi:http/*` (async streaming HTTP bodies/trailers), `wasi:cli/stdin` (interactive standard input), and `wasi:clocks/monotonic-clock.{wait-until, wait-for}` (Component Model 0.3 async waits)—throw an explicit `WasiNotImplementedError` (`[WASI Not Implemented on GAS] <interface>.<method> is not supported in Google Apps Script...`) rather than returning ambiguous dummy values.
+
 ### Design Principles for WIT Definitions & TypeScript Glue
 
 1. **Single-Function Overload Representation**: Since WIT does not support function overloading or variable-length arguments, overloaded GAS methods keep their canonical GAS method name as a single WIT function and accept `option<T>`, `record`, or `variant` parameters (e.g., `fetch(url, params: option<url-fetch-request-options>)`, `get-range(selector: range-selector)`, `create-file(input: create-file-input)`).
@@ -61,12 +75,12 @@ make BUILD=release push
 
 ## Project Structure
 
-- `js/`: TypeScript glue wrappers bridging the GAS API with the Wasm Component world.
+- `js/`: TypeScript glue wrappers bridging the GAS API and WASI host interfaces with the Wasm Component world.
 - `src/`: Rust implementation example
   - `lib.rs`: Implements functions exported in `wit/world.wit`.
   - `args.rs`: Event payload deserialization for `doGet`.
 - `wit/`:
-  - `deps/`: GAS API WIT package definitions
+  - `deps/`: Official WASI proposal WIT definitions (`wasi-*`) and GAS API WIT package definitions (`google-apps-script-*`)
   - `world.wit`: Component world definition
 - `main.ts`: GAS project entry point
 - `Makefile`: Build rules

@@ -1,68 +1,39 @@
-// GAS 上で WASI 0.2 が要求する最低限のエクスポートを満たすダミー実装
+// WASI 互換エクスポート集約モジュール
+// 各機能モジュール (wasi-cli.ts, wasi-monotonic-clock.ts, wasi-io.ts) の実装を再エクスポートします。
 
-// wasi:cli/environment
-export function getEnvironment(): Array<[string, string]> {
-	return [];
-}
+export {
+	getEnvironment,
+	getArguments,
+	getInitialCwd,
+	initialCwd,
+	exit,
+	exitWithCode,
+	getStdin,
+	getStdout,
+	getStderr,
+	TerminalInput,
+	TerminalOutput,
+	getTerminalStdin,
+	getTerminalStdout,
+	getTerminalStderr,
+} from "./wasi-cli";
 
-export function getArguments(): string[] {
-	return [];
-}
+export {
+	now,
+	getResolution,
+	resolution,
+	waitUntil,
+	waitFor,
+	subscribeInstant,
+	subscribeDuration,
+} from "./wasi-monotonic-clock";
 
-export function initialCwd(): string | undefined {
-	return undefined;
-}
-
-// wasi:cli/exit
-export function exit(): void {}
-
-// wasi:cli/terminal-*, wasi:io/*
-export function getStdin(): null {
-	return null;
-}
-
-export function getStdout(): null {
-	return null;
-}
-
-export function getStderr(): null {
-	return null;
-}
-
-// wasi:clocks/monotonic-clock
-export function now(): bigint {
-	return BigInt(Date.now()) * BigInt(1000000);
-}
-
-export function resolution(): bigint {
-	return BigInt(1000000);
-}
-
-export function subscribeInstant(): void {}
-
-export function subscribeDuration(): void {}
-
-// wasi:io/streams
-export class InputStream {}
-
-export class OutputStream {
-	blockingWriteAndFlush(_bytes: Uint8Array): void {
-		// 必要なら Logger.log などに流す
-	}
-}
-
-export class Error {}
-
-export class Pollable {
-	ready(): boolean {
-		return true;
-	}
-
-	block(): void {
-		// 同期環境なので何もしない
-	}
-}
-
-export function poll(pollables: Pollable[]): number[] {
-	return pollables.map((_, index) => index);
-}
+export {
+	WasiNotImplementedError,
+	throwWasiNotImplemented,
+	Error,
+	Pollable,
+	poll,
+	InputStream,
+	OutputStream,
+} from "./wasi-io";

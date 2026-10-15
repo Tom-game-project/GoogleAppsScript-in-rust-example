@@ -1,7 +1,28 @@
 package component:googleappsscript-in-rust-example;
 
 world my-world {
+	// WASI Proposals (Google Apps Script の V8 同期環境で実装・再現可能なインターフェース)
+	// ※ WIT定義は wit/deps/wasi-* 内の公式 WASI プロポーザル (0.3.2) に準拠しています。
+	// ※ 非同期ストリーム (stream<T> / future<T> / async func) を要求するインターフェースや、
+	//    GAS 上で再現不可能な機能 (wasi:filesystem, wasi:sockets, wasi:http, wasi:cli/stdio@0.3.2 等) は
+	//    js/wasi-*.ts 側で呼び出し時に WasiNotImplementedError を送出し、未実装であることが明確に判別できます。
+	// ※ Rust 標準の println! / eprintln! や std::time::Instant は wasm32-wasip2 ターゲットがリンクする
+	//    WASI 0.2 インポート経由で Makefile の --map により js/wasi-cli.ts・js/wasi-io.ts・js/wasi-monotonic-clock.ts に接続されます。
 	import wasi:logging/logging@0.1.0-draft;
+	import wasi:random/random@0.3.2;
+	import wasi:random/insecure@0.3.2;
+	import wasi:random/insecure-seed@0.3.2;
+	import wasi:clocks/types@0.3.2;
+	import wasi:clocks/system-clock@0.3.2;
+	import wasi:clocks/timezone@0.3.2;
+	import wasi:cli/environment@0.3.2;
+	import wasi:cli/exit@0.3.2;
+	import wasi:cli/terminal-input@0.3.2;
+	import wasi:cli/terminal-output@0.3.2;
+	import wasi:cli/terminal-stdin@0.3.2;
+	import wasi:cli/terminal-stdout@0.3.2;
+	import wasi:cli/terminal-stderr@0.3.2;
+
 	import example:resouceex/example-resource;
 
 	// Google Apps Script APIs
@@ -49,4 +70,5 @@ world my-world {
 	export http-request-test: func();
 	export utilities-example: func();
 	export html-service-example: func() -> gas-html-output;
+	export wasi-showcase-example: func();
 }

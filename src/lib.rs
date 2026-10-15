@@ -4,6 +4,7 @@ mod bindings {
     wit_bindgen::generate!({
         world: "my-world",
         path: "./wit",
+        features: ["clocks-timezone"],
         generate_all
     });
 }
@@ -169,6 +170,34 @@ impl Guest for Component {
         gas_html_service::create_html_output(Some(html))
             .set_title("Rust GAS App")
             .set_sandbox_mode(SandboxMode::Iframe)
+    }
+
+    fn wasi_showcase_example() {
+        // 1. Rust標準の println! / eprintln! (wasm32-wasip2 の wasi:cli/stdout, stderr 経由で Logger.log / console.error に出力)
+        println!("[Rust WASI stdout] Hello from Rust println! in GAS");
+        eprintln!("[Rust WASI stderr] Hello from Rust eprintln! in GAS");
+
+        // 2. wasi:clocks/system-clock@0.3.2 & wasi:clocks/timezone@0.3.2 (Date.now() および Session.getScriptTimeZone() に連動)
+        let sys_now = bindings::wasi::clocks::system_clock::now();
+        let tz_id = bindings::wasi::clocks::timezone::iana_id();
+        let tz_offset = bindings::wasi::clocks::timezone::utc_offset(sys_now);
+        logger::log(&format!(
+            "WASI system-clock: {}s {}ns, timezone={:?}, utc_offset_ns={:?}",
+            sys_now.seconds, sys_now.nanoseconds, tz_id, tz_offset
+        ));
+
+        // 3. wasi:random/{random, insecure, insecure-seed}@0.3.2 (Utilities.getUuid + SHA-256 CSPRNG / Math.random)
+        let rand_u64 = bindings::wasi::random::random::get_random_u64();
+        let seed = bindings::wasi::random::insecure_seed::get_insecure_seed();
+        logger::log(&format!("WASI random u64={}, seed={:?}", rand_u64, seed));
+
+        // 4. wasi:cli/environment@0.3.2 (GAS Script Properties を環境変数として取得)
+        let envs = bindings::wasi::cli::environment::get_environment();
+        let cwd = bindings::wasi::cli::environment::get_initial_cwd();
+        logger::log(&format!("WASI environment count: {}, cwd: {:?}", envs.len(), cwd));
+        for (k, v) in envs.iter().take(5) {
+            logger::log(&format!("  ENV: {} = {}", k, v));
+        }
     }
 }
 

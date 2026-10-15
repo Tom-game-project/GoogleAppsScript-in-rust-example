@@ -11,6 +11,7 @@ import {
     httpRequestTest,
     utilitiesExample,
     htmlServiceExample,
+    wasiShowcaseExample,
 } from "./target/jco/GoogleAppsScript_in_rust_example.js";
 import "./textencoderdecoder";
 
@@ -30,6 +31,7 @@ interface GasGlobal {
     http_request_test: () => void;
     utilities_example: () => void;
     html_service_example: () => GoogleAppsScript.HTML.HtmlOutput;
+    wasi_showcase_example: () => void;
 }
 
 declare const global: GasGlobal;
@@ -106,4 +108,8 @@ global.utilities_example = function(): void {
 global.html_service_example = function(): GoogleAppsScript.HTML.HtmlOutput {
     const out = htmlServiceExample() as unknown as GasHtmlOutput;
     return out.rawHtmlOutput;
+};
+
+global.wasi_showcase_example = function(): void {
+    wasiShowcaseExample();
 };

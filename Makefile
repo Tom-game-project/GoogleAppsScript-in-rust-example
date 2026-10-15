@@ -19,6 +19,15 @@ JCO_FLAGS = \
 # host impls
 JS_SHIMS = \
 	js/wasi-random.ts \
+	js/wasi-clocks.ts \
+	js/wasi-wall-clock.ts \
+	js/wasi-monotonic-clock.ts \
+	js/wasi-io.ts \
+	js/wasi-cli.ts \
+	js/wasi-filesystem.ts \
+	js/wasi-sockets.ts \
+	js/wasi-http.ts \
+	js/wasi_stub.ts \
 	js/log-host.ts \
 	js/example-resouceex.ts \
 	js/gas-logger.ts \
@@ -52,8 +61,7 @@ JS_SHIMS = \
 	js/gas-document-types.ts \
 	js/gas-script-app.ts \
 	js/gas-script-types.ts \
-	js/gas-math.ts \
-	js/wasi_stub.ts
+	js/gas-math.ts
 
 # guest impls
 RS_SRCS = \
@@ -104,8 +112,82 @@ $(JCO_OUT_DIR): $(WASM_SRC) $(JS_SHIMS)
 	--map 'gas:math/gas-math=./gas-math.ts' \
 	--map 'wasi:logging/logging=./log-host.ts' \
 	--map 'wasi:random/random=./wasi-random.ts' \
-	--map 'wasi:io/poll=./wasi_stub.ts' \
-	--map 'wasi:io/poll@0.2.0=./wasi_stub.ts'
+	--map 'wasi:random/random@0.2.0=./wasi-random.ts' \
+	--map 'wasi:random/random@0.3.2=./wasi-random.ts' \
+	--map 'wasi:random/insecure=./wasi-random.ts' \
+	--map 'wasi:random/insecure@0.2.0=./wasi-random.ts' \
+	--map 'wasi:random/insecure@0.3.2=./wasi-random.ts' \
+	--map 'wasi:random/insecure-seed=./wasi-random.ts' \
+	--map 'wasi:random/insecure-seed@0.2.0=./wasi-random.ts' \
+	--map 'wasi:random/insecure-seed@0.3.2=./wasi-random.ts' \
+	--map 'wasi:clocks/types=./wasi-clocks.ts' \
+	--map 'wasi:clocks/types@0.3.2=./wasi-clocks.ts' \
+	--map 'wasi:clocks/system-clock=./wasi-clocks.ts' \
+	--map 'wasi:clocks/system-clock@0.3.2=./wasi-clocks.ts' \
+	--map 'wasi:clocks/timezone=./wasi-clocks.ts' \
+	--map 'wasi:clocks/timezone@0.3.2=./wasi-clocks.ts' \
+	--map 'wasi:clocks/wall-clock=./wasi-wall-clock.ts' \
+	--map 'wasi:clocks/wall-clock@0.2.0=./wasi-wall-clock.ts' \
+	--map 'wasi:clocks/monotonic-clock=./wasi-monotonic-clock.ts' \
+	--map 'wasi:clocks/monotonic-clock@0.2.0=./wasi-monotonic-clock.ts' \
+	--map 'wasi:clocks/monotonic-clock@0.3.2=./wasi-monotonic-clock.ts' \
+	--map 'wasi:cli/environment=./wasi-cli.ts' \
+	--map 'wasi:cli/environment@0.2.0=./wasi-cli.ts' \
+	--map 'wasi:cli/environment@0.3.2=./wasi-cli.ts' \
+	--map 'wasi:cli/exit=./wasi-cli.ts' \
+	--map 'wasi:cli/exit@0.2.0=./wasi-cli.ts' \
+	--map 'wasi:cli/exit@0.3.2=./wasi-cli.ts' \
+	--map 'wasi:cli/stdin=./wasi-cli.ts' \
+	--map 'wasi:cli/stdin@0.2.0=./wasi-cli.ts' \
+	--map 'wasi:cli/stdin@0.3.2=./wasi-cli.ts' \
+	--map 'wasi:cli/stdout=./wasi-cli.ts' \
+	--map 'wasi:cli/stdout@0.2.0=./wasi-cli.ts' \
+	--map 'wasi:cli/stdout@0.3.2=./wasi-cli.ts' \
+	--map 'wasi:cli/stderr=./wasi-cli.ts' \
+	--map 'wasi:cli/stderr@0.2.0=./wasi-cli.ts' \
+	--map 'wasi:cli/stderr@0.3.2=./wasi-cli.ts' \
+	--map 'wasi:cli/terminal-input=./wasi-cli.ts' \
+	--map 'wasi:cli/terminal-input@0.2.0=./wasi-cli.ts' \
+	--map 'wasi:cli/terminal-input@0.3.2=./wasi-cli.ts' \
+	--map 'wasi:cli/terminal-output=./wasi-cli.ts' \
+	--map 'wasi:cli/terminal-output@0.2.0=./wasi-cli.ts' \
+	--map 'wasi:cli/terminal-output@0.3.2=./wasi-cli.ts' \
+	--map 'wasi:cli/terminal-stdin=./wasi-cli.ts' \
+	--map 'wasi:cli/terminal-stdin@0.2.0=./wasi-cli.ts' \
+	--map 'wasi:cli/terminal-stdin@0.3.2=./wasi-cli.ts' \
+	--map 'wasi:cli/terminal-stdout=./wasi-cli.ts' \
+	--map 'wasi:cli/terminal-stdout@0.2.0=./wasi-cli.ts' \
+	--map 'wasi:cli/terminal-stdout@0.3.2=./wasi-cli.ts' \
+	--map 'wasi:cli/terminal-stderr=./wasi-cli.ts' \
+	--map 'wasi:cli/terminal-stderr@0.2.0=./wasi-cli.ts' \
+	--map 'wasi:cli/terminal-stderr@0.3.2=./wasi-cli.ts' \
+	--map 'wasi:io/streams=./wasi-io.ts' \
+	--map 'wasi:io/streams@0.2.0=./wasi-io.ts' \
+	--map 'wasi:io/poll=./wasi-io.ts' \
+	--map 'wasi:io/poll@0.2.0=./wasi-io.ts' \
+	--map 'wasi:io/error=./wasi-io.ts' \
+	--map 'wasi:io/error@0.2.0=./wasi-io.ts' \
+	--map 'wasi:filesystem/types=./wasi-filesystem.ts' \
+	--map 'wasi:filesystem/types@0.2.0=./wasi-filesystem.ts' \
+	--map 'wasi:filesystem/types@0.3.2=./wasi-filesystem.ts' \
+	--map 'wasi:filesystem/preopens=./wasi-filesystem.ts' \
+	--map 'wasi:filesystem/preopens@0.2.0=./wasi-filesystem.ts' \
+	--map 'wasi:filesystem/preopens@0.3.2=./wasi-filesystem.ts' \
+	--map 'wasi:sockets/types=./wasi-sockets.ts' \
+	--map 'wasi:sockets/types@0.2.0=./wasi-sockets.ts' \
+	--map 'wasi:sockets/types@0.3.2=./wasi-sockets.ts' \
+	--map 'wasi:sockets/ip-name-lookup=./wasi-sockets.ts' \
+	--map 'wasi:sockets/ip-name-lookup@0.2.0=./wasi-sockets.ts' \
+	--map 'wasi:sockets/ip-name-lookup@0.3.2=./wasi-sockets.ts' \
+	--map 'wasi:http/types=./wasi-http.ts' \
+	--map 'wasi:http/types@0.2.0=./wasi-http.ts' \
+	--map 'wasi:http/types@0.3.2=./wasi-http.ts' \
+	--map 'wasi:http/client=./wasi-http.ts' \
+	--map 'wasi:http/client@0.3.2=./wasi-http.ts' \
+	--map 'wasi:http/handler=./wasi-http.ts' \
+	--map 'wasi:http/handler@0.3.2=./wasi-http.ts' \
+	--map 'wasi:http/outgoing-handler=./wasi-http.ts' \
+	--map 'wasi:http/outgoing-handler@0.2.0=./wasi-http.ts'
 	cp $(JS_SHIMS) $(JCO_OUT_DIR)
 	echo "success to jco transpile"
 
