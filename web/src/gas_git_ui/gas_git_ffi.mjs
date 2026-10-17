@@ -3,7 +3,8 @@
 // (`google.script.run` in HtmlService or HTTP `?action=list_repos` / `?action=create_repo` / `?action=get_commits`).
 //
 // Implements client-side commit caching keyed by `${project_name}:${head_oid}`
-// using `localStorage` so repeat visits serve the commit DAG and history instantly.
+// using `localStorage` so repeat visits serve the commit DAG and history instantly,
+// while purging stale project entries whenever `forceRefresh` or a new `head_oid` arrives.
 
 import { toList } from "../gleam.mjs";
 import { Commit, RepoCommits, RepoSummary, ServerState } from "./types.mjs";
@@ -91,6 +92,55 @@ function decodeRepoCommits(rawPayload, fromCache) {
   );
 }
 
+function saveCommitsToLocalCache(projectName, requestedHead, data) {
+  if (!data?.ok || typeof window === "undefined" || !window.localStorage) {
+    return;
+  }
+  try {
+    const prefix = `gas_git_commits_${projectName}_`;
+    const keysToRemove = [];
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const k = window.localStorage.key(i);
+      if (k && k.startsWith(prefix)) {
+        keysToRemove.push(k);
+      }
+    }
+    for (const k of keysToRemove) {
+      window.localStorage.removeItem(k);
+    }
+
+    const actualHead = String(data?.head_oid ?? requestedHead ?? "").trim();
+    const serialized = JSON.stringify(data);
+    if (actualHead) {
+      window.localStorage.setItem(`${prefix}${actualHead}`, serialized);
+    }
+    window.localStorage.setItem(`gas_git_commits_latest_${projectName}`, serialized);
+  } catch (_) {}
+}
+
+function loadCommitsFromLocalCache(projectName, cleanHead) {
+  if (typeof window === "undefined" || !window.localStorage) {
+    return null;
+  }
+  try {
+    if (cleanHead) {
+      const byHead = window.localStorage.getItem(`gas_git_commits_${projectName}_${cleanHead}`);
+      if (byHead) {
+        return JSON.parse(byHead);
+      }
+    }
+    const latestRaw = window.localStorage.getItem(`gas_git_commits_latest_${projectName}`);
+    if (latestRaw) {
+      const parsed = JSON.parse(latestRaw);
+      const cachedHead = String(parsed?.head_oid ?? "").trim();
+      if (!cleanHead || cachedHead === cleanHead) {
+        return parsed;
+      }
+    }
+  } catch (_) {}
+  return null;
+}
+
 export function loadInitialOrRemoteState(onSuccess, onError) {
   try {
     if (
@@ -176,26 +226,17 @@ export function createRepository(projectName, description, onSuccess, onError) {
 export function fetchRepoCommits(projectName, headOid, forceRefresh, onSuccess, onError) {
   const cleanHead = (headOid || "").trim();
 
-  // If the repository is empty (0 commits), return immediately without network call
-  if (!cleanHead) {
-    onSuccess(new RepoCommits(true, projectName, "", "refs/heads/main", toList([]), true, ""));
-    return;
-  }
-
-  const cacheKey = `gas_git_commits_${projectName}_${cleanHead}`;
-
-  // Check persistent localStorage cache if not explicitly force-refreshing
   if (!forceRefresh) {
-    try {
-      if (typeof window !== "undefined" && window.localStorage) {
-        const cached = window.localStorage.getItem(cacheKey);
-        if (cached) {
-          const parsed = JSON.parse(cached);
-          onSuccess(decodeRepoCommits(parsed, true));
-          return;
-        }
-      }
-    } catch (_) {}
+    const cached = loadCommitsFromLocalCache(projectName, cleanHead);
+    if (cached) {
+      onSuccess(decodeRepoCommits(cached, true));
+      return;
+    }
+    // If the repository is known to be empty (0 commits) and not force-refreshing, return immediately
+    if (!cleanHead) {
+      onSuccess(new RepoCommits(true, projectName, "", "refs/heads/main", toList([]), true, ""));
+      return;
+    }
   }
 
   // Cache miss or force-refresh: query server
@@ -209,11 +250,7 @@ export function fetchRepoCommits(projectName, headOid, forceRefresh, onSuccess, 
       .withSuccessHandler((res) => {
         try {
           const data = typeof res === "string" ? JSON.parse(res) : res;
-          if (data?.ok && typeof window !== "undefined" && window.localStorage) {
-            try {
-              window.localStorage.setItem(cacheKey, JSON.stringify(data));
-            } catch (_) {}
-          }
+          saveCommitsToLocalCache(projectName, cleanHead, data);
           onSuccess(decodeRepoCommits(data, false));
         } catch (e) {
           onError(String(e));
@@ -229,11 +266,7 @@ export function fetchRepoCommits(projectName, headOid, forceRefresh, onSuccess, 
   })
     .then((resp) => resp.json())
     .then((data) => {
-      if (data?.ok && typeof window !== "undefined" && window.localStorage) {
-        try {
-          window.localStorage.setItem(cacheKey, JSON.stringify(data));
-        } catch (_) {}
-      }
+      saveCommitsToLocalCache(projectName, cleanHead, data);
       onSuccess(decodeRepoCommits(data, false));
     })
     .catch((err) => onError(String(err)));

@@ -588,29 +588,56 @@ function getFallbackBundleCode() {
       return [model, eff];
     }
 
+    function saveCommitsToLocalCache(projectName, requestedHead, data) {
+      if (!data?.ok || typeof window === "undefined" || !window.localStorage) return;
+      try {
+        const prefix = \`gas_git_commits_\${projectName}_\`;
+        const keysToRemove = [];
+        for (let i = 0; i < window.localStorage.length; i++) {
+          const k = window.localStorage.key(i);
+          if (k && k.startsWith(prefix)) keysToRemove.push(k);
+        }
+        for (const k of keysToRemove) window.localStorage.removeItem(k);
+        const actualHead = String(data?.head_oid ?? requestedHead ?? "").trim();
+        const serialized = JSON.stringify(data);
+        if (actualHead) window.localStorage.setItem(\`\${prefix}\${actualHead}\`, serialized);
+        window.localStorage.setItem(\`gas_git_commits_latest_\${projectName}\`, serialized);
+      } catch (_) {}
+    }
+
+    function loadCommitsFromLocalCache(projectName, cleanHead) {
+      if (typeof window === "undefined" || !window.localStorage) return null;
+      try {
+        if (cleanHead) {
+          const byHead = window.localStorage.getItem(\`gas_git_commits_\${projectName}_\${cleanHead}\`);
+          if (byHead) return JSON.parse(byHead);
+        }
+        const latestRaw = window.localStorage.getItem(\`gas_git_commits_latest_\${projectName}\`);
+        if (latestRaw) {
+          const parsed = JSON.parse(latestRaw);
+          const cachedHead = String(parsed?.head_oid ?? "").trim();
+          if (!cleanHead || cachedHead === cleanHead) return parsed;
+        }
+      } catch (_) {}
+      return null;
+    }
+
     function fetchCommitsEffect(projectName, headOid, forceRefresh) {
       return effect.from((dispatch) => {
         const cleanHead = (headOid || "").trim();
-        if (!cleanHead) {
-          dispatch({
-            type: "Commits",
-            res: new Ok(new RepoCommits(true, projectName, "", "refs/heads/main", toList([]), true, "")),
-          });
-          return;
-        }
-
-        const cacheKey = \`gas_git_commits_\${projectName}_\${cleanHead}\`;
         if (!forceRefresh) {
-          try {
-            if (typeof window !== "undefined" && window.localStorage) {
-              const cached = window.localStorage.getItem(cacheKey);
-              if (cached) {
-                const parsed = JSON.parse(cached);
-                dispatch({ type: "Commits", res: new Ok(decodeRepoCommits(parsed, true)) });
-                return;
-              }
-            }
-          } catch (_) {}
+          const cached = loadCommitsFromLocalCache(projectName, cleanHead);
+          if (cached) {
+            dispatch({ type: "Commits", res: new Ok(decodeRepoCommits(cached, true)) });
+            return;
+          }
+          if (!cleanHead) {
+            dispatch({
+              type: "Commits",
+              res: new Ok(new RepoCommits(true, projectName, "", "refs/heads/main", toList([]), true, "")),
+            });
+            return;
+          }
         }
 
         fetch("?action=get_commits&repo=" + encodeURIComponent(projectName), {
@@ -618,11 +645,7 @@ function getFallbackBundleCode() {
         })
           .then((r) => r.json())
           .then((data) => {
-            if (data?.ok && typeof window !== "undefined" && window.localStorage) {
-              try {
-                window.localStorage.setItem(cacheKey, JSON.stringify(data));
-              } catch (_) {}
-            }
+            saveCommitsToLocalCache(projectName, cleanHead, data);
             dispatch({ type: "Commits", res: new Ok(decodeRepoCommits(data, false)) });
           })
           .catch((e) => dispatch({ type: "Commits", res: new ErrorResult(String(e)) }));
@@ -667,12 +690,13 @@ function getFallbackBundleCode() {
         })];
       }
       if (msg.type === "OpenCommits") {
-        const cacheKey = \`\${msg.project_name}:\${msg.head_oid}\`;
-        if (model.cached_commits.has(cacheKey)) {
+        const cached = model.cached_commits.get(msg.project_name);
+        if (cached && cached.head_oid === msg.head_oid) {
+          const hitEntry = new RepoCommits(cached.ok, cached.project_name, cached.head_oid, cached.default_branch, cached.commits, true, cached.error);
           return [{
             ...model,
             view_mode: "commits",
-            active_commits: model.cached_commits.get(cacheKey),
+            active_commits: hitEntry,
             is_loading: false,
             error: new None(),
           }, effect.none()];
@@ -683,15 +707,21 @@ function getFallbackBundleCode() {
           active_commits: null,
           is_loading: true,
           error: new None(),
-        ], fetchCommitsEffect(msg.project_name, msg.head_oid, false)];
+        }, fetchCommitsEffect(msg.project_name, msg.head_oid, false)];
       }
       if (msg.type === "Commits") {
         if (msg.res instanceof Ok) {
           const rc = msg.res[0];
-          const cacheKey = \`\${rc.project_name}:\${rc.head_oid}\`;
-          model.cached_commits.set(cacheKey, rc);
+          const cachedEntry = new RepoCommits(rc.ok, rc.project_name, rc.head_oid, rc.default_branch, rc.commits, true, rc.error);
+          model.cached_commits.set(rc.project_name, cachedEntry);
+          const updatedRepos = model.repositories.toArray().map((r) =>
+            r.name === rc.project_name
+              ? new RepoSummary(r.name, r.folder_name, r.folder_id, r.folder_url, r.description, rc.default_branch, rc.head_oid, r.branch_count)
+              : r
+          );
           return [{
             ...model,
+            repositories: toList(updatedRepos),
             active_commits: rc,
             is_loading: false,
             error: new None(),
@@ -703,6 +733,7 @@ function getFallbackBundleCode() {
         return [{ ...model, view_mode: "overview", is_loading: false }, effect.none()];
       }
       if (msg.type === "ForceRefreshCommits") {
+        model.cached_commits.delete(msg.project_name);
         return [{ ...model, is_loading: true, error: new None() }, fetchCommitsEffect(msg.project_name, msg.head_oid, true)];
       }
       return [model, effect.none()];

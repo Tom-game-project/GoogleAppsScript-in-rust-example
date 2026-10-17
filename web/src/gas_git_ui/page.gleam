@@ -12,6 +12,7 @@ import gas_git_ui/components/repo_form
 import gas_git_ui/components/repo_list
 import gas_git_ui/types.{type RepoCommits, type RepoSummary, type ServerState}
 import gleam/dict.{type Dict}
+import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string
 import lustre/attribute
@@ -174,19 +175,18 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     )
 
     OpenProjectCommits(project_name, head_oid) -> {
-      let cache_key = project_name <> ":" <> head_oid
-      case dict.get(model.cached_commits, cache_key) {
-        Ok(cached) -> #(
+      case dict.get(model.cached_commits, project_name) {
+        Ok(cached) if cached.head_oid == head_oid -> #(
           Model(
             ..model,
             view_mode: ViewCommits(project_name),
-            active_commits: Some(cached),
+            active_commits: Some(types.RepoCommits(..cached, from_cache: True)),
             is_loading: False,
             error: None,
           ),
           effect.none(),
         )
-        Error(Nil) -> #(
+        _ -> #(
           Model(
             ..model,
             view_mode: ViewCommits(project_name),
@@ -205,12 +205,29 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     }
 
     RepoCommitsReceived(Ok(repo_commits)) -> {
-      let cache_key = repo_commits.project_name <> ":" <> repo_commits.head_oid
+      let cached_entry = types.RepoCommits(..repo_commits, from_cache: True)
       let updated_cache =
-        dict.insert(model.cached_commits, cache_key, repo_commits)
+        dict.insert(
+          model.cached_commits,
+          repo_commits.project_name,
+          cached_entry,
+        )
+      let updated_repositories =
+        list.map(model.repositories, fn(repo) {
+          case repo.name == repo_commits.project_name {
+            True ->
+              types.RepoSummary(
+                ..repo,
+                head_oid: repo_commits.head_oid,
+                default_branch: repo_commits.default_branch,
+              )
+            False -> repo
+          }
+        })
       #(
         Model(
           ..model,
+          repositories: updated_repositories,
           cached_commits: updated_cache,
           active_commits: Some(repo_commits),
           is_loading: False,
@@ -230,10 +247,18 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       effect.none(),
     )
 
-    ForceRefreshCommits(project_name, head_oid) -> #(
-      Model(..model, is_loading: True, error: None),
-      api.fetch_repo_commits(project_name, head_oid, True, RepoCommitsReceived),
-    )
+    ForceRefreshCommits(project_name, head_oid) -> {
+      let cleared_cache = dict.delete(model.cached_commits, project_name)
+      #(
+        Model(
+          ..model,
+          cached_commits: cleared_cache,
+          is_loading: True,
+          error: None,
+        ),
+        api.fetch_repo_commits(project_name, head_oid, True, RepoCommitsReceived),
+      )
+    }
   }
 }
 

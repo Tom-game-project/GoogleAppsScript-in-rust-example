@@ -1,5 +1,6 @@
 //// Domain types and pure helper functions for the GAS Git Server Web UI.
 
+import gleam/int
 import gleam/option.{type Option, None, Some}
 import gleam/string
 
@@ -96,6 +97,58 @@ pub fn format_repo_status(repo: RepoSummary) -> String {
       <> " ("
       <> string.slice(oid, 0, 7)
       <> ")"
+  }
+}
+
+/// Format a Unix timestamp (seconds since 1970-01-01T00:00:00Z) as `YYYY-MM-DD HH:MM:SS UTC`.
+pub fn format_timestamp(ts: Int) -> String {
+  case ts <= 0 {
+    True -> "-"
+    False -> {
+      let days = ts / 86_400
+      let rem_sec = ts % 86_400
+      let hour = rem_sec / 3600
+      let minute = { rem_sec % 3600 } / 60
+      let second = rem_sec % 60
+
+      let z = days + 719_468
+      let era = z / 146_097
+      let doe = z - era * 146_097
+      let yoe =
+        { doe - doe / 1460 + doe / 36_524 - doe / 146_096 } / 365
+      let y = yoe + era * 400
+      let doy = doe - { 365 * yoe + yoe / 4 - yoe / 100 }
+      let mp = { 5 * doy + 2 } / 153
+      let d = doy - { 153 * mp + 2 } / 5 + 1
+      let m = case mp < 10 {
+        True -> mp + 3
+        False -> mp - 9
+      }
+      let year = case m <= 2 {
+        True -> y + 1
+        False -> y
+      }
+
+      int.to_string(year)
+      <> "-"
+      <> pad2(m)
+      <> "-"
+      <> pad2(d)
+      <> " "
+      <> pad2(hour)
+      <> ":"
+      <> pad2(minute)
+      <> ":"
+      <> pad2(second)
+      <> " UTC"
+    }
+  }
+}
+
+fn pad2(n: Int) -> String {
+  case n < 10 {
+    True -> "0" <> int.to_string(n)
+    False -> int.to_string(n)
   }
 }
 

@@ -1,7 +1,7 @@
-//// Commit history and SVG graph view component.
+//// Commit history and Fossil-style SVG tree view component.
 ////
-//// Renders commit history (`git log --graph --decorate`), commit metadata,
-//// branch/tag decoration badges, and cache hit/miss indicators.
+//// Renders a Fossil SCM-inspired SVG commit tree diagram (`git log --graph --decorate`)
+//// alongside a detailed commit log table and cache hit/miss indicators.
 
 import gas_git_ui/graph
 import gas_git_ui/types.{type Commit, type RepoCommits}
@@ -39,7 +39,13 @@ pub fn view_commit_history(
       ),
     ]),
     html.h2([], [
-      text("Project: " <> repo_commits.project_name <> " (commits: " <> count_label <> ")"),
+      text(
+        "Project: "
+        <> repo_commits.project_name
+        <> " (commits: "
+        <> count_label
+        <> ")",
+      ),
     ]),
     html.p([], [
       text("HEAD: "),
@@ -52,7 +58,7 @@ pub fn view_commit_history(
       text(" | Cache status: "),
       case repo_commits.from_cache {
         True ->
-          html.strong([], [text("[HIT: localStorage cache (0ms)]")])
+          html.strong([], [text("[HIT: cache (0ms)]")])
         False ->
           html.span([], [text("[MISS: fetched fresh from GAS]")])
       },
@@ -80,99 +86,83 @@ pub fn view_commit_history(
 
 fn view_commits_with_graph(commits: List(Commit)) -> Element(msg) {
   html.div([], [
+    html.h3([], [
+      text("Commit Tree Timeline (Fossil-style SVG Graph)"),
+    ]),
+    html.div(
+      [
+        attribute.attribute(
+          "style",
+          "overflow-x: auto; padding: 8px 0; margin-bottom: 16px;",
+        ),
+      ],
+      [graph.render_svg_graph(commits)],
+    ),
+    html.h3([], [text("Commit Log / コミット履歴一覧")]),
     html.table([attribute.attribute("border", "1")], [
       html.thead([], [
         html.tr([], [
-          html.th([], [text("Graph (git log --graph)")]),
-          html.th([], [text("Commit / Summary")]),
+          html.th([], [text("Date (UTC)")]),
+          html.th([], [text("Hash")]),
+          html.th([], [text("Refs / Branches")]),
+          html.th([], [text("Commit Summary")]),
           html.th([], [text("Author")]),
-          html.th([], [text("Date (Unix timestamp)")]),
-          html.th([], [text("Hash / Parents")]),
+          html.th([], [text("Parents")]),
         ]),
       ]),
-      html.tbody([], [
-        html.tr([], [
-          html.td(
-            [
-              attribute.attribute("valign", "top"),
-              attribute.attribute("style", "padding: 0; vertical-align: top;"),
-            ],
-            [graph.render_svg_graph(commits)],
-          ),
-          html.td(
-            [
-              attribute.attribute("colspan", "4"),
-              attribute.attribute("valign", "top"),
-              attribute.attribute("style", "padding: 0; vertical-align: top;"),
-            ],
-            [
-              html.table(
-                [
-                  attribute.attribute("border", "0"),
-                  attribute.attribute("width", "100%"),
-                ],
-                [
-                  html.tbody(
-                    [],
-                    list.map(commits, fn(commit) { view_commit_row(commit) }),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ]),
-      ]),
+      html.tbody(
+        [],
+        list.map(commits, fn(commit) { view_commit_row(commit) }),
+      ),
     ]),
   ])
 }
 
 fn view_commit_row(commit: Commit) -> Element(msg) {
-  html.tr(
-    [
-      attribute.attribute(
-        "style",
-        "height: 36px; min-height: 36px; vertical-align: middle;",
-      ),
-    ],
-    [
-      html.td([], [
-        view_ref_decorations(commit.refs),
-        html.strong([], [text(commit.summary)]),
-      ]),
-      html.td([], [
-        text(commit.author_name <> " <" <> commit.author_email <> ">"),
-      ]),
-      html.td([], [text(int.to_string(commit.timestamp))]),
-      html.td([], [
-        html.code([], [text(commit.short_oid)]),
-        case commit.parents {
-          [] -> text("")
-          parents ->
-            text(" (parents: " <> string.join(list.map(parents, fn(p) { string.slice(p, 0, 7) }), ", ") <> ")")
-        },
-      ]),
-    ],
-  )
+  html.tr([], [
+    html.td([], [
+      html.code([], [text(types.format_timestamp(commit.timestamp))]),
+    ]),
+    html.td([], [html.code([], [text(commit.short_oid)])]),
+    html.td([], [view_ref_decorations(commit.refs)]),
+    html.td([], [html.strong([], [text(commit.summary)])]),
+    html.td([], [
+      text(commit.author_name <> " <" <> commit.author_email <> ">"),
+    ]),
+    html.td([], [
+      case commit.parents {
+        [] -> text("root")
+        parents ->
+          html.code([], [
+            text(
+              string.join(
+                list.map(parents, fn(p) { string.slice(p, 0, 7) }),
+                ", ",
+              ),
+            ),
+          ])
+      },
+    ]),
+  ])
 }
 
 fn view_ref_decorations(refs: List(String)) -> Element(msg) {
   case refs {
-    [] -> text("")
+    [] -> text("-")
     _ ->
-      html.span([], [
+      html.span(
+        [],
         list.map(refs, fn(r) {
           html.span(
             [
               attribute.attribute(
                 "style",
-                "display: inline-block; padding: 1px 4px; margin-right: 4px; border: 1px solid #ccc; font-size: 0.85em;",
+                "display: inline-block; padding: 1px 6px; margin-right: 4px; border: 1px solid #0969da; border-radius: 4px; font-size: 0.85em;",
               ),
             ],
             [text(r)],
           )
-        })
-        |> element.fragment,
-        text(" "),
-      ])
+        }),
+      )
   }
 }
