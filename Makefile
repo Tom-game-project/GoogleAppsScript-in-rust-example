@@ -91,6 +91,7 @@ RS_SRCS = \
 $(DIST_HTML): $(GLEAM_SRCS) tools/bundle_web_html.mjs
 	@if command -v gleam >/dev/null 2>&1; then \
 		echo "Building Gleam + Lustre Web UI (target=javascript)..."; \
+		rm -rf web/build/dev/javascript/gas_git_ui; \
 		cd web && gleam build --target javascript; \
 	else \
 		echo "gleam CLI not found; bundling with fallback runtime"; \
@@ -220,17 +221,31 @@ $(JCO_OUT_DIR): $(WASM_SRC) $(JS_SHIMS)
 	--map 'wasi:http/outgoing-handler=./wasi-http.ts' \
 	--map 'wasi:http/outgoing-handler@0.2.0=./wasi-http.ts'
 	cp $(JS_SHIMS) $(JCO_OUT_DIR)
+	touch $(JCO_OUT_DIR)
 	echo "success to jco transpile"
 
-# packing (dist/main.js + dist/index.html)
-build-pack: $(JCO_OUT_DIR) $(DIST_HTML)
+# packing (dist/index.html -> WASM -> jco -> dist/main.js)
+build-pack: $(DIST_HTML) $(WASM_SRC) $(JCO_OUT_DIR)
 	echo $(WASM_SRC)
 	pnpm exec webpack --progress
-	node ./tools/bundle_web_html.mjs
 
 push: build-pack
 	cp ./appsscript.json ./dist
 	pnpm exec clasp push
+
+# 作成したすべてのビルド成果物 (dist, target, web/build) を削除
+clean:
+	rm -rf dist target web/build
+
+# ビルド成果物を一度すべて消去してから新しくフルビルドを実行
+rebuild:
+	$(MAKE) clean
+	$(MAKE) build-pack BUILD=$(BUILD)
+
+# クリーンビルド後にそのまま GAS へデプロイ (clasp push)
+rebuild-push:
+	$(MAKE) clean
+	$(MAKE) push BUILD=$(BUILD)
 
 install-git-remote-gas:
 	mkdir -p $(HOME)/.local/bin
@@ -241,4 +256,4 @@ install-git-remote-gas:
 test-git-e2e: $(DIST_HTML)
 	python3 ./tools/test_gas_git_e2e.py
 
-.PHONY: build-ui build-pack push install-git-remote-gas test-git-e2e
+.PHONY: build-ui build-pack push clean rebuild rebuild-push install-git-remote-gas test-git-e2e

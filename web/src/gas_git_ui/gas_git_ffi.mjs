@@ -12,17 +12,12 @@
 //          content-addressable store for each commit's file diffs and full directory/file tree.
 //   - Tier 2 (Secondary fallback): `window.caches` (Cache Storage API `gas-git-cache-v1`)
 //   - Tier 3 (Tertiary fallback): `window.localStorage`
+//
+// Written using standard `function` declarations and Promise `.then()` chains (no `async`/`await`)
+// for maximum compatibility with all bundlers and Google Apps Script HtmlService environments.
 
 import { toList } from "../gleam.mjs";
-import {
-  Commit,
-  CommitDetail,
-  CommitFileChange,
-  CommitTreeEntry,
-  RepoCommits,
-  RepoSummary,
-  ServerState,
-} from "./types.mjs";
+import { Commit, CommitDetail, CommitFileChange, CommitTreeEntry, RepoCommits, RepoSummary, ServerState } from "./types.mjs";
 
 const IDB_NAME = "GasGitServerCacheDB";
 const IDB_VERSION = 1;
@@ -51,14 +46,14 @@ function detectDefaultBaseUrl() {
 // ============================================================================
 
 function openCacheIndexedDB() {
-  return new Promise((resolve, reject) => {
+  return new Promise(function (resolve, reject) {
     if (typeof window === "undefined" || !window.indexedDB) {
       reject(new Error("IndexedDB not supported"));
       return;
     }
     try {
       const req = window.indexedDB.open(IDB_NAME, IDB_VERSION);
-      req.onupgradeneeded = (event) => {
+      req.onupgradeneeded = function (event) {
         const db = event.target.result;
         if (!db.objectStoreNames.contains(STORE_REPO_COMMITS)) {
           db.createObjectStore(STORE_REPO_COMMITS, { keyPath: "project_name" });
@@ -67,129 +62,164 @@ function openCacheIndexedDB() {
           db.createObjectStore(STORE_COMMIT_DETAILS, { keyPath: "cache_key" });
         }
       };
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error || new Error("IndexedDB open failed"));
+      req.onsuccess = function () {
+        resolve(req.result);
+      };
+      req.onerror = function () {
+        reject(req.error || new Error("IndexedDB open failed"));
+      };
     } catch (err) {
       reject(err);
     }
   });
 }
 
-async function idbGet(storeName, key) {
-  const db = await openCacheIndexedDB();
-  return new Promise((resolve, reject) => {
-    try {
-      const tx = db.transaction(storeName, "readonly");
-      const store = tx.objectStore(storeName);
-      const req = store.get(key);
-      req.onsuccess = () => {
+function idbGet(storeName, key) {
+  return openCacheIndexedDB().then(function (db) {
+    return new Promise(function (resolve, reject) {
+      try {
+        const tx = db.transaction(storeName, "readonly");
+        const store = tx.objectStore(storeName);
+        const req = store.get(key);
+        req.onsuccess = function () {
+          db.close();
+          resolve(req.result || null);
+        };
+        req.onerror = function () {
+          db.close();
+          reject(req.error);
+        };
+      } catch (err) {
         db.close();
-        resolve(req.result || null);
-      };
-      req.onerror = () => {
-        db.close();
-        reject(req.error);
-      };
-    } catch (err) {
-      db.close();
-      reject(err);
-    }
-  });
-}
-
-async function idbPut(storeName, value) {
-  const db = await openCacheIndexedDB();
-  return new Promise((resolve, reject) => {
-    try {
-      const tx = db.transaction(storeName, "readwrite");
-      const store = tx.objectStore(storeName);
-      const req = store.put(value);
-      req.onsuccess = () => {
-        db.close();
-        resolve(true);
-      };
-      req.onerror = () => {
-        db.close();
-        reject(req.error);
-      };
-    } catch (err) {
-      db.close();
-      reject(err);
-    }
-  });
-}
-
-async function cacheApiGet(urlKey) {
-  if (typeof window === "undefined" || !window.caches) {
-    throw new Error("CacheStorage API not available");
-  }
-  const cache = await window.caches.open(CACHE_STORAGE_NAME);
-  const resp = await cache.match(urlKey);
-  if (!resp) return null;
-  return await resp.json();
-}
-
-async function cacheApiPut(urlKey, record) {
-  if (typeof window === "undefined" || !window.caches) {
-    throw new Error("CacheStorage API not available");
-  }
-  const cache = await window.caches.open(CACHE_STORAGE_NAME);
-  const resp = new Response(JSON.stringify(record), {
-    headers: { "Content-Type": "application/json" },
-  });
-  await cache.put(urlKey, resp);
-}
-
-async function readRepoCommitsPersistent(projectName, cleanHead) {
-  // 1. Try IndexedDB primary store
-  try {
-    const record = await idbGet(STORE_REPO_COMMITS, projectName);
-    if (record && record.payload) {
-      const cachedHead = String(record.head_oid ?? "").trim();
-      if (!cleanHead || cachedHead === cleanHead) {
-        return { data: record.payload, backend: "IndexedDB" };
+        reject(err);
       }
-    }
-  } catch (_) {}
+    });
+  });
+}
 
-  // 2. Try window.caches (Cache Storage API)
-  try {
-    const urlKey = `https://gas-git-cache.local/repo-commits/${encodeURIComponent(projectName)}`;
-    const record = await cacheApiGet(urlKey);
-    if (record && record.payload) {
-      const cachedHead = String(record.head_oid ?? "").trim();
-      if (!cleanHead || cachedHead === cleanHead) {
-        return { data: record.payload, backend: "CacheStorage" };
+function idbPut(storeName, value) {
+  return openCacheIndexedDB().then(function (db) {
+    return new Promise(function (resolve, reject) {
+      try {
+        const tx = db.transaction(storeName, "readwrite");
+        const store = tx.objectStore(storeName);
+        const req = store.put(value);
+        req.onsuccess = function () {
+          db.close();
+          resolve(true);
+        };
+        req.onerror = function () {
+          db.close();
+          reject(req.error);
+        };
+      } catch (err) {
+        db.close();
+        reject(err);
       }
-    }
-  } catch (_) {}
+    });
+  });
+}
 
-  // 3. Try localStorage fallback
+function cacheApiGet(urlKey) {
+  if (typeof window === "undefined" || !window.caches) {
+    return Promise.reject(new Error("CacheStorage API not available"));
+  }
+  return window.caches
+    .open(CACHE_STORAGE_NAME)
+    .then(function (cache) {
+      return cache.match(urlKey);
+    })
+    .then(function (resp) {
+      if (!resp) return null;
+      return resp.json();
+    });
+}
+
+function cacheApiPut(urlKey, record) {
+  if (typeof window === "undefined" || !window.caches) {
+    return Promise.reject(new Error("CacheStorage API not available"));
+  }
+  return window.caches.open(CACHE_STORAGE_NAME).then(function (cache) {
+    const resp = new Response(JSON.stringify(record), {
+      headers: { "Content-Type": "application/json" },
+    });
+    return cache.put(urlKey, resp);
+  });
+}
+
+function readRepoCommitsFromLocalStorage(projectName, cleanHead) {
   try {
     if (typeof window !== "undefined" && window.localStorage) {
       if (cleanHead) {
-        const rawByHead = window.localStorage.getItem(`gas_git_commits_${projectName}_${cleanHead}`);
+        const rawByHead = window.localStorage.getItem(
+          "gas_git_commits_" + projectName + "_" + cleanHead,
+        );
         if (rawByHead) {
           return { data: JSON.parse(rawByHead), backend: "localStorage" };
         }
       }
-      const rawLatest = window.localStorage.getItem(`gas_git_commits_latest_${projectName}`);
+      const rawLatest = window.localStorage.getItem(
+        "gas_git_commits_latest_" + projectName,
+      );
       if (rawLatest) {
         const parsed = JSON.parse(rawLatest);
-        const cachedHead = String(parsed?.head_oid ?? "").trim();
+        const cachedHead = String((parsed && parsed.head_oid) || "").trim();
         if (!cleanHead || cachedHead === cleanHead) {
           return { data: parsed, backend: "localStorage" };
         }
       }
     }
-  } catch (_) {}
-
+  } catch (err) {}
   return null;
 }
 
-async function writeRepoCommitsPersistent(projectName, requestedHead, data) {
-  if (!data?.ok) return;
-  const actualHead = String(data?.head_oid ?? requestedHead ?? "").trim();
+function readRepoCommitsPersistent(projectName, cleanHead) {
+  // 1. Try IndexedDB primary store
+  return idbGet(STORE_REPO_COMMITS, projectName)
+    .then(function (record) {
+      if (record && record.payload) {
+        const cachedHead = String(record.head_oid || "").trim();
+        if (!cleanHead || cachedHead === cleanHead) {
+          return { data: record.payload, backend: "IndexedDB" };
+        }
+      }
+      return null;
+    })
+    .catch(function () {
+      return null;
+    })
+    .then(function (idbHit) {
+      if (idbHit) return idbHit;
+      // 2. Try window.caches (Cache Storage API)
+      const urlKey =
+        "https://gas-git-cache.local/repo-commits/" +
+        encodeURIComponent(projectName);
+      return cacheApiGet(urlKey)
+        .then(function (record) {
+          if (record && record.payload) {
+            const cachedHead = String(record.head_oid || "").trim();
+            if (!cleanHead || cachedHead === cleanHead) {
+              return { data: record.payload, backend: "CacheStorage" };
+            }
+          }
+          return null;
+        })
+        .catch(function () {
+          return null;
+        });
+    })
+    .then(function (cacheHit) {
+      if (cacheHit) return cacheHit;
+      // 3. Try localStorage fallback
+      return readRepoCommitsFromLocalStorage(projectName, cleanHead);
+    });
+}
+
+function writeRepoCommitsPersistent(projectName, requestedHead, data) {
+  if (!data || !data.ok) {
+    return Promise.resolve(false);
+  }
+  const actualHead = String(data.head_oid || requestedHead || "").trim();
   const record = {
     project_name: projectName,
     head_oid: actualHead,
@@ -197,21 +227,10 @@ async function writeRepoCommitsPersistent(projectName, requestedHead, data) {
     updated_at: Date.now(),
   };
 
-  // 1. Write to IndexedDB
-  try {
-    await idbPut(STORE_REPO_COMMITS, record);
-  } catch (_) {}
-
-  // 2. Write to window.caches
-  try {
-    const urlKey = `https://gas-git-cache.local/repo-commits/${encodeURIComponent(projectName)}`;
-    await cacheApiPut(urlKey, record);
-  } catch (_) {}
-
-  // 3. Write to localStorage (purging any older keys for this project)
+  // Write to localStorage fallback synchronously (purging stale keys for this project)
   try {
     if (typeof window !== "undefined" && window.localStorage) {
-      const prefix = `gas_git_commits_${projectName}_`;
+      const prefix = "gas_git_commits_" + projectName + "_";
       const keysToRemove = [];
       for (let i = 0; i < window.localStorage.length; i++) {
         const k = window.localStorage.key(i);
@@ -219,58 +238,95 @@ async function writeRepoCommitsPersistent(projectName, requestedHead, data) {
           keysToRemove.push(k);
         }
       }
-      for (const k of keysToRemove) {
-        window.localStorage.removeItem(k);
+      for (let j = 0; j < keysToRemove.length; j++) {
+        window.localStorage.removeItem(keysToRemove[j]);
       }
       const serialized = JSON.stringify(data);
       if (actualHead) {
-        window.localStorage.setItem(`${prefix}${actualHead}`, serialized);
+        window.localStorage.setItem(prefix + actualHead, serialized);
       }
-      window.localStorage.setItem(`gas_git_commits_latest_${projectName}`, serialized);
+      window.localStorage.setItem(
+        "gas_git_commits_latest_" + projectName,
+        serialized,
+      );
     }
-  } catch (_) {}
+  } catch (err) {}
+
+  const urlKey =
+    "https://gas-git-cache.local/repo-commits/" +
+    encodeURIComponent(projectName);
+
+  return idbPut(STORE_REPO_COMMITS, record)
+    .catch(function () {
+      return false;
+    })
+    .then(function () {
+      return cacheApiPut(urlKey, record).catch(function () {
+        return false;
+      });
+    });
 }
 
-async function readCommitDetailPersistent(projectName, commitOid) {
-  const cleanOid = String(commitOid ?? "").trim();
-  if (!cleanOid) return null;
-  const cacheKey = `${projectName}:${cleanOid}`;
+function readCommitDetailPersistent(projectName, commitOid) {
+  const cleanOid = String(commitOid || "").trim();
+  if (!cleanOid) {
+    return Promise.resolve(null);
+  }
+  const cacheKey = projectName + ":" + cleanOid;
 
-  // 1. Try IndexedDB primary store
-  try {
-    const record = await idbGet(STORE_COMMIT_DETAILS, cacheKey);
-    if (record && record.payload) {
-      return { data: record.payload, backend: "IndexedDB" };
-    }
-  } catch (_) {}
-
-  // 2. Try window.caches (Cache Storage API)
-  try {
-    const urlKey = `https://gas-git-cache.local/commit-detail/${encodeURIComponent(projectName)}/${encodeURIComponent(cleanOid)}`;
-    const record = await cacheApiGet(urlKey);
-    if (record && record.payload) {
-      return { data: record.payload, backend: "CacheStorage" };
-    }
-  } catch (_) {}
-
-  // 3. Try localStorage fallback
-  try {
-    if (typeof window !== "undefined" && window.localStorage) {
-      const raw = window.localStorage.getItem(`gas_git_detail_${projectName}_${cleanOid}`);
-      if (raw) {
-        return { data: JSON.parse(raw), backend: "localStorage" };
+  return idbGet(STORE_COMMIT_DETAILS, cacheKey)
+    .then(function (record) {
+      if (record && record.payload) {
+        return { data: record.payload, backend: "IndexedDB" };
       }
-    }
-  } catch (_) {}
-
-  return null;
+      return null;
+    })
+    .catch(function () {
+      return null;
+    })
+    .then(function (idbHit) {
+      if (idbHit) return idbHit;
+      const urlKey =
+        "https://gas-git-cache.local/commit-detail/" +
+        encodeURIComponent(projectName) +
+        "/" +
+        encodeURIComponent(cleanOid);
+      return cacheApiGet(urlKey)
+        .then(function (record) {
+          if (record && record.payload) {
+            return { data: record.payload, backend: "CacheStorage" };
+          }
+          return null;
+        })
+        .catch(function () {
+          return null;
+        });
+    })
+    .then(function (cacheHit) {
+      if (cacheHit) return cacheHit;
+      try {
+        if (typeof window !== "undefined" && window.localStorage) {
+          const raw = window.localStorage.getItem(
+            "gas_git_detail_" + projectName + "_" + cleanOid,
+          );
+          if (raw) {
+            return { data: JSON.parse(raw), backend: "localStorage" };
+          }
+        }
+      } catch (err) {}
+      return null;
+    });
 }
 
-async function writeCommitDetailPersistent(projectName, requestedOid, data) {
-  if (!data?.ok) return;
-  const actualOid = String(data?.oid ?? requestedOid ?? "").trim();
-  if (!actualOid) return;
-  const cacheKey = `${projectName}:${actualOid}`;
+function writeCommitDetailPersistent(projectName, requestedOid, data) {
+  if (!data || !data.ok) {
+    return Promise.resolve(false);
+  }
+  const actualOid = String(data.oid || requestedOid || "").trim();
+  if (!actualOid) {
+    return Promise.resolve(false);
+  }
+  const cacheKey = projectName + ":" + actualOid;
   const record = {
     cache_key: cacheKey,
     project_name: projectName,
@@ -279,26 +335,30 @@ async function writeCommitDetailPersistent(projectName, requestedOid, data) {
     updated_at: Date.now(),
   };
 
-  // 1. Write to IndexedDB
-  try {
-    await idbPut(STORE_COMMIT_DETAILS, record);
-  } catch (_) {}
-
-  // 2. Write to window.caches
-  try {
-    const urlKey = `https://gas-git-cache.local/commit-detail/${encodeURIComponent(projectName)}/${encodeURIComponent(actualOid)}`;
-    await cacheApiPut(urlKey, record);
-  } catch (_) {}
-
-  // 3. Write to localStorage fallback
   try {
     if (typeof window !== "undefined" && window.localStorage) {
       window.localStorage.setItem(
-        `gas_git_detail_${projectName}_${actualOid}`,
+        "gas_git_detail_" + projectName + "_" + actualOid,
         JSON.stringify(data),
       );
     }
-  } catch (_) {}
+  } catch (err) {}
+
+  const urlKey =
+    "https://gas-git-cache.local/commit-detail/" +
+    encodeURIComponent(projectName) +
+    "/" +
+    encodeURIComponent(actualOid);
+
+  return idbPut(STORE_COMMIT_DETAILS, record)
+    .catch(function () {
+      return false;
+    })
+    .then(function () {
+      return cacheApiPut(urlKey, record).catch(function () {
+        return false;
+      });
+    });
 }
 
 // ============================================================================
@@ -307,22 +367,22 @@ async function writeCommitDetailPersistent(projectName, requestedOid, data) {
 
 function decodeServerState(rawPayload) {
   const data = typeof rawPayload === "string" ? JSON.parse(rawPayload) : rawPayload;
-  const rawRepos = Array.isArray(data?.repositories) ? data.repositories : [];
-  const repoItems = rawRepos.map(
-    (r) =>
-      new RepoSummary(
-        String(r?.name ?? ""),
-        String(r?.folder_name ?? `${r?.name ?? ""}.git`),
-        String(r?.folder_id ?? ""),
-        String(r?.folder_url ?? ""),
-        String(r?.description ?? ""),
-        String(r?.default_branch ?? "refs/heads/main"),
-        String(r?.head_oid ?? ""),
-        Number(r?.branch_count ?? 0),
-      ),
-  );
+  const rawRepos = Array.isArray(data && data.repositories) ? data.repositories : [];
+  const repoItems = rawRepos.map(function (r) {
+    const rName = String((r && r.name) || "");
+    return new RepoSummary(
+      rName,
+      String((r && r.folder_name) || rName + ".git"),
+      String((r && r.folder_id) || ""),
+      String((r && r.folder_url) || ""),
+      String((r && r.description) || ""),
+      String((r && r.default_branch) || "refs/heads/main"),
+      String((r && r.head_oid) || ""),
+      Number((r && r.branch_count) || 0),
+    );
+  });
 
-  let baseUrl = String(data?.base_url ?? "");
+  let baseUrl = String((data && data.base_url) || "");
   if (!baseUrl || baseUrl.includes("<DEPLOYMENT_ID>")) {
     const detected = detectDefaultBaseUrl();
     if (detected && !detected.includes("googleusercontent.com")) {
@@ -331,98 +391,96 @@ function decodeServerState(rawPayload) {
   }
 
   return new ServerState(
-    Boolean(data?.ok ?? true),
-    Boolean(data?.drive_folder_configured ?? false),
-    String(data?.drive_folder_id ?? ""),
-    String(data?.drive_folder_url ?? ""),
+    Boolean(data && data.ok !== undefined ? data.ok : true),
+    Boolean(data && data.drive_folder_configured),
+    String((data && data.drive_folder_id) || ""),
+    String((data && data.drive_folder_url) || ""),
     baseUrl || "https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec",
-    String(data?.selected_project ?? ""),
+    String((data && data.selected_project) || ""),
     toList(repoItems),
-    String(data?.message ?? ""),
-    String(data?.error ?? ""),
+    String((data && data.message) || ""),
+    String((data && data.error) || ""),
   );
 }
 
 function decodeRepoCommits(rawPayload, fromCache, cacheBackend) {
   const data = typeof rawPayload === "string" ? JSON.parse(rawPayload) : rawPayload;
-  const rawCommits = Array.isArray(data?.commits) ? data.commits : [];
-  const commitItems = rawCommits.map(
-    (c) =>
-      new Commit(
-        String(c?.oid ?? ""),
-        String(c?.short_oid ?? (c?.oid ? c.oid.slice(0, 7) : "")),
-        toList(Array.isArray(c?.parents) ? c.parents.map(String) : []),
-        String(c?.author_name ?? ""),
-        String(c?.author_email ?? ""),
-        Number(c?.timestamp ?? 0),
-        String(c?.summary ?? ""),
-        String(c?.body ?? ""),
-        toList(Array.isArray(c?.refs) ? c.refs.map(String) : []),
-      ),
-  );
+  const rawCommits = Array.isArray(data && data.commits) ? data.commits : [];
+  const commitItems = rawCommits.map(function (c) {
+    const oid = String((c && c.oid) || "");
+    return new Commit(
+      oid,
+      String((c && c.short_oid) || oid.slice(0, 7)),
+      toList(Array.isArray(c && c.parents) ? c.parents.map(String) : []),
+      String((c && c.author_name) || ""),
+      String((c && c.author_email) || ""),
+      Number((c && c.timestamp) || 0),
+      String((c && c.summary) || ""),
+      String((c && c.body) || ""),
+      toList(Array.isArray(c && c.refs) ? c.refs.map(String) : []),
+    );
+  });
 
   return new RepoCommits(
-    Boolean(data?.ok ?? true),
-    String(data?.project_name ?? ""),
-    String(data?.head_oid ?? ""),
-    String(data?.default_branch ?? "refs/heads/main"),
+    Boolean(data && data.ok !== undefined ? data.ok : true),
+    String((data && data.project_name) || ""),
+    String((data && data.head_oid) || ""),
+    String((data && data.default_branch) || "refs/heads/main"),
     toList(commitItems),
     Boolean(fromCache),
-    String(cacheBackend ?? (fromCache ? "IndexedDB" : "GAS Server")),
-    String(data?.error ?? ""),
+    String(cacheBackend || (fromCache ? "IndexedDB" : "GAS Server")),
+    String((data && data.error) || ""),
   );
 }
 
 function decodeCommitDetail(rawPayload, fromCache, cacheBackend) {
   const data = typeof rawPayload === "string" ? JSON.parse(rawPayload) : rawPayload;
-  const rawChanges = Array.isArray(data?.changes) ? data.changes : [];
-  const changes = rawChanges.map(
-    (ch) =>
-      new CommitFileChange(
-        String(ch?.path ?? ""),
-        String(ch?.status ?? "modified"),
-        String(ch?.old_oid ?? ""),
-        String(ch?.new_oid ?? ""),
-        Number(ch?.additions ?? 0),
-        Number(ch?.deletions ?? 0),
-        String(ch?.patch ?? ""),
-      ),
-  );
+  const rawChanges = Array.isArray(data && data.changes) ? data.changes : [];
+  const changes = rawChanges.map(function (ch) {
+    return new CommitFileChange(
+      String((ch && ch.path) || ""),
+      String((ch && ch.status) || "modified"),
+      String((ch && ch.old_oid) || ""),
+      String((ch && ch.new_oid) || ""),
+      Number((ch && ch.additions) || 0),
+      Number((ch && ch.deletions) || 0),
+      String((ch && ch.patch) || ""),
+    );
+  });
 
-  const rawEntries = Array.isArray(data?.tree_entries) ? data.tree_entries : [];
-  const treeEntries = rawEntries.map(
-    (te) =>
-      new CommitTreeEntry(
-        String(te?.path ?? ""),
-        String(te?.name ?? ""),
-        String(te?.parent_dir ?? ""),
-        String(te?.kind ?? "blob"),
-        String(te?.oid ?? ""),
-        Number(te?.size ?? 0),
-        String(te?.content ?? ""),
-        Boolean(te?.is_binary ?? false),
-      ),
-  );
+  const rawEntries = Array.isArray(data && data.tree_entries) ? data.tree_entries : [];
+  const treeEntries = rawEntries.map(function (te) {
+    return new CommitTreeEntry(
+      String((te && te.path) || ""),
+      String((te && te.name) || ""),
+      String((te && te.parent_dir) || ""),
+      String((te && te.kind) || "blob"),
+      String((te && te.oid) || ""),
+      Number((te && te.size) || 0),
+      String((te && te.content) || ""),
+      Boolean(te && te.is_binary),
+    );
+  });
 
-  const oid = String(data?.oid ?? "");
+  const oid = String((data && data.oid) || "");
   return new CommitDetail(
-    Boolean(data?.ok ?? true),
-    String(data?.project_name ?? ""),
+    Boolean(data && data.ok !== undefined ? data.ok : true),
+    String((data && data.project_name) || ""),
     oid,
-    String(data?.short_oid ?? oid.slice(0, 7)),
-    String(data?.tree_oid ?? ""),
-    toList(Array.isArray(data?.parents) ? data.parents.map(String) : []),
-    String(data?.author_name ?? ""),
-    String(data?.author_email ?? ""),
-    Number(data?.timestamp ?? 0),
-    String(data?.summary ?? ""),
-    String(data?.body ?? ""),
-    toList(Array.isArray(data?.refs) ? data.refs.map(String) : []),
+    String((data && data.short_oid) || oid.slice(0, 7)),
+    String((data && data.tree_oid) || ""),
+    toList(Array.isArray(data && data.parents) ? data.parents.map(String) : []),
+    String((data && data.author_name) || ""),
+    String((data && data.author_email) || ""),
+    Number((data && data.timestamp) || 0),
+    String((data && data.summary) || ""),
+    String((data && data.body) || ""),
+    toList(Array.isArray(data && data.refs) ? data.refs.map(String) : []),
     toList(changes),
     toList(treeEntries),
     Boolean(fromCache),
-    String(cacheBackend ?? (fromCache ? "IndexedDB" : "GAS Server")),
-    String(data?.error ?? ""),
+    String(cacheBackend || (fromCache ? "IndexedDB" : "GAS Server")),
+    String((data && data.error) || ""),
   );
 }
 
@@ -457,22 +515,30 @@ export function fetchRepositories(onSuccess, onError) {
     window.google.script.run
   ) {
     window.google.script.run
-      .withSuccessHandler((res) => {
+      .withSuccessHandler(function (res) {
         try {
           onSuccess(decodeServerState(res));
         } catch (e) {
           onError(String(e));
         }
       })
-      .withFailureHandler((err) => onError(String(err?.message ?? err)))
+      .withFailureHandler(function (err) {
+        onError(String((err && err.message) || err));
+      })
       .git_list_repos();
     return;
   }
 
   fetch("?action=list_repos", { headers: { Accept: "application/json" } })
-    .then((resp) => resp.json())
-    .then((json) => onSuccess(decodeServerState(json)))
-    .catch((err) => onError(String(err)));
+    .then(function (resp) {
+      return resp.json();
+    })
+    .then(function (json) {
+      onSuccess(decodeServerState(json));
+    })
+    .catch(function (err) {
+      onError(String(err));
+    });
 }
 
 export function createRepository(projectName, description, onSuccess, onError) {
@@ -483,14 +549,16 @@ export function createRepository(projectName, description, onSuccess, onError) {
     window.google.script.run
   ) {
     window.google.script.run
-      .withSuccessHandler((res) => {
+      .withSuccessHandler(function (res) {
         try {
           onSuccess(decodeServerState(res));
         } catch (e) {
           onError(String(e));
         }
       })
-      .withFailureHandler((err) => onError(String(err?.message ?? err)))
+      .withFailureHandler(function (err) {
+        onError(String((err && err.message) || err));
+      })
       .git_create_repo(projectName, description || undefined);
     return;
   }
@@ -507,15 +575,21 @@ export function createRepository(projectName, description, onSuccess, onError) {
       description: description,
     }),
   })
-    .then((resp) => resp.json())
-    .then((json) => onSuccess(decodeServerState(json)))
-    .catch((err) => onError(String(err)));
+    .then(function (resp) {
+      return resp.json();
+    })
+    .then(function (json) {
+      onSuccess(decodeServerState(json));
+    })
+    .catch(function (err) {
+      onError(String(err));
+    });
 }
 
 export function fetchRepoCommits(projectName, headOid, forceRefresh, onSuccess, onError) {
   const cleanHead = (headOid || "").trim();
 
-  const runServerFetch = () => {
+  function runServerFetch() {
     if (
       typeof window !== "undefined" &&
       window.google &&
@@ -523,17 +597,24 @@ export function fetchRepoCommits(projectName, headOid, forceRefresh, onSuccess, 
       window.google.script.run
     ) {
       window.google.script.run
-        .withSuccessHandler((res) => {
+        .withSuccessHandler(function (res) {
           try {
             const data = typeof res === "string" ? JSON.parse(res) : res;
-            writeRepoCommitsPersistent(projectName, cleanHead, data).finally(() => {
-              onSuccess(decodeRepoCommits(data, false, "GAS Server"));
-            });
+            writeRepoCommitsPersistent(projectName, cleanHead, data).then(
+              function () {
+                onSuccess(decodeRepoCommits(data, false, "GAS Server"));
+              },
+              function () {
+                onSuccess(decodeRepoCommits(data, false, "GAS Server"));
+              },
+            );
           } catch (e) {
             onError(String(e));
           }
         })
-        .withFailureHandler((err) => onError(String(err?.message ?? err)))
+        .withFailureHandler(function (err) {
+          onError(String((err && err.message) || err));
+        })
         .git_get_commits(projectName);
       return;
     }
@@ -541,22 +622,31 @@ export function fetchRepoCommits(projectName, headOid, forceRefresh, onSuccess, 
     fetch("?action=get_commits&repo=" + encodeURIComponent(projectName), {
       headers: { Accept: "application/json" },
     })
-      .then((resp) => resp.json())
-      .then((data) => {
-        writeRepoCommitsPersistent(projectName, cleanHead, data).finally(() => {
-          onSuccess(decodeRepoCommits(data, false, "GAS Server"));
-        });
+      .then(function (resp) {
+        return resp.json();
       })
-      .catch((err) => onError(String(err)));
-  };
+      .then(function (data) {
+        writeRepoCommitsPersistent(projectName, cleanHead, data).then(
+          function () {
+            onSuccess(decodeRepoCommits(data, false, "GAS Server"));
+          },
+          function () {
+            onSuccess(decodeRepoCommits(data, false, "GAS Server"));
+          },
+        );
+      })
+      .catch(function (err) {
+        onError(String(err));
+      });
+  }
 
   if (forceRefresh) {
     runServerFetch();
     return;
   }
 
-  readRepoCommitsPersistent(projectName, cleanHead)
-    .then((hit) => {
+  readRepoCommitsPersistent(projectName, cleanHead).then(
+    function (hit) {
       if (hit && hit.data) {
         onSuccess(decodeRepoCommits(hit.data, true, hit.backend));
         return;
@@ -577,8 +667,11 @@ export function fetchRepoCommits(projectName, headOid, forceRefresh, onSuccess, 
         return;
       }
       runServerFetch();
-    })
-    .catch(() => runServerFetch());
+    },
+    function () {
+      runServerFetch();
+    },
+  );
 }
 
 export function fetchCommitDetail(projectName, commitOid, forceRefresh, onSuccess, onError) {
@@ -588,7 +681,7 @@ export function fetchCommitDetail(projectName, commitOid, forceRefresh, onSucces
     return;
   }
 
-  const runServerFetch = () => {
+  function runServerFetch() {
     if (
       typeof window !== "undefined" &&
       window.google &&
@@ -596,17 +689,24 @@ export function fetchCommitDetail(projectName, commitOid, forceRefresh, onSucces
       window.google.script.run
     ) {
       window.google.script.run
-        .withSuccessHandler((res) => {
+        .withSuccessHandler(function (res) {
           try {
             const data = typeof res === "string" ? JSON.parse(res) : res;
-            writeCommitDetailPersistent(projectName, cleanOid, data).finally(() => {
-              onSuccess(decodeCommitDetail(data, false, "GAS Server"));
-            });
+            writeCommitDetailPersistent(projectName, cleanOid, data).then(
+              function () {
+                onSuccess(decodeCommitDetail(data, false, "GAS Server"));
+              },
+              function () {
+                onSuccess(decodeCommitDetail(data, false, "GAS Server"));
+              },
+            );
           } catch (e) {
             onError(String(e));
           }
         })
-        .withFailureHandler((err) => onError(String(err?.message ?? err)))
+        .withFailureHandler(function (err) {
+          onError(String((err && err.message) || err));
+        })
         .git_get_commit_detail(projectName, cleanOid);
       return;
     }
@@ -620,27 +720,39 @@ export function fetchCommitDetail(projectName, commitOid, forceRefresh, onSucces
         headers: { Accept: "application/json" },
       },
     )
-      .then((resp) => resp.json())
-      .then((data) => {
-        writeCommitDetailPersistent(projectName, cleanOid, data).finally(() => {
-          onSuccess(decodeCommitDetail(data, false, "GAS Server"));
-        });
+      .then(function (resp) {
+        return resp.json();
       })
-      .catch((err) => onError(String(err)));
-  };
+      .then(function (data) {
+        writeCommitDetailPersistent(projectName, cleanOid, data).then(
+          function () {
+            onSuccess(decodeCommitDetail(data, false, "GAS Server"));
+          },
+          function () {
+            onSuccess(decodeCommitDetail(data, false, "GAS Server"));
+          },
+        );
+      })
+      .catch(function (err) {
+        onError(String(err));
+      });
+  }
 
   if (forceRefresh) {
     runServerFetch();
     return;
   }
 
-  readCommitDetailPersistent(projectName, cleanOid)
-    .then((hit) => {
+  readCommitDetailPersistent(projectName, cleanOid).then(
+    function (hit) {
       if (hit && hit.data) {
         onSuccess(decodeCommitDetail(hit.data, true, hit.backend));
         return;
       }
       runServerFetch();
-    })
-    .catch(() => runServerFetch());
+    },
+    function () {
+      runServerFetch();
+    },
+  );
 }

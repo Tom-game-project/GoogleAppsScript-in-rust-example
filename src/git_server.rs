@@ -1513,13 +1513,13 @@ pub fn create_repo_json(project_name: &str, description: Option<&str>) -> String
 
 /// Render the Gleam + Lustre Web UI HTML output with hydrated initial state from `dist/index.html`.
 pub fn render_web_ui_html(selected_project: Option<String>) -> GasHtmlOutput {
-    let initial_state_json = list_repos_json(selected_project);
+    let initial_state_json = list_repos_json(selected_project).replace("</", "<\\/");
     let template = include_str!("../dist/index.html");
     let state_script = format!(
         "<script>window.__GAS_GIT_INITIAL_STATE__ = {};</script>\n</head>",
         initial_state_json
     );
-    let html_str = template.replace("</head>", &state_script);
+    let html_str = template.replacen("</head>", &state_script, 1);
     gas_html_service::create_html_output(Some(HtmlSource::Html(html_str)))
         .set_title("GAS Git Server")
         .set_sandbox_mode(SandboxMode::Iframe)

@@ -165,11 +165,12 @@ function bundleEsModulesPure(entryFile) {
       },
     );
 
+    const exportedDecls = [];
     transformed = transformed.replace(
       exportDeclRegex,
       (fullMatch, ident) => {
-        const decl = fullMatch.replace(/^export\s+/, "");
-        return `${decl}\n__exports[${JSON.stringify(ident)}] = ${ident};`;
+        exportedDecls.push(ident);
+        return fullMatch.replace(/^export\s+/, "");
       },
     );
 
@@ -186,6 +187,12 @@ function bundleEsModulesPure(entryFile) {
       },
     );
 
+    if (exportedDecls.length > 0) {
+      const exportLines = exportedDecls.map(
+        (ident) => `__exports[${JSON.stringify(ident)}] = ${ident};`,
+      );
+      transformed = `${transformed}\n${exportLines.join("\n")}\n`;
+    }
     modules.set(absPath, transformed);
     return absPath;
   }
@@ -937,7 +944,7 @@ async function main() {
     bundleCode = getFallbackBundleCode();
   }
 
-  const safeBundle = bundleCode.replace(/<\/script>/gi, "<\\/script>");
+  const safeBundle = bundleCode.replace(/<\/(script|head|body)/gi, "<\\/$1");
   const rawHtml = fs.readFileSync(templateHtmlPath, "utf8");
 
   // Remove external `<script type="module" src="..."></script>` tag and inline the bundled script
