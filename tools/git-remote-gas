@@ -14,7 +14,9 @@ Handles:
    repositories can receive their initial `git push -u origin main` from the client.
 3. HTTP 302 redirects across `script.google.com` and `script.googleusercontent.com`
    (including converting POST -> GET on 302 redirect to `/macros/echo`).
-4. Step-by-step authentication fallback (env token/cookie, anonymous, cached credentials,
+4. Relaxed / configurable timeouts (`GAS_GIT_TIMEOUT` env var, default 300s / 5 minutes)
+   to accommodate Google Apps Script and Google Drive I/O.
+5. Step-by-step authentication fallback (env token/cookie, anonymous, cached credentials,
    `~/.clasprc.json` OAuth auto-refresh, and interactive login prompt).
 """
 
@@ -43,6 +45,22 @@ VALID_PROJECT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 def log_err(msg: str) -> None:
     sys.stderr.write(f"[git-remote-gas] {msg}\n")
     sys.stderr.flush()
+
+
+def get_gas_git_timeout() -> Optional[float]:
+    """
+    Returns HTTP request timeout in seconds.
+    Configurable via environment variable `GAS_GIT_TIMEOUT` (default: 300 seconds / 5 minutes).
+    Set `GAS_GIT_TIMEOUT=0` or negative to disable timeout entirely.
+    """
+    raw = os.environ.get("GAS_GIT_TIMEOUT", "").strip()
+    if raw:
+        try:
+            val = float(raw)
+            return None if val <= 0 else val
+        except ValueError:
+            pass
+    return 300.0
 
 
 def parse_gas_remote_url(raw_url: str) -> Tuple[str, str, str]:
@@ -224,7 +242,7 @@ class GasAuthManager:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            with urllib.request.urlopen(req, timeout=30) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
                 return payload.get("access_token")
         except Exception:
@@ -400,10 +418,11 @@ class GasHttpClient:
         curr_url = url
         curr_method = method
         curr_body = body
+        timeout_val = get_gas_git_timeout()
 
         for _ in range(max_redirects):
             headers = {
-                "User-Agent": "git-remote-gas/0.3",
+                "User-Agent": "git-remote-gas/0.4",
                 "Accept": "*/*",
             }
             if content_type and curr_body is not None:
@@ -416,7 +435,7 @@ class GasHttpClient:
 
             req = urllib.request.Request(curr_url, data=curr_body, headers=headers, method=curr_method)
             try:
-                with opener.open(req, timeout=60) as resp:
+                with opener.open(req, timeout=timeout_val) as resp:
                     raw = resp.read()
             except urllib.error.HTTPError as e:
                 status = e.code
@@ -438,6 +457,18 @@ class GasHttpClient:
                 if status in (401, 403, 404):
                     raise PermissionError(f"HTTP {status}: {e.reason}")
                 raise RuntimeError(f"HTTP error {status} from GAS: {e.reason}")
+            except (TimeoutError, urllib.error.URLError) as e:
+                is_timeout = isinstance(e, TimeoutError) or (
+                    isinstance(e, urllib.error.URLError)
+                    and isinstance(getattr(e, "reason", None), (TimeoutError, TimeoutError))
+                )
+                if is_timeout or "timed out" in str(e).lower():
+                    sec_desc = f"{int(timeout_val)}s" if timeout_val else "specified limit"
+                    raise RuntimeError(
+                        f"Request to GAS Git Server timed out after {sec_desc} while waiting for Google Apps Script & Google Drive to process the operation.\n"
+                        "To relax the timeout limit, set the GAS_GIT_TIMEOUT environment variable (e.g. `export GAS_GIT_TIMEOUT=600` for 10 minutes, or `export GAS_GIT_TIMEOUT=0` to disable timeout)."
+                    )
+                raise RuntimeError(f"HTTP connection error from GAS ({curr_url}): {e}")
 
             if raw.lstrip().startswith((b"<!DOCTYPE html", b"<html", b"<HTML")):
                 text_preview = raw[:1024].decode("utf-8", errors="ignore")

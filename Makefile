@@ -1,4 +1,4 @@
-BUILD ?= debug
+BUILD ?= release
 
 ifeq ($(BUILD), release)
     WASM_SRC := target/wasm32-wasip2/release/GoogleAppsScript_in_rust_example.wasm

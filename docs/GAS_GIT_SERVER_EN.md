@@ -71,10 +71,11 @@ In this repository, `wasi:cli/environment` (`js/wasi-cli.ts`) maps **Google Apps
 
 ### 2.2 Client-Side Environment Variables (`git-remote-gas`)
 
-| Environment Variable | Required | Description |
-| :--- | :---: | :--- |
-| **`GAS_GIT_TOKEN`** | Optional | OAuth 2.0 Bearer access token for authenticated GAS Web Apps (e.g., `export GAS_GIT_TOKEN="$(gcloud auth print-access-token)"`). If unset, `git-remote-gas` automatically tries anonymous access, cached credentials, and `~/.clasprc.json`. |
-| **`GAS_GIT_COOKIE`** | Optional | Browser session cookie (`SID=...; HSID=...`) if using cookie authentication instead of OAuth tokens. |
+| Environment Variable | Required | Default | Description |
+| :--- | :---: | :---: | :--- |
+| **`GAS_GIT_TIMEOUT`** | Optional | `300` (sec) | HTTP request timeout in seconds (**default: 300s = 5 minutes**). Accommodates Google Apps Script and Google Drive processing times. Increase via `export GAS_GIT_TIMEOUT=600` (10 minutes) for large repositories, or set `export GAS_GIT_TIMEOUT=0` to disable timeouts entirely. |
+| **`GAS_GIT_TOKEN`** | Optional | None | OAuth 2.0 Bearer access token for authenticated GAS Web Apps (e.g., `export GAS_GIT_TOKEN="$(gcloud auth print-access-token)"`). If unset, `git-remote-gas` automatically tries anonymous access, cached credentials, and `~/.clasprc.json`. |
+| **`GAS_GIT_COOKIE`** | Optional | None | Browser session cookie (`SID=...; HSID=...`) if using cookie authentication instead of OAuth tokens. |
 
 ---
 
@@ -99,10 +100,13 @@ pnpm exec clasp deploy --description "gitoxide Smart HTTP v1 Git Server on Googl
 
 ### 3.3 Push and Clone Using `git-remote-gas`
 ```bash
-# 1. Add tools/ to PATH (or run make install-git-remote-gas)
-export PATH="$(pwd)/tools:$PATH"
+# 1. Install or update git-remote-gas (default timeout 300s)
+make install-git-remote-gas
 
-# 2. Initialize a local repository, add the GAS remote with /my-project.git, and push
+# 2. (Optional) Increase timeout for large repositories
+export GAS_GIT_TIMEOUT=600
+
+# 3. Initialize a local repository, add the GAS remote with /my-project.git, and push
 mkdir my-project && cd my-project
 echo "# my-project" >> README.md
 git init
@@ -112,7 +116,7 @@ git branch -M main
 git remote add origin gas::https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec/my-project.git
 git push -u origin main
 
-# 3. Clone the repository into another directory
+# 4. Clone the repository into another directory
 git clone gas::https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec/my-project.git my-project-clone
 ```
 

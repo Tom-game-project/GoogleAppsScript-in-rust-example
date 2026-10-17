@@ -179,13 +179,21 @@ class SimulatedDriveGitStore:
 
     def read_raw_object(self, oid: str) -> Optional[Tuple[str, bytes]]:
         obj_path = self.objects_dir / oid
-        if not obj_path.exists():
-            return None
-        loose = base64.b64decode(obj_path.read_text(encoding="utf-8").strip())
-        nul = loose.index(b"\x00")
-        header = loose[:nul].decode("ascii")
-        kind = header.split(" ", 1)[0]
-        return (kind, loose[nul + 1 :])
+        if obj_path.exists():
+            loose = base64.b64decode(obj_path.read_text(encoding="utf-8").strip())
+            nul = loose.index(b"\x00")
+            header = loose[:nul].decode("ascii")
+            kind = header.split(" ", 1)[0]
+            return (kind, loose[nul + 1 :])
+        for b_path in self.objects_dir.glob("bundle_*.json"):
+            b_map = json.loads(b_path.read_text(encoding="utf-8"))
+            if oid in b_map:
+                loose = base64.b64decode(b_map[oid].strip())
+                nul = loose.index(b"\x00")
+                header = loose[:nul].decode("ascii")
+                kind = header.split(" ", 1)[0]
+                return (kind, loose[nul + 1 :])
+        return None
 
     def handle_info_refs(self, service: str) -> bytes:
         out = bytearray()
@@ -408,6 +416,13 @@ class SimulatedDriveGitStore:
                 target_raw = self._apply_delta(base_raw, delta)
                 self.write_raw_object(base_kind, target_raw)
                 by_offset[entry_start] = (base_kind, target_raw)
+        # Store batch bundle in Google Drive
+        trailer = pack[data_end:].hex()
+        b_map = {}
+        for off, (k, b) in by_offset.items():
+            header = f"{k} {len(b)}\x00".encode("utf-8")
+            b_map[hashlib.sha1(header + b).hexdigest()] = base64.b64encode(header + b).decode("ascii")
+        (self.objects_dir / f"bundle_{trailer}.json").write_text(json.dumps(b_map), encoding="utf-8")
 
     @staticmethod
     def _apply_delta(base: bytes, delta: bytes) -> bytes:

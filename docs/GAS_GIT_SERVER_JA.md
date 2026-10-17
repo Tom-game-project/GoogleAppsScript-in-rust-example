@@ -81,10 +81,11 @@ git remote add origin gas::https://script.google.com/macros/s/<DEPLOYMENT_ID>/ex
 
 ### 2.2 クライアント側 (`git-remote-gas`) の環境変数
 
-| 環境変数名 | 必須 | 説明 |
-| :--- | :---: | :--- |
-| **`GAS_GIT_TOKEN`** | 任意 | GAS Web アプリへアクセスする際の OAuth 2.0 Bearer アクセストークン (`gcloud auth print-access-token` 等で取得)。未設定時は匿名アクセス → キャッシュ済みトークン → `~/.clasprc.json` の順で自動試行します。 |
-| **`GAS_GIT_COOKIE`** | 任意 | OAuth トークンの代わりにブラウザセッション Cookie (`SID=...; HSID=...`) を直接指定する場合に使用します。 |
+| 環境変数名 | 必須 | デフォルト値 | 説明 |
+| :--- | :---: | :---: | :--- |
+| **`GAS_GIT_TIMEOUT`** | 任意 | `300` (秒) | HTTP リクエストのタイムアウト秒数（**デフォルト: 300秒 = 5分**）。Google Drive への書き込み処理や大容量プッシュ時に `export GAS_GIT_TIMEOUT=600`（10分）のように延長、または `export GAS_GIT_TIMEOUT=0` で無制限に設定できます。 |
+| **`GAS_GIT_TOKEN`** | 任意 | なし | GAS Web アプリへアクセスする際の OAuth 2.0 Bearer アクセストークン (`gcloud auth print-access-token` 等で取得)。未設定時は匿名アクセス → キャッシュ済みトークン → `~/.clasprc.json` の順で自動試行します。 |
+| **`GAS_GIT_COOKIE`** | 任意 | なし | OAuth トークンの代わりにブラウザセッション Cookie (`SID=...; HSID=...`) を直接指定する場合に使用します。 |
 
 ---
 
@@ -110,10 +111,13 @@ pnpm exec clasp deploy --description "gitoxide Smart HTTP v1 Git Server on Googl
 ### 3.3 ローカルから Git リモートを追加してプッシュ・クローンする
 
 ```bash
-# 1. git-remote-gas を PATH に追加
-export PATH="$(pwd)/tools:$PATH"
+# 1. git-remote-gas を PATH に追加 (タイムアウトはデフォルト300秒)
+make install-git-remote-gas
 
-# 2. 新規ローカルリポジトリを初期化してリモートを追加・プッシュ
+# 2. 必要に応じてタイムアウトを延長
+export GAS_GIT_TIMEOUT=600
+
+# 3. 新規ローカルリポジトリを初期化してリモートを追加・プッシュ
 mkdir my-project && cd my-project
 echo "# my-project" >> README.md
 git init
@@ -123,7 +127,7 @@ git branch -M main
 git remote add origin gas::https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec/my-project.git
 git push -u origin main
 
-# 3. 別のディレクトリへ git clone
+# 4. 別のディレクトリへ git clone
 git clone gas::https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec/my-project.git my-project-clone
 ```
 
