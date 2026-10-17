@@ -1,9 +1,10 @@
-//// Controlled Lustre `Effect` bindings for communicating with the GAS backend.
+//// Controlled Lustre `Effect` bindings for communicating with the GAS backend
+//// and non-memory persistent browser storage (`IndexedDB` / `CacheStorage` / `localStorage`).
 ////
 //// All external communication is wrapped in `lustre/effect.from` without using
 //// `lustre/event.emit` or impure side effects in `update` / `view`.
 
-import gas_git_ui/types.{type RepoCommits, type ServerState}
+import gas_git_ui/types.{type CommitDetail, type RepoCommits, type ServerState}
 import lustre/effect.{type Effect}
 
 @external(javascript, "./gas_git_ffi.mjs", "loadInitialOrRemoteState")
@@ -32,6 +33,15 @@ fn ffi_fetch_repo_commits(
   head_oid: String,
   force_refresh: Bool,
   on_success: fn(RepoCommits) -> Nil,
+  on_error: fn(String) -> Nil,
+) -> Nil
+
+@external(javascript, "./gas_git_ffi.mjs", "fetchCommitDetail")
+fn ffi_fetch_commit_detail(
+  project_name: String,
+  commit_oid: String,
+  force_refresh: Bool,
+  on_success: fn(CommitDetail) -> Nil,
   on_error: fn(String) -> Nil,
 ) -> Nil
 
@@ -75,7 +85,8 @@ pub fn create_repository(
   })
 }
 
-/// Fetch commit history and decoration for a repository with client-side caching by `${project_name}:${head_oid}`.
+/// Fetch commit history and decoration for a repository using persistent browser storage
+/// (`IndexedDB` -> `window.caches` -> `localStorage`) keyed by `${project_name}` and validated by `${head_oid}`.
 pub fn fetch_repo_commits(
   project_name: String,
   head_oid: String,
@@ -88,6 +99,25 @@ pub fn fetch_repo_commits(
       head_oid,
       force_refresh,
       fn(commits) { dispatch(to_msg(Ok(commits))) },
+      fn(err) { dispatch(to_msg(Error(err))) },
+    )
+  })
+}
+
+/// Fetch detailed diff changes and full directory/file tree for a specific commit (`commit_oid`),
+/// backed by immutable content-addressable persistent browser storage (`IndexedDB` -> `window.caches` -> `localStorage`).
+pub fn fetch_commit_detail(
+  project_name: String,
+  commit_oid: String,
+  force_refresh: Bool,
+  to_msg: fn(Result(CommitDetail, String)) -> msg,
+) -> Effect(msg) {
+  effect.from(fn(dispatch) {
+    ffi_fetch_commit_detail(
+      project_name,
+      commit_oid,
+      force_refresh,
+      fn(detail) { dispatch(to_msg(Ok(detail))) },
       fn(err) { dispatch(to_msg(Error(err))) },
     )
   })

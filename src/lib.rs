@@ -96,6 +96,11 @@ impl Guest for Component {
         git_server::get_commits_json(&repo)
     }
 
+    // Web UI (google.script.run) から指定コミットの変更差分(Diff)およびディレクトリ・ファイルツリー状態を JSON として取得
+    fn git_get_commit_detail(repo: String, commit_oid: String) -> String {
+        git_server::get_commit_detail_json(&repo, &commit_oid)
+    }
+
     fn scream(input: String) -> String {
         let mut s = input.to_uppercase();
         s.push_str("!!1!");

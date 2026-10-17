@@ -180,6 +180,7 @@ pub struct GasGitPostEnvelope {
     pub git_path: Option<String>,
     pub repo: Option<String>,
     pub project_name: Option<String>,
+    pub commit_oid: Option<String>,
     pub description: Option<String>,
     pub encoding: Option<String>,
     pub body_base64: Option<String>,
@@ -1695,6 +1696,543 @@ pub fn get_commits_json(project_name: &str) -> String {
     serde_json::to_string(&res).unwrap_or_default()
 }
 
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CommitFileChange {
+    pub path: String,
+    pub status: String,
+    pub old_oid: String,
+    pub new_oid: String,
+    pub additions: usize,
+    pub deletions: usize,
+    pub patch: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CommitTreeEntry {
+    pub path: String,
+    pub name: String,
+    pub parent_dir: String,
+    pub kind: String,
+    pub oid: String,
+    pub size: usize,
+    pub content: String,
+    pub is_binary: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CommitDetailResponse {
+    pub ok: bool,
+    pub project_name: String,
+    pub oid: String,
+    pub short_oid: String,
+    pub tree_oid: String,
+    pub parents: Vec<String>,
+    pub author_name: String,
+    pub author_email: String,
+    pub timestamp: i64,
+    pub summary: String,
+    pub body: String,
+    pub refs: Vec<String>,
+    pub changes: Vec<CommitFileChange>,
+    pub tree_entries: Vec<CommitTreeEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+fn collect_tree_snapshot(
+    store: &GasGitStore,
+    tree_oid: ObjectId,
+    prefix: &str,
+    entries_out: &mut Vec<CommitTreeEntry>,
+    blobs_out: &mut BTreeMap<String, (ObjectId, Vec<u8>)>,
+    depth: usize,
+) {
+    if depth > 16 || entries_out.len() >= 500 {
+        return;
+    }
+    let Some(loose) = store.read_loose_object(&tree_oid) else {
+        return;
+    };
+    let Ok(ObjectRef::Tree(tree_ref)) = ObjectRef::from_loose(&loose) else {
+        return;
+    };
+
+    for entry in &tree_ref.entries {
+        if entries_out.len() >= 500 {
+            break;
+        }
+        let name = entry.filename.to_str_lossy().into_owned();
+        let path = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{}/{}", prefix, name)
+        };
+        let child_oid = entry.oid.to_owned();
+        let child_hex = child_oid.to_hex().to_string();
+
+        let Some(child_loose) = store.read_loose_object(&child_oid) else {
+            continue;
+        };
+        let Ok((kind, size, offset)) = gix_object::decode::loose_header(&child_loose) else {
+            continue;
+        };
+        let end = (offset + (size as usize)).min(child_loose.len());
+        let body = &child_loose[offset..end];
+
+        match kind {
+            ObjectKind::Tree => {
+                entries_out.push(CommitTreeEntry {
+                    path: path.clone(),
+                    name,
+                    parent_dir: prefix.to_string(),
+                    kind: "tree".to_string(),
+                    oid: child_hex,
+                    size: 0,
+                    content: String::new(),
+                    is_binary: false,
+                });
+                collect_tree_snapshot(
+                    store,
+                    child_oid,
+                    &path,
+                    entries_out,
+                    blobs_out,
+                    depth + 1,
+                );
+            }
+            ObjectKind::Blob => {
+                let is_binary = body.iter().take(4096).any(|&b| b == 0);
+                let max_preview = body.len().min(65536);
+                let content = if is_binary {
+                    format!("[Binary file ({} bytes)]", body.len())
+                } else {
+                    String::from_utf8_lossy(&body[..max_preview]).into_owned()
+                };
+                entries_out.push(CommitTreeEntry {
+                    path: path.clone(),
+                    name,
+                    parent_dir: prefix.to_string(),
+                    kind: "blob".to_string(),
+                    oid: child_hex,
+                    size: body.len(),
+                    content,
+                    is_binary,
+                });
+                blobs_out.insert(path, (child_oid, body.to_vec()));
+            }
+            _ => {}
+        }
+    }
+}
+
+fn compute_unified_diff(old_bytes: &[u8], new_bytes: &[u8]) -> (usize, usize, String) {
+    let old_bin = old_bytes.iter().take(4096).any(|&b| b == 0);
+    let new_bin = new_bytes.iter().take(4096).any(|&b| b == 0);
+    if old_bin || new_bin {
+        return (
+            0,
+            0,
+            format!(
+                "Binary files differ (old: {} bytes, new: {} bytes)",
+                old_bytes.len(),
+                new_bytes.len()
+            ),
+        );
+    }
+
+    let old_str = String::from_utf8_lossy(old_bytes);
+    let new_str = String::from_utf8_lossy(new_bytes);
+    let old_lines: Vec<&str> = if old_str.is_empty() {
+        Vec::new()
+    } else {
+        old_str.lines().collect()
+    };
+    let new_lines: Vec<&str> = if new_str.is_empty() {
+        Vec::new()
+    } else {
+        new_str.lines().collect()
+    };
+
+    if old_lines.is_empty() && !new_lines.is_empty() {
+        let mut out = format!("@@ -0,0 +1,{} @@\n", new_lines.len());
+        for l in new_lines.iter().take(400) {
+            out.push('+');
+            out.push_str(l);
+            out.push('\n');
+        }
+        return (new_lines.len(), 0, out);
+    }
+
+    if !old_lines.is_empty() && new_lines.is_empty() {
+        let mut out = format!("@@ -1,{} +0,0 @@\n", old_lines.len());
+        for l in old_lines.iter().take(400) {
+            out.push('-');
+            out.push_str(l);
+            out.push('\n');
+        }
+        return (0, old_lines.len(), out);
+    }
+
+    let mut prefix = 0usize;
+    while prefix < old_lines.len()
+        && prefix < new_lines.len()
+        && old_lines[prefix] == new_lines[prefix]
+    {
+        prefix += 1;
+    }
+
+    let mut suffix = 0usize;
+    while suffix + prefix < old_lines.len()
+        && suffix + prefix < new_lines.len()
+        && old_lines[old_lines.len() - 1 - suffix] == new_lines[new_lines.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+
+    let old_mid = &old_lines[prefix..old_lines.len() - suffix];
+    let new_mid = &new_lines[prefix..new_lines.len() - suffix];
+
+    let ctx_before_start = prefix.saturating_sub(3);
+    let ctx_after_end = (new_lines.len() - suffix + 3).min(new_lines.len());
+
+    let mut patch = format!(
+        "@@ -{},{} +{},{} @@\n",
+        ctx_before_start + 1,
+        old_lines.len().saturating_sub(ctx_before_start),
+        ctx_before_start + 1,
+        new_lines.len().saturating_sub(ctx_before_start)
+    );
+
+    for &l in &old_lines[ctx_before_start..prefix] {
+        patch.push(' ');
+        patch.push_str(l);
+        patch.push('\n');
+    }
+
+    let mut additions = 0usize;
+    let mut deletions = 0usize;
+
+    if old_mid.len() <= 160 && new_mid.len() <= 160 {
+        let n = old_mid.len();
+        let m = new_mid.len();
+        let mut dp = vec![vec![0u16; m + 1]; n + 1];
+        for i in (0..n).rev() {
+            for j in (0..m).rev() {
+                if old_mid[i] == new_mid[j] {
+                    dp[i][j] = dp[i + 1][j + 1] + 1;
+                } else {
+                    dp[i][j] = dp[i + 1][j].max(dp[i][j + 1]);
+                }
+            }
+        }
+        let mut i = 0usize;
+        let mut j = 0usize;
+        while i < n || j < m {
+            if i < n && j < m && old_mid[i] == new_mid[j] {
+                patch.push(' ');
+                patch.push_str(old_mid[i]);
+                patch.push('\n');
+                i += 1;
+                j += 1;
+            } else if j < m && (i == n || dp[i][j + 1] >= dp[i + 1][j]) {
+                patch.push('+');
+                patch.push_str(new_mid[j]);
+                patch.push('\n');
+                additions += 1;
+                j += 1;
+            } else if i < n {
+                patch.push('-');
+                patch.push_str(old_mid[i]);
+                patch.push('\n');
+                deletions += 1;
+                i += 1;
+            }
+        }
+    } else {
+        for &l in old_mid.iter().take(200) {
+            patch.push('-');
+            patch.push_str(l);
+            patch.push('\n');
+        }
+        for &l in new_mid.iter().take(200) {
+            patch.push('+');
+            patch.push_str(l);
+            patch.push('\n');
+        }
+        deletions = old_mid.len();
+        additions = new_mid.len();
+    }
+
+    let suffix_start = new_lines.len() - suffix;
+    for &l in &new_lines[suffix_start..ctx_after_end] {
+        patch.push(' ');
+        patch.push_str(l);
+        patch.push('\n');
+    }
+
+    (additions, deletions, patch)
+}
+
+pub fn get_commit_detail_json(project_name: &str, commit_oid_str: &str) -> String {
+    let normalized = match parse_project_segment(project_name) {
+        Ok(n) => n,
+        Err(e) => {
+            let res = CommitDetailResponse {
+                ok: false,
+                project_name: project_name.to_string(),
+                oid: commit_oid_str.to_string(),
+                short_oid: String::new(),
+                tree_oid: String::new(),
+                parents: Vec::new(),
+                author_name: String::new(),
+                author_email: String::new(),
+                timestamp: 0,
+                summary: String::new(),
+                body: String::new(),
+                refs: Vec::new(),
+                changes: Vec::new(),
+                tree_entries: Vec::new(),
+                error: Some(e),
+            };
+            return serde_json::to_string(&res).unwrap_or_default();
+        }
+    };
+
+    let store = match GasGitStore::open(&normalized) {
+        Ok(s) => s,
+        Err(e) => {
+            let res = CommitDetailResponse {
+                ok: false,
+                project_name: normalized,
+                oid: commit_oid_str.to_string(),
+                short_oid: String::new(),
+                tree_oid: String::new(),
+                parents: Vec::new(),
+                author_name: String::new(),
+                author_email: String::new(),
+                timestamp: 0,
+                summary: String::new(),
+                body: String::new(),
+                refs: Vec::new(),
+                changes: Vec::new(),
+                tree_entries: Vec::new(),
+                error: Some(e),
+            };
+            return serde_json::to_string(&res).unwrap_or_default();
+        }
+    };
+
+    let trimmed_oid = commit_oid_str.trim();
+    let target_oid = if trimmed_oid.is_empty() || trimmed_oid == "HEAD" {
+        store.resolve_ref("HEAD")
+    } else {
+        ObjectId::from_hex(trimmed_oid.as_bytes()).ok()
+    };
+
+    let Some(commit_oid) = target_oid else {
+        let res = CommitDetailResponse {
+            ok: false,
+            project_name: normalized,
+            oid: trimmed_oid.to_string(),
+            short_oid: String::new(),
+            tree_oid: String::new(),
+            parents: Vec::new(),
+            author_name: String::new(),
+            author_email: String::new(),
+            timestamp: 0,
+            summary: String::new(),
+            body: String::new(),
+            refs: Vec::new(),
+            changes: Vec::new(),
+            tree_entries: Vec::new(),
+            error: Some(format!("Invalid or unresolved commit OID '{}'", trimmed_oid)),
+        };
+        return serde_json::to_string(&res).unwrap_or_default();
+    };
+
+    let Some(commit_loose) = store.read_loose_object(&commit_oid) else {
+        let res = CommitDetailResponse {
+            ok: false,
+            project_name: normalized,
+            oid: commit_oid.to_hex().to_string(),
+            short_oid: String::new(),
+            tree_oid: String::new(),
+            parents: Vec::new(),
+            author_name: String::new(),
+            author_email: String::new(),
+            timestamp: 0,
+            summary: String::new(),
+            body: String::new(),
+            refs: Vec::new(),
+            changes: Vec::new(),
+            tree_entries: Vec::new(),
+            error: Some(format!("Commit object '{}' not found in store", commit_oid.to_hex())),
+        };
+        return serde_json::to_string(&res).unwrap_or_default();
+    };
+
+    let Ok(ObjectRef::Commit(c)) = ObjectRef::from_loose(&commit_loose) else {
+        let res = CommitDetailResponse {
+            ok: false,
+            project_name: normalized,
+            oid: commit_oid.to_hex().to_string(),
+            short_oid: String::new(),
+            tree_oid: String::new(),
+            parents: Vec::new(),
+            author_name: String::new(),
+            author_email: String::new(),
+            timestamp: 0,
+            summary: String::new(),
+            body: String::new(),
+            refs: Vec::new(),
+            changes: Vec::new(),
+            tree_entries: Vec::new(),
+            error: Some(format!("Object '{}' is not a commit", commit_oid.to_hex())),
+        };
+        return serde_json::to_string(&res).unwrap_or_default();
+    };
+
+    let tree_oid = c.tree();
+    let parent_oids: Vec<ObjectId> = c.parents().collect();
+    let parents: Vec<String> = parent_oids.iter().map(|p| p.to_hex().to_string()).collect();
+
+    let (author_name, author_email) = match c.author().or_else(|_| c.committer()) {
+        Ok(sig) => (
+            sig.name.to_str_lossy().into_owned(),
+            sig.email.to_str_lossy().into_owned(),
+        ),
+        Err(_) => ("Unknown".to_string(), String::new()),
+    };
+    let timestamp = match c.time() {
+        Ok(t) => t.seconds,
+        Err(_) => 0,
+    };
+    let full_msg = c.message.to_str_lossy();
+    let summary = full_msg.lines().next().unwrap_or("").to_string();
+    let body = full_msg.to_string();
+
+    let head_sym = store.head_symref().unwrap_or_else(|| DEFAULT_BRANCH.to_string());
+    let head_oid = store.resolve_ref("HEAD");
+    let refs_map = store.list_refs();
+    let mut commit_refs = Vec::new();
+    for (rname, roid) in &refs_map {
+        if *roid == commit_oid {
+            if Some(*roid) == head_oid && rname == &head_sym {
+                let short = rname.strip_prefix("refs/heads/").unwrap_or(rname);
+                commit_refs.push(format!("HEAD -> {}", short));
+            } else if let Some(branch) = rname.strip_prefix("refs/heads/") {
+                commit_refs.push(branch.to_string());
+            } else if let Some(tag) = rname.strip_prefix("refs/tags/") {
+                commit_refs.push(format!("tag: {}", tag));
+            } else {
+                commit_refs.push(rname.clone());
+            }
+        }
+    }
+
+    let mut tree_entries = Vec::new();
+    let mut current_blobs: BTreeMap<String, (ObjectId, Vec<u8>)> = BTreeMap::new();
+    collect_tree_snapshot(
+        &store,
+        tree_oid,
+        "",
+        &mut tree_entries,
+        &mut current_blobs,
+        0,
+    );
+
+    let mut parent_blobs: BTreeMap<String, (ObjectId, Vec<u8>)> = BTreeMap::new();
+    if let Some(&first_parent_oid) = parent_oids.first() {
+        if let Some(p_loose) = store.read_loose_object(&first_parent_oid) {
+            if let Ok(ObjectRef::Commit(parent_commit)) = ObjectRef::from_loose(&p_loose) {
+                let mut dummy_entries = Vec::new();
+                collect_tree_snapshot(
+                    &store,
+                    parent_commit.tree(),
+                    "",
+                    &mut dummy_entries,
+                    &mut parent_blobs,
+                    0,
+                );
+            }
+        }
+    }
+
+    let mut all_paths: BTreeSet<String> = BTreeSet::new();
+    for k in parent_blobs.keys() {
+        all_paths.insert(k.clone());
+    }
+    for k in current_blobs.keys() {
+        all_paths.insert(k.clone());
+    }
+
+    let mut changes = Vec::new();
+    for path in all_paths {
+        match (parent_blobs.get(&path), current_blobs.get(&path)) {
+            (None, Some((new_oid, new_bytes))) => {
+                let (additions, deletions, patch) = compute_unified_diff(&[], new_bytes);
+                changes.push(CommitFileChange {
+                    path,
+                    status: "added".to_string(),
+                    old_oid: String::new(),
+                    new_oid: new_oid.to_hex().to_string(),
+                    additions,
+                    deletions,
+                    patch,
+                });
+            }
+            (Some((old_oid, old_bytes)), None) => {
+                let (additions, deletions, patch) = compute_unified_diff(old_bytes, &[]);
+                changes.push(CommitFileChange {
+                    path,
+                    status: "deleted".to_string(),
+                    old_oid: old_oid.to_hex().to_string(),
+                    new_oid: String::new(),
+                    additions,
+                    deletions,
+                    patch,
+                });
+            }
+            (Some((old_oid, old_bytes)), Some((new_oid, new_bytes))) if old_oid != new_oid => {
+                let (additions, deletions, patch) = compute_unified_diff(old_bytes, new_bytes);
+                changes.push(CommitFileChange {
+                    path,
+                    status: "modified".to_string(),
+                    old_oid: old_oid.to_hex().to_string(),
+                    new_oid: new_oid.to_hex().to_string(),
+                    additions,
+                    deletions,
+                    patch,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    let hex = commit_oid.to_hex().to_string();
+    let short_oid = hex[..7.min(hex.len())].to_string();
+
+    let res = CommitDetailResponse {
+        ok: true,
+        project_name: normalized,
+        oid: hex,
+        short_oid,
+        tree_oid: tree_oid.to_hex().to_string(),
+        parents,
+        author_name,
+        author_email,
+        timestamp,
+        summary,
+        body,
+        refs: commit_refs,
+        changes,
+        tree_entries,
+        error: None,
+    };
+    serde_json::to_string(&res).unwrap_or_default()
+}
+
 fn format_info_refs_output(
     service: &str,
     project_name: &str,
@@ -1761,6 +2299,25 @@ pub fn handle_do_get(event: &GasDoGetEvent) -> WebResponse {
                     .map(|s| s.as_str())
                     .unwrap_or("");
                 let json = get_commits_json(repo);
+                return WebResponse::Text(
+                    gas_content_service::create_text_output(&json).set_mime_type(MimeType::Json),
+                );
+            }
+            "get_commit_detail" => {
+                let repo = event
+                    .parameter
+                    .get("repo")
+                    .or_else(|| event.parameter.get("project_name"))
+                    .map(|s| s.as_str())
+                    .unwrap_or("");
+                let commit_oid = event
+                    .parameter
+                    .get("commit")
+                    .or_else(|| event.parameter.get("commit_oid"))
+                    .or_else(|| event.parameter.get("oid"))
+                    .map(|s| s.as_str())
+                    .unwrap_or("");
+                let json = get_commit_detail_json(repo, commit_oid);
                 return WebResponse::Text(
                     gas_content_service::create_text_output(&json).set_mime_type(MimeType::Json),
                 );
@@ -1890,6 +2447,34 @@ pub fn handle_do_post(event: &GasDoPostEvent) -> GasTextOutput {
                     })
                     .unwrap_or("");
                 let json = get_commits_json(repo);
+                return gas_content_service::create_text_output(&json)
+                    .set_mime_type(MimeType::Json);
+            }
+            "get_commit_detail" => {
+                let repo = parsed_env
+                    .as_ref()
+                    .and_then(|e| e.project_name.as_deref().or(e.repo.as_deref()))
+                    .or_else(|| {
+                        event
+                            .parameter
+                            .get("project_name")
+                            .or_else(|| event.parameter.get("repo"))
+                            .map(|s| s.as_str())
+                    })
+                    .unwrap_or("");
+                let commit_oid = parsed_env
+                    .as_ref()
+                    .and_then(|e| e.commit_oid.as_deref())
+                    .or_else(|| {
+                        event
+                            .parameter
+                            .get("commit")
+                            .or_else(|| event.parameter.get("commit_oid"))
+                            .or_else(|| event.parameter.get("oid"))
+                            .map(|s| s.as_str())
+                    })
+                    .unwrap_or("");
+                let json = get_commit_detail_json(repo, commit_oid);
                 return gas_content_service::create_text_output(&json)
                     .set_mime_type(MimeType::Json);
             }

@@ -3,16 +3,18 @@
 //// Uses `lustre/element.namespaced("http://www.w3.org/2000/svg", ...)` so that
 //// browsers instantiate genuine `SVGElement` nodes, rendering a Fossil SCM-style
 //// vertical timeline tree with branch rails, upward arrowheads, orthogonal rounded
-//// branch forks, dashed merge lines, horizontal leader lines, and inline commit cards.
+//// branch forks, dashed merge lines, horizontal leader lines, and interactive commit cards.
 
 import gas_git_ui/types.{type Commit}
 import gleam/dict.{type Dict}
 import gleam/float
 import gleam/int
 import gleam/list
+import gleam/option.{type Option, None, Some}
 import gleam/string
 import lustre/attribute.{type Attribute}
 import lustre/element.{type Element, text}
+import lustre/event
 
 const svg_ns: String = "http://www.w3.org/2000/svg"
 const row_height: Float = 54.0
@@ -307,7 +309,12 @@ fn truncate_text(s: String, max_chars: Int) -> String {
 }
 
 /// Render a Fossil SCM-style commit tree as a genuine namespaced SVG element.
-pub fn render_svg_graph(commits: List(Commit)) -> Element(msg) {
+/// Clicking any commit node or card dispatches `on_select_commit(commit.oid)`.
+pub fn render_svg_graph(
+  commits: List(Commit),
+  selected_oid: Option(String),
+  on_select_commit: fn(String) -> msg,
+) -> Element(msg) {
   let layout = compute_layout(commits)
   let count = list.length(commits)
   let rail_area_width =
@@ -319,7 +326,7 @@ pub fn render_svg_graph(commits: List(Commit)) -> Element(msg) {
   let total_height =
     float.max(88.0, margin_y +. int.to_float(count) *. row_height +. 16.0)
 
-  // 1. Background rail guide lines and root pedestals
+  // 1. Root pedestals
   let root_pedestals =
     list.flat_map(layout.nodes, fn(node) {
       case node.commit.parents {
@@ -386,7 +393,6 @@ pub fn render_svg_graph(commits: List(Commit)) -> Element(msg) {
         True -> {
           case edge.is_merge {
             True -> {
-              // Merge edge: dashed S-curve from merged parent into merge commit
               let mid_y = { edge.from_y +. edge.to_y } /. 2.0
               let d =
                 "M "
@@ -421,8 +427,6 @@ pub fn render_svg_graph(commits: List(Commit)) -> Element(msg) {
               ]
             }
             False -> {
-              // Fossil-style orthogonal rounded branch rail:
-              // Horizontal out from parent (to_x, to_y) -> rounded corner -> vertical up to child (from_x, from_y)
               let corner_r = 10.0
               let dir_x = case edge.from_x >. edge.to_x {
                 True -> 1.0
@@ -473,26 +477,33 @@ pub fn render_svg_graph(commits: List(Commit)) -> Element(msg) {
       }
     })
 
-  // 3. Nodes, horizontal leader connectors, and Fossil-style inline commit cards
+  // 3. Nodes, horizontal leader connectors, and clickable Fossil-style inline commit cards
   let row_elements =
-    list.flat_map(layout.nodes, fn(node) {
+    list.map(layout.nodes, fn(node) {
       let is_head = has_head_ref(node.commit.refs)
+      let is_selected = case selected_oid {
+        Some(sel) -> sel == node.commit.oid
+        None -> False
+      }
       let is_merge = list.length(node.commit.parents) > 1
       let leader_x1 = node.cx +. 7.0
       let leader_x2 = rail_area_width -. 4.0
       let card_x = rail_area_width
       let card_y = node.cy -. 21.0
-      let card_bg = case is_head {
-        True -> "#f0f9ff"
-        False -> "#f8fafc"
+      let card_bg = case is_selected, is_head {
+        True, _ -> "#dbeafe"
+        False, True -> "#f0f9ff"
+        False, False -> "#f8fafc"
       }
-      let card_border = case is_head {
-        True -> node.color
-        False -> "#cbd5e1"
+      let card_border = case is_selected, is_head {
+        True, _ -> "#1d4ed8"
+        False, True -> node.color
+        False, False -> "#cbd5e1"
       }
-      let card_stroke_w = case is_head {
-        True -> "1.8"
-        False -> "1.2"
+      let card_stroke_w = case is_selected, is_head {
+        True, _ -> "2.4"
+        False, True -> "1.8"
+        False, False -> "1.2"
       }
 
       let refs_badge_str = case node.commit.refs {
@@ -505,7 +516,7 @@ pub fn render_svg_graph(commits: List(Commit)) -> Element(msg) {
         <> "]"
         <> refs_badge_str
         <> " "
-        <> truncate_text(node.commit.summary, 64)
+        <> truncate_text(node.commit.summary, 60)
 
       let parents_str = case node.commit.parents {
         [] -> "root"
@@ -524,6 +535,7 @@ pub fn render_svg_graph(commits: List(Commit)) -> Element(msg) {
         <> types.format_timestamp(node.commit.timestamp)
         <> "   |   parent: "
         <> parents_str
+        <> "   [Click to inspect diff & files]"
 
       let node_circles = case is_head, is_merge {
         True, _ -> [
@@ -590,83 +602,85 @@ pub fn render_svg_graph(commits: List(Commit)) -> Element(msg) {
         ]
       }
 
-      list.append(
+      svg_el(
+        "g",
         [
-          // Horizontal dashed leader line from rail node to commit card
-          svg_el(
-            "line",
-            [
-              attribute.attribute("x1", float.to_string(leader_x1)),
-              attribute.attribute("y1", float.to_string(node.cy)),
-              attribute.attribute("x2", float.to_string(leader_x2)),
-              attribute.attribute("y2", float.to_string(node.cy)),
-              attribute.attribute("stroke", "#94a3b8"),
-              attribute.attribute("stroke-width", "1.4"),
-              attribute.attribute("stroke-dasharray", "3,3"),
-            ],
-            [],
-          ),
-          // Commit card box
-          svg_el(
-            "rect",
-            [
-              attribute.attribute("x", float.to_string(card_x)),
-              attribute.attribute("y", float.to_string(card_y)),
-              attribute.attribute("width", float.to_string(card_width)),
-              attribute.attribute("height", "42"),
-              attribute.attribute("rx", "6"),
-              attribute.attribute("fill", card_bg),
-              attribute.attribute("stroke", card_border),
-              attribute.attribute("stroke-width", card_stroke_w),
-            ],
-            [],
-          ),
-          // Left color-accent bar on commit card matching rail color
-          svg_el(
-            "rect",
-            [
-              attribute.attribute("x", float.to_string(card_x)),
-              attribute.attribute("y", float.to_string(card_y)),
-              attribute.attribute("width", "5"),
-              attribute.attribute("height", "42"),
-              attribute.attribute("rx", "2"),
-              attribute.attribute("fill", node.color),
-            ],
-            [],
-          ),
-          // Top line text: [short_oid] [refs] summary
-          svg_el(
-            "text",
-            [
-              attribute.attribute("x", float.to_string(card_x +. 14.0)),
-              attribute.attribute("y", float.to_string(node.cy -. 4.0)),
-              attribute.attribute("fill", "#0f172a"),
-              attribute.attribute(
-                "font-family",
-                "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-              ),
-              attribute.attribute("font-size", "13"),
-              attribute.attribute("font-weight", "600"),
-            ],
-            [text(top_line_text)],
-          ),
-          // Bottom line text: user, timestamp, parent
-          svg_el(
-            "text",
-            [
-              attribute.attribute("x", float.to_string(card_x +. 14.0)),
-              attribute.attribute("y", float.to_string(node.cy +. 14.0)),
-              attribute.attribute("fill", "#475569"),
-              attribute.attribute(
-                "font-family",
-                "system-ui, -apple-system, sans-serif",
-              ),
-              attribute.attribute("font-size", "11.5"),
-            ],
-            [text(bottom_line_text)],
-          ),
+          attribute.attribute("style", "cursor: pointer;"),
+          event.on_click(on_select_commit(node.commit.oid)),
         ],
-        node_circles,
+        list.append(
+          [
+            svg_el(
+              "line",
+              [
+                attribute.attribute("x1", float.to_string(leader_x1)),
+                attribute.attribute("y1", float.to_string(node.cy)),
+                attribute.attribute("x2", float.to_string(leader_x2)),
+                attribute.attribute("y2", float.to_string(node.cy)),
+                attribute.attribute("stroke", "#94a3b8"),
+                attribute.attribute("stroke-width", "1.4"),
+                attribute.attribute("stroke-dasharray", "3,3"),
+              ],
+              [],
+            ),
+            svg_el(
+              "rect",
+              [
+                attribute.attribute("x", float.to_string(card_x)),
+                attribute.attribute("y", float.to_string(card_y)),
+                attribute.attribute("width", float.to_string(card_width)),
+                attribute.attribute("height", "42"),
+                attribute.attribute("rx", "6"),
+                attribute.attribute("fill", card_bg),
+                attribute.attribute("stroke", card_border),
+                attribute.attribute("stroke-width", card_stroke_w),
+              ],
+              [],
+            ),
+            svg_el(
+              "rect",
+              [
+                attribute.attribute("x", float.to_string(card_x)),
+                attribute.attribute("y", float.to_string(card_y)),
+                attribute.attribute("width", "5"),
+                attribute.attribute("height", "42"),
+                attribute.attribute("rx", "2"),
+                attribute.attribute("fill", node.color),
+              ],
+              [],
+            ),
+            svg_el(
+              "text",
+              [
+                attribute.attribute("x", float.to_string(card_x +. 14.0)),
+                attribute.attribute("y", float.to_string(node.cy -. 4.0)),
+                attribute.attribute("fill", "#0f172a"),
+                attribute.attribute(
+                  "font-family",
+                  "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+                ),
+                attribute.attribute("font-size", "13"),
+                attribute.attribute("font-weight", "600"),
+              ],
+              [text(top_line_text)],
+            ),
+            svg_el(
+              "text",
+              [
+                attribute.attribute("x", float.to_string(card_x +. 14.0)),
+                attribute.attribute("y", float.to_string(node.cy +. 14.0)),
+                attribute.attribute("fill", "#475569"),
+                attribute.attribute(
+                  "font-family",
+                  "system-ui, -apple-system, sans-serif",
+                ),
+                attribute.attribute("font-size", "11.5"),
+              ],
+              [text(bottom_line_text)],
+            ),
+          ],
+          node_circles,
+        ),
       )
     })
 

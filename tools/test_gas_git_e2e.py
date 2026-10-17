@@ -298,6 +298,200 @@ class SimulatedDriveGitStore:
             "error": None,
         }
 
+    def _collect_tree_snapshot(
+        self,
+        tree_oid: str,
+        prefix: str,
+        entries_out: List[Dict[str, object]],
+        blobs_out: Dict[str, Tuple[str, bytes]],
+    ) -> None:
+        raw = self.read_raw_object(tree_oid)
+        if not raw or raw[0] != "tree":
+            return
+        body = raw[1]
+        pos = 0
+        while pos < len(body):
+            nul = body.index(b"\x00", pos)
+            mode_name = body[pos:nul].decode("utf-8", errors="replace")
+            _mode, name = mode_name.split(" ", 1)
+            entry_oid = body[nul + 1 : nul + 21].hex()
+            pos = nul + 21
+
+            path = f"{prefix}/{name}" if prefix else name
+            child_obj = self.read_raw_object(entry_oid)
+            if not child_obj:
+                continue
+            c_kind, c_body = child_obj
+            if c_kind == "tree":
+                entries_out.append({
+                    "path": path,
+                    "name": name,
+                    "parent_dir": prefix,
+                    "kind": "tree",
+                    "oid": entry_oid,
+                    "size": 0,
+                    "content": "",
+                    "is_binary": False,
+                })
+                self._collect_tree_snapshot(entry_oid, path, entries_out, blobs_out)
+            elif c_kind == "blob":
+                is_bin = b"\x00" in c_body[:4096]
+                content_str = (
+                    f"[Binary file ({len(c_body)} bytes)]"
+                    if is_bin
+                    else c_body.decode("utf-8", errors="replace")
+                )
+                entries_out.append({
+                    "path": path,
+                    "name": name,
+                    "parent_dir": prefix,
+                    "kind": "blob",
+                    "oid": entry_oid,
+                    "size": len(c_body),
+                    "content": content_str,
+                    "is_binary": is_bin,
+                })
+                blobs_out[path] = (entry_oid, c_body)
+
+    def get_commit_detail(self, commit_oid: str) -> Dict[str, object]:
+        refs = self.read_refs()
+        target_oid = commit_oid.strip()
+        if not target_oid or target_oid == "HEAD":
+            target_oid = refs.get("refs/heads/main") or next(iter(refs.values()), "")
+        raw = self.read_raw_object(target_oid)
+        if not raw or raw[0] != "commit":
+            return {
+                "ok": False,
+                "project_name": self.project_name,
+                "oid": target_oid,
+                "short_oid": target_oid[:7],
+                "tree_oid": "",
+                "parents": [],
+                "author_name": "",
+                "author_email": "",
+                "timestamp": 0,
+                "summary": "",
+                "body": "",
+                "refs": [],
+                "changes": [],
+                "tree_entries": [],
+                "error": f"Commit {target_oid} not found",
+            }
+
+        lines = raw[1].decode("utf-8", errors="replace").split("\n")
+        tree_oid = ""
+        parents: List[str] = []
+        author_name = "Unknown"
+        author_email = ""
+        timestamp = 0
+        body_start = 0
+        for i, line in enumerate(lines):
+            if line.startswith("tree "):
+                tree_oid = line.split(" ", 1)[1].strip()
+            elif line.startswith("parent "):
+                parents.append(line.split(" ", 1)[1].strip())
+            elif line.startswith("author "):
+                parts = line.split(" ", 1)[1].rsplit(" ", 2)
+                ident = parts[0]
+                if len(parts) >= 2 and parts[1].isdigit():
+                    timestamp = int(parts[1])
+                if "<" in ident and ident.endswith(">"):
+                    author_name, rest = ident.split("<", 1)
+                    author_name = author_name.strip()
+                    author_email = rest[:-1].strip()
+                else:
+                    author_name = ident.strip()
+            elif line == "":
+                body_start = i + 1
+                break
+        body_lines = lines[body_start:]
+        summary = body_lines[0] if body_lines else ""
+        body = "\n".join(body_lines).strip()
+
+        tree_entries: List[Dict[str, object]] = []
+        current_blobs: Dict[str, Tuple[str, bytes]] = {}
+        if tree_oid:
+            self._collect_tree_snapshot(tree_oid, "", tree_entries, current_blobs)
+
+        parent_blobs: Dict[str, Tuple[str, bytes]] = {}
+        if parents:
+            p_raw = self.read_raw_object(parents[0])
+            if p_raw and p_raw[0] == "commit":
+                for pline in p_raw[1].decode("utf-8", errors="replace").split("\n"):
+                    if pline.startswith("tree "):
+                        p_tree = pline.split(" ", 1)[1].strip()
+                        self._collect_tree_snapshot(p_tree, "", [], parent_blobs)
+                        break
+
+        all_paths = sorted(set(parent_blobs.keys()) | set(current_blobs.keys()))
+        changes: List[Dict[str, object]] = []
+        for path in all_paths:
+            old_item = parent_blobs.get(path)
+            new_item = current_blobs.get(path)
+            if old_item is None and new_item is not None:
+                new_oid, new_bytes = new_item
+                new_lines = new_bytes.decode("utf-8", errors="replace").splitlines()
+                patch = f"@@ -0,0 +1,{len(new_lines)} @@\n" + "".join(f"+{l}\n" for l in new_lines)
+                changes.append({
+                    "path": path,
+                    "status": "added",
+                    "old_oid": "",
+                    "new_oid": new_oid,
+                    "additions": len(new_lines),
+                    "deletions": 0,
+                    "patch": patch,
+                })
+            elif old_item is not None and new_item is None:
+                old_oid, old_bytes = old_item
+                old_lines = old_bytes.decode("utf-8", errors="replace").splitlines()
+                patch = f"@@ -1,{len(old_lines)} +0,0 @@\n" + "".join(f"-{l}\n" for l in old_lines)
+                changes.append({
+                    "path": path,
+                    "status": "deleted",
+                    "old_oid": old_oid,
+                    "new_oid": "",
+                    "additions": 0,
+                    "deletions": len(old_lines),
+                    "patch": patch,
+                })
+            elif old_item is not None and new_item is not None and old_item[0] != new_item[0]:
+                old_oid, old_bytes = old_item
+                new_oid, new_bytes = new_item
+                old_lines = old_bytes.decode("utf-8", errors="replace").splitlines()
+                new_lines = new_bytes.decode("utf-8", errors="replace").splitlines()
+                patch = (
+                    f"@@ -1,{len(old_lines)} +1,{len(new_lines)} @@\n"
+                    + "".join(f"-{l}\n" for l in old_lines)
+                    + "".join(f"+{l}\n" for l in new_lines)
+                )
+                changes.append({
+                    "path": path,
+                    "status": "modified",
+                    "old_oid": old_oid,
+                    "new_oid": new_oid,
+                    "additions": len(new_lines),
+                    "deletions": len(old_lines),
+                    "patch": patch,
+                })
+
+        return {
+            "ok": True,
+            "project_name": self.project_name,
+            "oid": target_oid,
+            "short_oid": target_oid[:7],
+            "tree_oid": tree_oid,
+            "parents": parents,
+            "author_name": author_name,
+            "author_email": author_email,
+            "timestamp": timestamp,
+            "summary": summary,
+            "body": body,
+            "refs": [],
+            "changes": changes,
+            "tree_entries": tree_entries,
+            "error": None,
+        }
+
     def handle_info_refs(self, service: str) -> bytes:
         out = bytearray()
         out.extend(pkt_text(f"# service={service}"))
@@ -595,6 +789,14 @@ class GasWebAppMockServer:
         self.require_token = require_token
         self.echo_store: Dict[str, Tuple[str, str]] = {}
 
+    def get_commit_detail_response(self, project_name: str, commit_oid: str) -> Dict[str, object]:
+        clean = project_name[:-4] if project_name.endswith(".git") else project_name
+        try:
+            store = SimulatedDriveGitStore(self.drive_root, clean)
+            return store.get_commit_detail(commit_oid)
+        except Exception as e:
+            return {"ok": False, "project_name": clean, "oid": commit_oid, "error": str(e)}
+
     def get_commits_response(self, project_name: str) -> Dict[str, object]:
         clean = project_name[:-4] if project_name.endswith(".git") else project_name
         try:
@@ -691,6 +893,13 @@ class GasWebAppMockServer:
                     repo_name = qs.get("repo", [""])[0]
                     commits_data = parent.get_commits_response(repo_name)
                     self._redirect_to_echo(json.dumps(commits_data), "application/json")
+                    return
+
+                if action == "get_commit_detail":
+                    repo_name = qs.get("repo", [""])[0]
+                    commit_oid = qs.get("commit", qs.get("commit_oid", [""]))[0]
+                    detail_data = parent.get_commit_detail_response(repo_name, commit_oid)
+                    self._redirect_to_echo(json.dumps(detail_data), "application/json")
                     return
 
                 if action == "list_repos":
@@ -1029,6 +1238,38 @@ def run_e2e_tests() -> None:
                 assert parent["oid"] in top["parents"]
                 assert any("feature" in r for r in top["refs"])
             print("[OK] 9. Pushed 2nd commit on new branch and verified multi-commit parent chain and branch decorations.")
+
+            # 10. Push nested directory files & modified file, then verify `get_commit_detail` (changes diff + directory tree state)
+            (local_alpha / "src").mkdir(exist_ok=True)
+            (local_alpha / "src" / "main.rs").write_text("fn main() {\n    println!(\"Hello GAS Git!\");\n}\n", encoding="utf-8")
+            (local_alpha / "README.md").write_text("# Project Alpha on GAS Drive\nUpdated documentation line.\n", encoding="utf-8")
+            subprocess.check_call(["git", "-C", str(local_alpha), "add", "src/main.rs", "README.md"], env=env_auth)
+            subprocess.check_call(["git", "-C", str(local_alpha), "commit", "-m", "Add src/main.rs and update README"], env=env_auth, stdout=subprocess.DEVNULL)
+            subprocess.check_call(["git", "-C", str(local_alpha), "push", "origin", "feature"], env=env_auth, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+            head_commit_oid = subprocess.check_output(["git", "-C", str(local_alpha), "rev-parse", "HEAD"], env=env_auth, text=True).strip()
+
+            req_detail = urllib.request.Request(
+                f"{exec_base_url}?action=get_commit_detail&repo=project-alpha&commit={head_commit_oid}",
+                headers={"Authorization": "Bearer secret-gas-oauth-token-123"},
+            )
+            with urllib.request.urlopen(req_detail, timeout=5) as d_resp:
+                detail = json.loads(d_resp.read().decode("utf-8"))
+                assert detail["ok"] is True
+                assert detail["oid"] == head_commit_oid
+                assert detail["summary"] == "Add src/main.rs and update README"
+                changes_by_path = {c["path"]: c for c in detail["changes"]}
+                assert "README.md" in changes_by_path
+                assert changes_by_path["README.md"]["status"] == "modified"
+                assert "+Updated documentation line." in changes_by_path["README.md"]["patch"]
+                assert "src/main.rs" in changes_by_path
+                assert changes_by_path["src/main.rs"]["status"] == "added"
+
+                entries_by_path = {e["path"]: e for e in detail["tree_entries"]}
+                assert "src" in entries_by_path and entries_by_path["src"]["kind"] == "tree"
+                assert "src/main.rs" in entries_by_path and entries_by_path["src/main.rs"]["kind"] == "blob"
+                assert entries_by_path["src/main.rs"]["parent_dir"] == "src"
+                assert "Hello GAS Git!" in entries_by_path["src/main.rs"]["content"]
+            print("[OK] 10. `get_commit_detail` API returned unified diffs (`changes`) and full directory/file tree (`tree_entries`) at target commit.")
 
         finally:
             httpd.shutdown()

@@ -4,6 +4,18 @@ import gleam/int
 import gleam/option.{type Option, None, Some}
 import gleam/string
 
+/// Controls whether the repository history page displays the SVG Tree Graph or the Commit Log table.
+pub type HistoryTab {
+  TabGraph
+  TabCommitLog
+}
+
+/// Controls whether the Commit Inspector displays file diffs or the directory/file tree browser.
+pub type CommitInspectorTab {
+  InspectorChanges
+  InspectorDirectoryTree
+}
+
 /// Metadata for a single Git repository stored in Google Drive (`<GIT_DRIVE_FOLDER_ID>/<name>.git`).
 pub type RepoSummary {
   RepoSummary(
@@ -48,7 +60,7 @@ pub type Commit {
   )
 }
 
-/// Response containing commit history for a repository, including client-side cache status.
+/// Response containing commit history for a repository, including persistent browser cache status.
 pub type RepoCommits {
   RepoCommits(
     ok: Bool,
@@ -57,6 +69,57 @@ pub type RepoCommits {
     default_branch: String,
     commits: List(Commit),
     from_cache: Bool,
+    cache_backend: String,
+    error: String,
+  )
+}
+
+/// Single file change entry (diff) in a specific commit compared to its first parent.
+pub type CommitFileChange {
+  CommitFileChange(
+    path: String,
+    status: String,
+    old_oid: String,
+    new_oid: String,
+    additions: Int,
+    deletions: Int,
+    patch: String,
+  )
+}
+
+/// Single directory (`"tree"`) or file (`"blob"`) entry in a commit's full tree snapshot.
+pub type CommitTreeEntry {
+  CommitTreeEntry(
+    path: String,
+    name: String,
+    parent_dir: String,
+    kind: String,
+    oid: String,
+    size: Int,
+    content: String,
+    is_binary: Bool,
+  )
+}
+
+/// Detailed commit snapshot containing both file changes (diff) and the full directory/file tree.
+pub type CommitDetail {
+  CommitDetail(
+    ok: Bool,
+    project_name: String,
+    oid: String,
+    short_oid: String,
+    tree_oid: String,
+    parents: List(String),
+    author_name: String,
+    author_email: String,
+    timestamp: Int,
+    summary: String,
+    body: String,
+    refs: List(String),
+    changes: List(CommitFileChange),
+    tree_entries: List(CommitTreeEntry),
+    from_cache: Bool,
+    cache_backend: String,
     error: String,
   )
 }
@@ -97,6 +160,43 @@ pub fn format_repo_status(repo: RepoSummary) -> String {
       <> " ("
       <> string.slice(oid, 0, 7)
       <> ")"
+  }
+}
+
+/// Compute the parent directory path of a given slash-separated directory path.
+pub fn parent_directory(dir_path: String) -> String {
+  let trimmed = string.trim(dir_path)
+  case trimmed {
+    "" -> ""
+    _ -> {
+      let parts = string.split(trimmed, "/")
+      let count = count_items(parts, 0)
+      case count <= 1 {
+        True -> ""
+        False -> join_first_n(parts, count - 1, "")
+      }
+    }
+  }
+}
+
+fn count_items(items: List(a), acc: Int) -> Int {
+  case items {
+    [] -> acc
+    [_, ..rest] -> count_items(rest, acc + 1)
+  }
+}
+
+fn join_first_n(items: List(String), remaining: Int, acc: String) -> String {
+  case remaining <= 0, items {
+    True, _ -> acc
+    False, [] -> acc
+    False, [head, ..tail] -> {
+      let next_acc = case acc {
+        "" -> head
+        _ -> acc <> "/" <> head
+      }
+      join_first_n(tail, remaining - 1, next_acc)
+    }
   }
 }
 
