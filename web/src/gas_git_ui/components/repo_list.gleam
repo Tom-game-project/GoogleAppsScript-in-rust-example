@@ -16,6 +16,7 @@ pub fn view_repositories_table(
   is_loading: Bool,
   on_refresh: msg,
   on_select_project: fn(Option(String)) -> msg,
+  on_view_commits: fn(String, String) -> msg,
 ) -> Element(msg) {
   let count_str = int.to_string(list.length(repositories))
 
@@ -53,7 +54,7 @@ pub fn view_repositories_table(
           html.tbody(
             [],
             list.map(repos, fn(repo) {
-              view_repo_row(base_url, repo, on_select_project)
+              view_repo_row(base_url, repo, on_select_project, on_view_commits)
             }),
           ),
         ])
@@ -65,6 +66,7 @@ fn view_repo_row(
   base_url: String,
   repo: RepoSummary,
   on_select_project: fn(Option(String)) -> msg,
+  on_view_commits: fn(String, String) -> msg,
 ) -> Element(msg) {
   let remote_url = types.format_remote_url(base_url, repo.name)
   let status_text = types.format_repo_status(repo)
@@ -76,6 +78,14 @@ fn view_repo_row(
     html.td([], [text(int.to_string(repo.branch_count))]),
     html.td([], [html.code([], [text(remote_url)])]),
     html.td([], [
+      html.button(
+        [
+          attribute.type_("button"),
+          event.on_click(on_view_commits(repo.name, repo.head_oid)),
+        ],
+        [text("Graph & Log / グラフ・履歴")],
+      ),
+      text(" "),
       html.button(
         [
           attribute.type_("button"),

@@ -5,21 +5,29 @@
 //// API `Effect` constructors, and UI section components to dedicated modules.
 
 import gas_git_ui/api
+import gas_git_ui/components/commit_view
 import gas_git_ui/components/header
 import gas_git_ui/components/quick_setup
 import gas_git_ui/components/repo_form
 import gas_git_ui/components/repo_list
-import gas_git_ui/types.{type RepoSummary, type ServerState}
+import gas_git_ui/types.{type RepoCommits, type RepoSummary, type ServerState}
+import gleam/dict.{type Dict}
 import gleam/option.{type Option, None, Some}
 import gleam/string
 import lustre/attribute
 import lustre/effect.{type Effect}
 import lustre/element.{type Element}
 import lustre/element/html
+import lustre/event
 
 // ============================================================================
 // Page Model & Msg
 // ============================================================================
+
+pub type ViewMode {
+  ViewOverview
+  ViewCommits(project_name: String)
+}
 
 pub type Model {
   Model(
@@ -31,6 +39,9 @@ pub type Model {
     selected_project: Option(String),
     new_repo_name: String,
     new_repo_description: String,
+    view_mode: ViewMode,
+    active_commits: Option(RepoCommits),
+    cached_commits: Dict(String, RepoCommits),
     is_loading: Bool,
     message: Option(String),
     error: Option(String),
@@ -44,6 +55,10 @@ pub type Msg {
   SubmitCreateRepo
   SelectProject(Option(String))
   RefreshRepositories
+  OpenProjectCommits(project_name: String, head_oid: String)
+  RepoCommitsReceived(Result(RepoCommits, String))
+  BackToOverview
+  ForceRefreshCommits(project_name: String, head_oid: String)
 }
 
 // ============================================================================
@@ -61,6 +76,9 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       selected_project: None,
       new_repo_name: "",
       new_repo_description: "",
+      view_mode: ViewOverview,
+      active_commits: None,
+      cached_commits: dict.new(),
       is_loading: True,
       message: None,
       error: None,
@@ -154,6 +172,68 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       Model(..model, is_loading: True, message: None, error: None),
       api.fetch_repositories(ServerStateReceived),
     )
+
+    OpenProjectCommits(project_name, head_oid) -> {
+      let cache_key = project_name <> ":" <> head_oid
+      case dict.get(model.cached_commits, cache_key) {
+        Ok(cached) -> #(
+          Model(
+            ..model,
+            view_mode: ViewCommits(project_name),
+            active_commits: Some(cached),
+            is_loading: False,
+            error: None,
+          ),
+          effect.none(),
+        )
+        Error(Nil) -> #(
+          Model(
+            ..model,
+            view_mode: ViewCommits(project_name),
+            active_commits: None,
+            is_loading: True,
+            error: None,
+          ),
+          api.fetch_repo_commits(
+            project_name,
+            head_oid,
+            False,
+            RepoCommitsReceived,
+          ),
+        )
+      }
+    }
+
+    RepoCommitsReceived(Ok(repo_commits)) -> {
+      let cache_key = repo_commits.project_name <> ":" <> repo_commits.head_oid
+      let updated_cache =
+        dict.insert(model.cached_commits, cache_key, repo_commits)
+      #(
+        Model(
+          ..model,
+          cached_commits: updated_cache,
+          active_commits: Some(repo_commits),
+          is_loading: False,
+          error: None,
+        ),
+        effect.none(),
+      )
+    }
+
+    RepoCommitsReceived(Error(err)) -> #(
+      Model(..model, is_loading: False, error: Some(err)),
+      effect.none(),
+    )
+
+    BackToOverview -> #(
+      Model(..model, view_mode: ViewOverview, is_loading: False),
+      effect.none(),
+    )
+
+    ForceRefreshCommits(project_name, head_oid) -> #(
+      Model(..model, is_loading: True, error: None),
+      api.fetch_repo_commits(project_name, head_oid, True, RepoCommitsReceived),
+    )
   }
 }
 
@@ -166,23 +246,53 @@ pub fn view(model: Model) -> Element(Msg) {
     ),
     header.view_banners(model.is_loading, model.message, model.error),
     html.hr([]),
-    repo_form.view_create_repository_form(
-      model.base_url,
-      model.new_repo_name,
-      model.new_repo_description,
-      model.is_loading,
-      UpdateNewRepoName,
-      UpdateNewRepoDescription,
-      SubmitCreateRepo,
-    ),
-    html.hr([]),
-    repo_list.view_repositories_table(
-      model.base_url,
-      model.repositories,
-      model.is_loading,
-      RefreshRepositories,
-      SelectProject,
-    ),
-    quick_setup.view_quick_setup(model.base_url, model.selected_project),
+    case model.view_mode {
+      ViewCommits(_) -> {
+        case model.active_commits {
+          Some(repo_commits) ->
+            commit_view.view_commit_history(
+              repo_commits,
+              model.is_loading,
+              BackToOverview,
+              ForceRefreshCommits(
+                repo_commits.project_name,
+                repo_commits.head_oid,
+              ),
+            )
+          None ->
+            html.div([], [
+              html.button(
+                [attribute.type_("button"), event.on_click(BackToOverview)],
+                [element.text("← Back to repositories / プロジェクト一覧に戻る")],
+              ),
+              html.p([], [
+                element.text("Loading commit history and graph..."),
+              ]),
+            ])
+        }
+      }
+      ViewOverview ->
+        html.div([], [
+          repo_form.view_create_repository_form(
+            model.base_url,
+            model.new_repo_name,
+            model.new_repo_description,
+            model.is_loading,
+            UpdateNewRepoName,
+            UpdateNewRepoDescription,
+            SubmitCreateRepo,
+          ),
+          html.hr([]),
+          repo_list.view_repositories_table(
+            model.base_url,
+            model.repositories,
+            model.is_loading,
+            RefreshRepositories,
+            SelectProject,
+            OpenProjectCommits,
+          ),
+          quick_setup.view_quick_setup(model.base_url, model.selected_project),
+        ])
+    },
   ])
 }

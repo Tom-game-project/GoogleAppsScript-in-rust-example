@@ -28,8 +28,10 @@ GLEAM_SRCS := \
 	web/src/gas_git_ui/gas_git_ffi.mjs \
 	web/src/gas_git_ui/components/header.gleam \
 	web/src/gas_git_ui/components/repo_form.gleam \
+	web/src/gas_git_ui/graph.gleam \
 	web/src/gas_git_ui/components/repo_list.gleam \
-	web/src/gas_git_ui/components/quick_setup.gleam
+	web/src/gas_git_ui/components/quick_setup.gleam \
+	web/src/gas_git_ui/components/commit_view.gleam
 
 # host impls
 JS_SHIMS = \

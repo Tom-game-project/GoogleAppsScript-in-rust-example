@@ -195,6 +195,109 @@ class SimulatedDriveGitStore:
                 return (kind, loose[nul + 1 :])
         return None
 
+    def get_commits(self) -> Dict[str, object]:
+        refs = self.read_refs()
+        head_oid = refs.get("refs/heads/main") or next(iter(refs.values()), None)
+        head_sym = "refs/heads/main"
+        if self.head_file.exists():
+            head_content = self.head_file.read_text(encoding="utf-8").strip()
+            if head_content.startswith("ref: "):
+                head_sym = head_content[5:].strip()
+
+        if not head_oid:
+            return {
+                "ok": True,
+                "project_name": self.project_name,
+                "head_oid": "",
+                "default_branch": head_sym,
+                "commits": [],
+                "error": None,
+            }
+
+        decorations: Dict[str, List[str]] = {}
+        for rname, roid in refs.items():
+            labels = []
+            if roid == head_oid and rname == head_sym:
+                short = rname.replace("refs/heads/", "")
+                labels.append(f"HEAD -> {short}")
+            elif rname.startswith("refs/heads/"):
+                labels.append(rname.replace("refs/heads/", ""))
+            elif rname.startswith("refs/tags/"):
+                labels.append(f"tag: {rname.replace('refs/tags/', '')}")
+            else:
+                labels.append(rname)
+            decorations.setdefault(roid, []).extend(labels)
+
+        if head_oid in decorations and not any(s.startswith("HEAD") for s in decorations[head_oid]):
+            decorations[head_oid].insert(0, "HEAD")
+
+        commits = []
+        visited = set()
+        queue = []
+        if head_oid:
+            queue.append(head_oid)
+        for roid in refs.values():
+            if roid not in queue:
+                queue.append(roid)
+        while queue:
+            oid = queue.pop(0)
+            if oid in visited:
+                continue
+            visited.add(oid)
+            raw = self.read_raw_object(oid)
+            if not raw or raw[0] != "commit":
+                continue
+            lines = raw[1].decode("utf-8", errors="replace").split("\n")
+            parents = []
+            author_name = "Unknown"
+            author_email = ""
+            timestamp = 0
+            body_start = 0
+            for i, line in enumerate(lines):
+                if line.startswith("parent "):
+                    p = line.split(" ", 1)[1].strip()
+                    parents.append(p)
+                    queue.append(p)
+                elif line.startswith("author "):
+                    parts = line.split(" ", 1)[1].rsplit(" ", 2)
+                    ident = parts[0]
+                    if len(parts) >= 2 and parts[1].isdigit():
+                        timestamp = int(parts[1])
+                    if "<" in ident and ident.endswith(">"):
+                        author_name, rest = ident.split("<", 1)
+                        author_name = author_name.strip()
+                        author_email = rest[:-1].strip()
+                    else:
+                        author_name = ident.strip()
+                elif line == "":
+                    body_start = i + 1
+                    break
+            body_lines = lines[body_start:]
+            summary = body_lines[0] if body_lines else ""
+            body = "\n".join(body_lines[1:]).strip() if len(body_lines) > 1 else ""
+
+            commits.append({
+                "oid": oid,
+                "short_oid": oid[:7],
+                "parents": parents,
+                "author_name": author_name,
+                "author_email": author_email,
+                "timestamp": timestamp,
+                "summary": summary,
+                "body": body,
+                "refs": decorations.get(oid, []),
+            })
+
+        commits.sort(key=lambda c: c["timestamp"], reverse=True)
+        return {
+            "ok": True,
+            "project_name": self.project_name,
+            "head_oid": head_oid,
+            "default_branch": head_sym,
+            "commits": commits,
+            "error": None,
+        }
+
     def handle_info_refs(self, service: str) -> bytes:
         out = bytearray()
         out.extend(pkt_text(f"# service={service}"))
@@ -492,6 +595,21 @@ class GasWebAppMockServer:
         self.require_token = require_token
         self.echo_store: Dict[str, Tuple[str, str]] = {}
 
+    def get_commits_response(self, project_name: str) -> Dict[str, object]:
+        clean = project_name[:-4] if project_name.endswith(".git") else project_name
+        try:
+            store = SimulatedDriveGitStore(self.drive_root, clean)
+            return store.get_commits()
+        except Exception as e:
+            return {
+                "ok": False,
+                "project_name": clean,
+                "head_oid": "",
+                "default_branch": "refs/heads/main",
+                "commits": [],
+                "error": str(e),
+            }
+
     def build_ui_state(
         self,
         base_url: str,
@@ -569,6 +687,12 @@ class GasWebAppMockServer:
                 base_url = f"http://{host}/macros/s/AKfycbxTestDeploymentId/exec"
 
                 action = qs.get("action", [None])[0]
+                if action == "get_commits":
+                    repo_name = qs.get("repo", [""])[0]
+                    commits_data = parent.get_commits_response(repo_name)
+                    self._redirect_to_echo(json.dumps(commits_data), "application/json")
+                    return
+
                 if action == "list_repos":
                     state = parent.build_ui_state(base_url)
                     self._redirect_to_echo(json.dumps(state), "application/json")
@@ -625,6 +749,12 @@ class GasWebAppMockServer:
                 envelope = json.loads(raw_post.decode("utf-8"))
 
                 action = envelope.get("action")
+                if action == "get_commits":
+                    repo_name = envelope.get("project_name") or envelope.get("repo", "")
+                    commits_data = parent.get_commits_response(repo_name)
+                    self._redirect_to_echo(json.dumps(commits_data), "application/json")
+                    return
+
                 if action == "create_repo":
                     proj_name = envelope.get("project_name", "")
                     desc = envelope.get("description", "")
@@ -853,6 +983,52 @@ def run_e2e_tests() -> None:
             print(
                 "[OK] 7. Cloned `project-alpha.git` and verified multi-project isolation in Google Drive folder!"
             )
+
+            # 8. Verify commit log & decoration API (`action=get_commits&repo=project-alpha`)
+            req_commits_alpha = urllib.request.Request(
+                f"{exec_base_url}?action=get_commits&repo=project-alpha",
+                headers={"Authorization": "Bearer secret-gas-oauth-token-123"},
+            )
+            with urllib.request.urlopen(req_commits_alpha, timeout=5) as c_resp:
+                c_alpha = json.loads(c_resp.read().decode("utf-8"))
+                assert c_alpha["ok"] is True
+                assert c_alpha["project_name"] == "project-alpha"
+                assert len(c_alpha["commits"]) == 1
+                c0 = c_alpha["commits"][0]
+                assert c0["summary"] == "Initial commit from client"
+                assert c0["author_name"] == "Developer"
+                assert c0["author_email"] == "dev@example.com"
+                assert any("HEAD -> main" in r for r in c0["refs"])
+
+            # Verify empty project-beta has 0 commits
+            req_commits_beta = urllib.request.Request(
+                f"{exec_base_url}?action=get_commits&repo=project-beta",
+                headers={"Authorization": "Bearer secret-gas-oauth-token-123"},
+            )
+            with urllib.request.urlopen(req_commits_beta, timeout=5) as b_resp:
+                c_beta = json.loads(b_resp.read().decode("utf-8"))
+                assert c_beta["ok"] is True
+                assert c_beta["commits"] == []
+                assert c_beta["head_oid"] == ""
+            print("[OK] 8. `get_commits` API returned decorated commit history for project-alpha and empty log for project-beta.")
+
+            # 9. Push a 2nd commit and branch to project-alpha and verify commit parent chain and ref decorations
+            (local_alpha / "feature.txt").write_text("New feature\n", encoding="utf-8")
+            subprocess.check_call(["git", "-C", str(local_alpha), "checkout", "-b", "feature"], env=env_auth, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.check_call(["git", "-C", str(local_alpha), "add", "feature.txt"], env=env_auth)
+            subprocess.check_call(["git", "-C", str(local_alpha), "commit", "-m", "Add new feature on branch"], env=env_auth, stdout=subprocess.DEVNULL)
+            subprocess.check_call(["git", "-C", str(local_alpha), "push", "-u", "origin", "feature"], env=env_auth, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+
+            with urllib.request.urlopen(req_commits_alpha, timeout=5) as c_resp2:
+                c_alpha2 = json.loads(c_resp2.read().decode("utf-8"))
+                assert c_alpha2["ok"] is True
+                assert len(c_alpha2["commits"]) == 2
+                top = c_alpha2["commits"][0]
+                parent = c_alpha2["commits"][1]
+                assert top["summary"] == "Add new feature on branch"
+                assert parent["oid"] in top["parents"]
+                assert any("feature" in r for r in top["refs"])
+            print("[OK] 9. Pushed 2nd commit on new branch and verified multi-commit parent chain and branch decorations.")
 
         finally:
             httpd.shutdown()

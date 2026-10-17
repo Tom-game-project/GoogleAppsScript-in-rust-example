@@ -98,145 +98,95 @@ function bundleEsModulesPure(entryFile) {
     const baseDir = path.dirname(fromFile);
     const candidate = path.resolve(baseDir, spec);
     for (const ext of ["", ".mjs", ".js"]) {
-      if (fs.existsSync(candidate + ext) && fs.statSync(candidate + ext).isFile()) {
-        return candidate + ext;
-      }
+      const p = candidate + ext;
+      if (fs.existsSync(p) && fs.statSync(p).isFile()) return p;
     }
+    const indexMjs = path.join(candidate, "index.mjs");
+    if (fs.existsSync(indexMjs)) return indexMjs;
+    const indexJs = path.join(candidate, "index.js");
+    if (fs.existsSync(indexJs)) return indexJs;
     throw new Error(`Cannot resolve import '${spec}' from '${fromFile}'`);
   }
 
-  function transformModule(filePath) {
-    const absPath = path.resolve(filePath);
-    if (modules.has(absPath)) {
-      return absPath;
+  function transformModule(absPath) {
+    if (modules.has(absPath)) return absPath;
+    modules.set(absPath, "");
+
+    const source = fs.readFileSync(absPath, "utf8");
+    const importRegex =
+      /import\s+(?:(?:\*\s+as\s+([a-zA-Z0-9_$]+)|(?:([a-zA-Z0-9_$]+)\s*,?\s*)?(?:\{([^}]+)\})?)\s+from\s+)?["']([^"']+)["'];?/g;
+    const exportNamedRegex = /export\s+\{([^}]+)\};?/g;
+    const exportDeclRegex =
+      /export\s+(?:async\s+)?(?:function\*?|class|const|let|var)\s+([a-zA-Z0-9_$]+)/g;
+    const exportDefaultDeclRegex =
+      /export\s+default\s+(?:async\s+)?(?:function\*?|class)?\s*([a-zA-Z0-9_$]*)/;
+
+    const deps = [];
+    let match;
+    while ((match = importRegex.exec(source)) !== null) {
+      const spec = match[4];
+      if (spec.startsWith(".") || spec.startsWith("/")) {
+        const depPath = resolveImport(absPath, spec);
+        deps.push({ spec, resolved: depPath, raw: match[0], match });
+      }
     }
-    modules.set(absPath, ""); // cycle guard
 
-    let src = fs.readFileSync(absPath, "utf8");
-    const exportFooter = [];
+    for (const d of deps) {
+      transformModule(d.resolved);
+    }
 
-    // Replace `import ... from "..."` with `__require("...")`
-    src = src.replace(
-      /^\s*import\s+([\s\S]*?)\s+from\s+["']([^"']+)["']\s*;?/gm,
-      (_match, clause, spec) => {
+    let transformed = source;
+
+    transformed = transformed.replace(
+      importRegex,
+      (fullMatch, starIdent, defaultIdent, namedList, spec) => {
+        if (!spec.startsWith(".") && !spec.startsWith("/")) return fullMatch;
         const depPath = resolveImport(absPath, spec);
-        transformModule(depPath);
         const depId = JSON.stringify(depPath);
-        const trimmedClause = clause.trim();
 
-        if (trimmedClause.startsWith("* as ")) {
-          const ns = trimmedClause.slice(5).trim();
-          return `const ${ns} = __require(${depId});`;
+        const lines = [`const __dep_${Math.random().toString(36).slice(2)} = __require(${depId});`];
+        const depVar = lines[0].split(" ")[1];
+
+        if (starIdent) {
+          lines.push(`const ${starIdent} = ${depVar};`);
         }
-        if (trimmedClause.startsWith("{") && trimmedClause.endsWith("}")) {
-          const bindings = trimmedClause
-            .slice(1, -1)
-            .split(",")
-            .map((s) => s.trim())
-            .filter(Boolean)
-            .map((b) => {
-              const parts = b.split(/\s+as\s+/);
-              return parts.length === 2 ? `${parts[0].trim()}: ${parts[1].trim()}` : b;
-            })
-            .join(", ");
-          return `const { ${bindings} } = __require(${depId});`;
+        if (defaultIdent) {
+          lines.push(`const ${defaultIdent} = ${depVar}.default ?? ${depVar};`);
         }
-        if (trimmedClause.includes("{")) {
-          const braceIdx = trimmedClause.indexOf("{");
-          const defName = trimmedClause.slice(0, braceIdx).replace(/,$/, "").trim();
-          const namedPart = trimmedClause.slice(braceIdx);
-          const bindings = namedPart
-            .slice(1, -1)
-            .split(",")
-            .map((s) => s.trim())
-            .filter(Boolean)
-            .map((b) => {
-              const parts = b.split(/\s+as\s+/);
-              return parts.length === 2 ? `${parts[0].trim()}: ${parts[1].trim()}` : b;
-            })
-            .join(", ");
-          return `const __dep_mod = __require(${depId}); const ${defName} = __dep_mod.default ?? __dep_mod; const { ${bindings} } = __dep_mod;`;
+        if (namedList) {
+          const parts = namedList.split(",").map((s) => s.trim()).filter(Boolean);
+          for (const part of parts) {
+            const [imported, local] = part.split(/\s+as\s+/).map((s) => s.trim());
+            const localName = local || imported;
+            lines.push(`const ${localName} = ${depVar}[${JSON.stringify(imported)}];`);
+          }
         }
-        return `const __dep_def = __require(${depId}); const ${trimmedClause} = __dep_def.default ?? __dep_def;`;
+        return lines.join("\n");
       },
     );
 
-    // Replace side-effect-only `import "..."`
-    src = src.replace(/^\s*import\s+["']([^"']+)["']\s*;?/gm, (_match, spec) => {
-      const depPath = resolveImport(absPath, spec);
-      transformModule(depPath);
-      return `__require(${JSON.stringify(depPath)});`;
-    });
-
-    // Replace `export * from "..."`
-    src = src.replace(
-      /^\s*export\s+\*\s+from\s+["']([^"']+)["']\s*;?/gm,
-      (_match, spec) => {
-        const depPath = resolveImport(absPath, spec);
-        transformModule(depPath);
-        return `Object.assign(__exports, __require(${JSON.stringify(depPath)}));`;
+    transformed = transformed.replace(
+      exportDeclRegex,
+      (fullMatch, ident) => {
+        const decl = fullMatch.replace(/^export\s+/, "");
+        return `${decl}\n__exports[${JSON.stringify(ident)}] = ${ident};`;
       },
     );
 
-    // Replace `export { a, b as c } from "..."`
-    src = src.replace(
-      /^\s*export\s*\{([^}]*)\}\s*from\s*["']([^"']+)["']\s*;?/gm,
-      (_match, listStr, spec) => {
-        const depPath = resolveImport(absPath, spec);
-        transformModule(depPath);
-        const depId = JSON.stringify(depPath);
-        const assigns = listStr
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean)
-          .map((item) => {
-            const parts = item.split(/\s+as\s+/);
-            const orig = parts[0].trim();
-            const exported = parts.length === 2 ? parts[1].trim() : orig;
-            return `__exports.${exported} = __dep.${orig};`;
-          })
-          .join(" ");
-        return `{ const __dep = __require(${depId}); ${assigns} }`;
+    transformed = transformed.replace(
+      exportNamedRegex,
+      (fullMatch, namedList) => {
+        const parts = namedList.split(",").map((s) => s.trim()).filter(Boolean);
+        const assigns = parts.map((part) => {
+          const [local, exported] = part.split(/\s+as\s+/).map((s) => s.trim());
+          const expName = exported || local;
+          return `__exports[${JSON.stringify(expName)}] = ${local};`;
+        });
+        return assigns.join("\n");
       },
     );
 
-    // Replace `export { a, b as c }`
-    src = src.replace(/^\s*export\s*\{([^}]*)\}\s*;?/gm, (_match, listStr) => {
-      return listStr
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean)
-        .map((item) => {
-          const parts = item.split(/\s+as\s+/);
-          const local = parts[0].trim();
-          const exported = parts.length === 2 ? parts[1].trim() : local;
-          return `__exports.${exported} = ${local};`;
-        })
-        .join("\n");
-    });
-
-    // Replace `export default ...`
-    src = src.replace(/^\s*export\s+default\s+/gm, "__exports.default = ");
-
-    // Replace `export function name` / `export class name` / `export const name` / `export let name`
-    src = src.replace(
-      /^\s*export\s+(async\s+)?function\s+([A-Za-z0-9_$]+)/gm,
-      (_m, asyncKw, name) => {
-        exportFooter.push(`__exports.${name} = ${name};`);
-        return `${asyncKw || ""}function ${name}`;
-      },
-    );
-    src = src.replace(/^\s*export\s+class\s+([A-Za-z0-9_$]+)/gm, (_m, name) => {
-      exportFooter.push(`__exports.${name} = ${name};`);
-      return `class ${name}`;
-    });
-    src = src.replace(/^\s*export\s+(const|let|var)\s+([A-Za-z0-9_$]+)/gm, (_m, kw, name) => {
-      exportFooter.push(`__exports.${name} = ${name};`);
-      return `${kw} ${name}`;
-    });
-
-    const finalModuleCode = `${src}\n${exportFooter.join("\n")}`;
-    modules.set(absPath, finalModuleCode);
+    modules.set(absPath, transformed);
     return absPath;
   }
 
@@ -308,6 +258,18 @@ function getFallbackBundleCode() {
         Object.assign(this, { ok, drive_folder_configured, drive_folder_id, drive_folder_url, base_url, selected_project, repositories, message, error });
       }
     }
+    class Commit extends CustomType {
+      constructor(oid, short_oid, parents, author_name, author_email, timestamp, summary, body, refs) {
+        super();
+        Object.assign(this, { oid, short_oid, parents, author_name, author_email, timestamp, summary, body, refs });
+      }
+    }
+    class RepoCommits extends CustomType {
+      constructor(ok, project_name, head_oid, default_branch, commits, from_cache, error) {
+        super();
+        Object.assign(this, { ok, project_name, head_oid, default_branch, commits, from_cache, error });
+      }
+    }
 
     function detectDefaultBaseUrl() {
       const href = window.location.href.split("?")[0].split("#")[0];
@@ -349,6 +311,30 @@ function getFallbackBundleCode() {
       );
     }
 
+    function decodeRepoCommits(data, fromCache) {
+      const rawCommits = Array.isArray(data?.commits) ? data.commits : [];
+      const commits = rawCommits.map((c) => new Commit(
+        String(c?.oid ?? ""),
+        String(c?.short_oid ?? (c?.oid ?? "").slice(0, 7)),
+        toList((c?.parents ?? []).map(String)),
+        String(c?.author_name ?? "Unknown"),
+        String(c?.author_email ?? ""),
+        Number(c?.timestamp ?? 0),
+        String(c?.summary ?? ""),
+        String(c?.body ?? ""),
+        toList((c?.refs ?? []).map(String)),
+      ));
+      return new RepoCommits(
+        Boolean(data?.ok ?? true),
+        String(data?.project_name ?? ""),
+        String(data?.head_oid ?? ""),
+        String(data?.default_branch ?? "refs/heads/main"),
+        toList(commits),
+        Boolean(fromCache),
+        String(data?.error ?? ""),
+      );
+    }
+
     const effect = {
       none: () => ({ tasks: [] }),
       from: (task) => ({ tasks: [task] }),
@@ -371,8 +357,8 @@ function getFallbackBundleCode() {
     const el = (tag, attrs, children) => ({
       kind: "element",
       tag,
-      attrs: attrs.toArray ? attrs.toArray() : attrs,
-      children: children.toArray ? children.toArray() : children,
+      attrs: attrs?.toArray ? attrs.toArray() : (attrs || []),
+      children: children?.toArray ? children.toArray() : (children || []),
     });
     const html = {
       div: (a, c) => el("div", a, c),
@@ -399,9 +385,13 @@ function getFallbackBundleCode() {
       input: (a) => el("input", a, []),
     };
 
+    const svgTags = new Set(["svg", "path", "circle", "line", "g", "rect", "polyline", "polygon"]);
     function renderVNode(vnode, dispatch) {
       if (vnode.kind === "text") return document.createTextNode(vnode.content);
-      const dom = document.createElement(vnode.tag);
+      const isSvg = svgTags.has(vnode.tag);
+      const dom = isSvg
+        ? document.createElementNS("http://www.w3.org/2000/svg", vnode.tag)
+        : document.createElement(vnode.tag);
       for (const attr of vnode.attrs) {
         if (attr.kind === "attr") dom.setAttribute(attr.name, attr.value);
         else if (attr.kind === "prop") dom[attr.name] = attr.value;
@@ -449,6 +439,123 @@ function getFallbackBundleCode() {
       return \`gas::\${base}/\${c}.git\`;
     }
 
+    function renderSvgGraph(commits) {
+      const rowHeight = 36;
+      const colWidth = 18;
+      const marginX = 14;
+      const marginY = 18;
+      const colors = ["#0969da", "#1a7f37", "#8250df", "#cf222e", "#bc4c00", "#bf3989", "#0550ae"];
+
+      const activeLanes = [];
+      const nodeMap = new Map();
+      const nodes = [];
+
+      commits.forEach((c, row) => {
+        let lane = activeLanes.indexOf(c.oid);
+        if (lane === -1) {
+          const free = activeLanes.indexOf("");
+          lane = free === -1 ? activeLanes.length : free;
+        }
+        activeLanes[lane] = c.oid;
+
+        const cx = marginX + lane * colWidth;
+        const cy = marginY + row * rowHeight;
+        const color = colors[lane % colors.length];
+
+        const node = { commit: c, row, lane, cx, cy, color };
+        nodes.push(node);
+        nodeMap.set(c.oid, node);
+
+        const parents = c.parents.toArray();
+        if (parents.length === 0) {
+          activeLanes[lane] = "";
+        } else {
+          activeLanes[lane] = parents[0];
+          for (let pIdx = 1; pIdx < parents.length; pIdx++) {
+            const p = parents[pIdx];
+            if (!activeLanes.includes(p)) {
+              const free = activeLanes.indexOf("");
+              if (free === -1) activeLanes.push(p);
+              else activeLanes[free] = p;
+            }
+          }
+        }
+      });
+
+      const edges = [];
+      nodes.forEach((n) => {
+        const parents = n.commit.parents.toArray();
+        parents.forEach((p) => {
+          const pNode = nodeMap.get(p);
+          if (pNode) {
+            edges.push({
+              x1: n.cx,
+              y1: n.cy,
+              x2: pNode.cx,
+              y2: pNode.cy,
+              curved: n.lane !== pNode.lane,
+              color: n.color,
+            });
+          } else {
+            edges.push({
+              x1: n.cx,
+              y1: n.cy,
+              x2: n.cx,
+              y2: n.cy + 18,
+              curved: false,
+              color: n.color,
+            });
+          }
+        });
+      });
+
+      const maxLane = nodes.reduce((m, n) => Math.max(m, n.lane), 0);
+      const totalWidth = Math.max(50, marginX * 2 + (maxLane + 1) * colWidth);
+      const totalHeight = Math.max(60, marginY * 2 + commits.length * rowHeight);
+
+      const edgeElements = edges.map((e) => {
+        if (e.curved) {
+          const midY = (e.y1 + e.y2) / 2;
+          const d = \`M \${e.x1} \${e.y1} C \${e.x1} \${midY}, \${e.x2} \${midY}, \${e.x2} \${e.y2}\`;
+          return el("path", [
+            attribute.attribute("d", d),
+            attribute.attribute("fill", "none"),
+            attribute.attribute("stroke", e.color),
+            attribute.attribute("stroke-width", "2.5"),
+            attribute.attribute("stroke-linecap", "round"),
+          ], []);
+        }
+        return el("line", [
+          attribute.attribute("x1", String(e.x1)),
+          attribute.attribute("y1", String(e.y1)),
+          attribute.attribute("x2", String(e.x2)),
+          attribute.attribute("y2", String(e.y2)),
+          attribute.attribute("stroke", e.color),
+          attribute.attribute("stroke-width", "2.5"),
+          attribute.attribute("stroke-linecap", "round"),
+        ], []);
+      });
+
+      const nodeElements = nodes.map((n) => {
+        const r = n.commit.parents.toArray().length > 1 ? "5.5" : "4.5";
+        return el("circle", [
+          attribute.attribute("cx", String(n.cx)),
+          attribute.attribute("cy", String(n.cy)),
+          attribute.attribute("r", r),
+          attribute.attribute("fill", n.color),
+          attribute.attribute("stroke", "#ffffff"),
+          attribute.attribute("stroke-width", "2"),
+        ], []);
+      });
+
+      return el("svg", [
+        attribute.attribute("width", String(totalWidth)),
+        attribute.attribute("height", String(totalHeight)),
+        attribute.attribute("viewBox", \`0 0 \${totalWidth} \${totalHeight}\`),
+        attribute.attribute("style", \`display: block; overflow: visible; min-width: \${totalWidth}px;\`),
+      ], [...edgeElements, ...nodeElements]);
+    }
+
     function init() {
       const model = {
         drive_folder_configured: false,
@@ -459,6 +566,9 @@ function getFallbackBundleCode() {
         selected_project: new None(),
         new_repo_name: "",
         new_repo_description: "",
+        view_mode: "overview",
+        active_commits: null,
+        cached_commits: new Map(),
         is_loading: true,
         message: new None(),
         error: new None(),
@@ -476,6 +586,47 @@ function getFallbackBundleCode() {
           .catch((e) => dispatch({ type: "State", res: new ErrorResult(String(e)) }));
       });
       return [model, eff];
+    }
+
+    function fetchCommitsEffect(projectName, headOid, forceRefresh) {
+      return effect.from((dispatch) => {
+        const cleanHead = (headOid || "").trim();
+        if (!cleanHead) {
+          dispatch({
+            type: "Commits",
+            res: new Ok(new RepoCommits(true, projectName, "", "refs/heads/main", toList([]), true, "")),
+          });
+          return;
+        }
+
+        const cacheKey = \`gas_git_commits_\${projectName}_\${cleanHead}\`;
+        if (!forceRefresh) {
+          try {
+            if (typeof window !== "undefined" && window.localStorage) {
+              const cached = window.localStorage.getItem(cacheKey);
+              if (cached) {
+                const parsed = JSON.parse(cached);
+                dispatch({ type: "Commits", res: new Ok(decodeRepoCommits(parsed, true)) });
+                return;
+              }
+            }
+          } catch (_) {}
+        }
+
+        fetch("?action=get_commits&repo=" + encodeURIComponent(projectName), {
+          headers: { Accept: "application/json" },
+        })
+          .then((r) => r.json())
+          .then((data) => {
+            if (data?.ok && typeof window !== "undefined" && window.localStorage) {
+              try {
+                window.localStorage.setItem(cacheKey, JSON.stringify(data));
+              } catch (_) {}
+            }
+            dispatch({ type: "Commits", res: new Ok(decodeRepoCommits(data, false)) });
+          })
+          .catch((e) => dispatch({ type: "Commits", res: new ErrorResult(String(e)) }));
+      });
     }
 
     function update(model, msg) {
@@ -515,14 +666,152 @@ function getFallbackBundleCode() {
             .catch((e) => dispatch({ type: "State", res: new ErrorResult(String(e)) }));
         })];
       }
+      if (msg.type === "OpenCommits") {
+        const cacheKey = \`\${msg.project_name}:\${msg.head_oid}\`;
+        if (model.cached_commits.has(cacheKey)) {
+          return [{
+            ...model,
+            view_mode: "commits",
+            active_commits: model.cached_commits.get(cacheKey),
+            is_loading: false,
+            error: new None(),
+          }, effect.none()];
+        }
+        return [{
+          ...model,
+          view_mode: "commits",
+          active_commits: null,
+          is_loading: true,
+          error: new None(),
+        ], fetchCommitsEffect(msg.project_name, msg.head_oid, false)];
+      }
+      if (msg.type === "Commits") {
+        if (msg.res instanceof Ok) {
+          const rc = msg.res[0];
+          const cacheKey = \`\${rc.project_name}:\${rc.head_oid}\`;
+          model.cached_commits.set(cacheKey, rc);
+          return [{
+            ...model,
+            active_commits: rc,
+            is_loading: false,
+            error: new None(),
+          }, effect.none()];
+        }
+        return [{ ...model, is_loading: false, error: new Some(msg.res[0]) }, effect.none()];
+      }
+      if (msg.type === "Back") {
+        return [{ ...model, view_mode: "overview", is_loading: false }, effect.none()];
+      }
+      if (msg.type === "ForceRefreshCommits") {
+        return [{ ...model, is_loading: true, error: new None() }, fetchCommitsEffect(msg.project_name, msg.head_oid, true)];
+      }
       return [model, effect.none()];
     }
 
     function view(model) {
+      if (model.view_mode === "commits") {
+        const rc = model.active_commits;
+        if (!rc) {
+          return html.div(toList([attribute.id("gas-git-web-ui")]), toList([
+            html.button(toList([attribute.type_("button"), event.on_click({ type: "Back" })]), toList([text("← Back to repositories / プロジェクト一覧に戻る")])),
+            html.p(toList([]), toList([text("Loading commit history and graph...")])),
+          ]));
+        }
+
+        const commits = rc.commits.toArray();
+        return html.div(toList([attribute.id("gas-git-web-ui")]), toList([
+          html.section(toList([]), toList([
+            html.div(toList([]), toList([
+              html.button(toList([attribute.type_("button"), event.on_click({ type: "Back" })]), toList([text("← Back to repositories / プロジェクト一覧に戻る")])),
+              text(" "),
+              html.button(toList([
+                attribute.type_("button"),
+                attribute.disabled(model.is_loading),
+                event.on_click({ type: "ForceRefreshCommits", project_name: rc.project_name, head_oid: rc.head_oid }),
+              ]), toList([text("Force refresh / 最新コミット再取得")])),
+            ])),
+            html.h2(toList([]), toList([text(\`Project: \${rc.project_name} (commits: \${commits.length})\`)])),
+            html.p(toList([]), toList([
+              text("HEAD: "),
+              rc.head_oid ? html.code(toList([]), toList([text(rc.head_oid)])) : text("None (empty repository)"),
+              text(" | Default branch: "),
+              html.code(toList([]), toList([text(rc.default_branch)])),
+              text(" | Cache status: "),
+              rc.from_cache
+                ? html.strong(toList([]), toList([text("[HIT: localStorage cache (0ms)]")]))
+                : html.span(toList([]), toList([text("[MISS: fetched fresh from GAS]")])),
+            ])),
+            commits.length === 0
+              ? html.p(toList([]), toList([text("No commits yet in this repository. Push your first commit using git push!")]))
+              : html.table(toList([attribute.attribute("border", "1")]), toList([
+                  html.thead(toList([]), toList([
+                    html.tr(toList([]), toList([
+                      html.th(toList([]), toList([text("Graph (git log --graph)")])),
+                      html.th(toList([]), toList([text("Commit / Summary")])),
+                      html.th(toList([]), toList([text("Author")])),
+                      html.th(toList([]), toList([text("Date (Unix timestamp)")])),
+                      html.th(toList([]), toList([text("Hash / Parents")])),
+                    ])),
+                  ])),
+                  html.tbody(toList([]), toList([
+                    html.tr(toList([]), toList([
+                      html.td(toList([
+                        attribute.attribute("valign", "top"),
+                        attribute.attribute("style", "padding: 0; vertical-align: top;"),
+                      ]), toList([renderSvgGraph(commits)])),
+                      html.td(toList([
+                        attribute.attribute("colspan", "4"),
+                        attribute.attribute("valign", "top"),
+                        attribute.attribute("style", "padding: 0; vertical-align: top;"),
+                      ]), toList([
+                        html.table(toList([
+                          attribute.attribute("border", "0"),
+                          attribute.attribute("width", "100%"),
+                        ]), toList([
+                          html.tbody(toList([]), toList(commits.map((c) => html.tr(toList([
+                            attribute.attribute("style", "height: 36px; min-height: 36px; vertical-align: middle;"),
+                          ]), toList([
+                            html.td(toList([]), toList([
+                              ...c.refs.toArray().map((r) => html.span(toList([
+                                attribute.attribute("style", "display: inline-block; padding: 1px 4px; margin-right: 4px; border: 1px solid #ccc; font-size: 0.85em;"),
+                              ]), toList([text(r)]))),
+                              html.strong(toList([]), toList([text(c.summary)])),
+                            ])),
+                            html.td(toList([]), toList([text(\`\${c.author_name} <\${c.author_email}>\`)])),
+                            html.td(toList([]), toList([text(String(c.timestamp))])),
+                            html.td(toList([]), toList([
+                              html.code(toList([]), toList([text(c.short_oid)])),
+                              c.parents.toArray().length > 0
+                                ? text(\` (parents: \${c.parents.toArray().map((p) => p.slice(0, 7)).join(", ")})\`)
+                                : text(""),
+                            ])),
+                          ]))))),
+                        ])),
+                      ])),
+                    ])),
+                  ])),
+                ])),
+          ])),
+        ]));
+      }
+
       const repos = model.repositories.toArray();
       return html.div(toList([attribute.id("gas-git-web-ui")]), toList([
         html.header(toList([]), toList([
           html.h1(toList([]), toList([text("GAS Git Server (gitoxide + Google Drive)")])),
+          html.p(toList([]), toList([
+            text("Google Drive Folder (GIT_DRIVE_FOLDER_ID): "),
+            model.drive_folder_configured
+              ? html.span(toList([]), toList([
+                  html.code(toList([]), toList([text(model.drive_folder_id)])),
+                  text(" "),
+                  model.drive_folder_url ? html.a(toList([
+                    attribute.href(model.drive_folder_url),
+                    attribute.target("_blank"),
+                  ]), toList([text("[Open in Google Drive]")])) : text(""),
+                ]))
+              : html.strong(toList([]), toList([text("未設定 (Not configured — set Script Property GIT_DRIVE_FOLDER_ID)")])),
+          ])),
         ])),
         html.section(toList([]), toList([
           html.h2(toList([]), toList([text("Create a new repository / 新規リポジトリ作成")])),
@@ -532,14 +821,50 @@ function getFallbackBundleCode() {
             attribute.value(model.new_repo_name),
             event.on_input((v) => ({ type: "Name", val: v })),
           ])),
+          text(" "),
+          html.button(toList([attribute.type_("button"), event.on_click({ type: "Create" })]), toList([text("Create repository / 作成")])),
           html.p(toList([]), toList([
             text("Remote URL preview: "),
             html.code(toList([]), toList([text(format_remote_url(model.base_url, model.new_repo_name))])),
           ])),
-          html.button(toList([attribute.type_("button"), event.on_click({ type: "Create" })]), toList([text("Create repository")])),
         ])),
+        html.hr(toList([])),
         html.section(toList([]), toList([
-          html.h2(toList([]), toList([text(\`Repositories (\${repos.length})\`)])),
+          html.h2(toList([]), toList([text(\`Repositories (\${repos.length}) / 既存 Git プロジェクト一覧\`)])) ,
+          repos.length === 0
+            ? html.p(toList([]), toList([text("No repositories found in Google Drive folder.")]))
+            : html.table(toList([attribute.attribute("border", "1")]), toList([
+                html.thead(toList([]), toList([
+                  html.tr(toList([]), toList([
+                    html.th(toList([]), toList([text("Repository")])),
+                    html.th(toList([]), toList([text("Description")])),
+                    html.th(toList([]), toList([text("Status / HEAD")])),
+                    html.th(toList([]), toList([text("Branches")])),
+                    html.th(toList([]), toList([text("Remote URL (git remote add)")])),
+                    html.th(toList([]), toList([text("Actions")])),
+                  ])),
+                ])),
+                html.tbody(toList([]), toList(repos.map((repo) => html.tr(toList([]), toList([
+                  html.td(toList([]), toList([html.strong(toList([]), toList([text(repo.folder_name)]))])),
+                  html.td(toList([]), toList([text(repo.description)])) ,
+                  html.td(toList([]), toList([html.code(toList([]), toList([
+                    text(repo.head_oid ? \`\${repo.default_branch} (\${repo.head_oid.slice(0, 7)})\` : "Empty repository (0 commits)")
+                  ]))])),
+                  html.td(toList([]), toList([text(String(repo.branch_count))])),
+                  html.td(toList([]), toList([html.code(toList([]), toList([text(format_remote_url(model.base_url, repo.name))]))])),
+                  html.td(toList([]), toList([
+                    html.button(toList([
+                      attribute.type_("button"),
+                      event.on_click({ type: "OpenCommits", project_name: repo.name, head_oid: repo.head_oid }),
+                    ]), toList([text("Graph & Log / グラフ・履歴")])),
+                    text(" "),
+                    html.button(toList([
+                      attribute.type_("button"),
+                      event.on_click({ type: "Select", val: new Some(repo.name) }),
+                    ]), toList([text("Quick Setup / 使い方")])),
+                  ])),
+                ]))))),
+              ])),
         ])),
       ]));
     }

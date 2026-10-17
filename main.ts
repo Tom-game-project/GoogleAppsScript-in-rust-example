@@ -7,6 +7,7 @@ import {
     gitInitRepo,
     gitListRepos,
     gitCreateRepo,
+    gitGetCommits,
     resourceExample,
     helloworldExample,
     getScriptPropertiesExample,
@@ -35,6 +36,7 @@ interface GasGlobal {
     git_init_repo: (repo?: string) => string;
     git_list_repos: () => string;
     git_create_repo: (repo: string, description?: string) => string;
+    git_get_commits: (repo: string) => string;
     aaa: () => void;
     resource_example: () => void;
     helloworldExample: () => void;
@@ -105,6 +107,10 @@ global.git_list_repos = function(): string {
 
 global.git_create_repo = function(repo: string, description?: string): string {
     return gitCreateRepo(repo, description);
+};
+
+global.git_get_commits = function(repo: string): string {
+    return gitGetCommits(repo);
 };
 
 global.aaa = function(): void {

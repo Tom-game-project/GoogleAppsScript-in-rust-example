@@ -91,6 +91,11 @@ impl Guest for Component {
         git_server::create_repo_json(&repo, description.as_deref())
     }
 
+    // Web UI (google.script.run) から指定プロジェクトのコミットログ・参照デコレーションを JSON として取得
+    fn git_get_commits(repo: String) -> String {
+        git_server::get_commits_json(&repo)
+    }
+
     fn scream(input: String) -> String {
         let mut s = input.to_uppercase();
         s.push_str("!!1!");

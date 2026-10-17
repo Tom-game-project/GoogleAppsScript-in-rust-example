@@ -1525,6 +1525,176 @@ pub fn render_web_ui_html(selected_project: Option<String>) -> GasHtmlOutput {
         .set_x_frame_options_mode(XFrameOptionsMode::Allowall)
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct CommitItem {
+    pub oid: String,
+    pub short_oid: String,
+    pub parents: Vec<String>,
+    pub author_name: String,
+    pub author_email: String,
+    pub timestamp: i64,
+    pub summary: String,
+    pub body: String,
+    pub refs: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct RepoCommitsResponse {
+    pub ok: bool,
+    pub project_name: String,
+    pub head_oid: Option<String>,
+    pub default_branch: String,
+    pub commits: Vec<CommitItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+pub fn get_commits_json(project_name: &str) -> String {
+    let normalized = match parse_project_segment(project_name) {
+        Ok(n) => n,
+        Err(e) => {
+            let res = RepoCommitsResponse {
+                ok: false,
+                project_name: project_name.to_string(),
+                head_oid: None,
+                default_branch: DEFAULT_BRANCH.to_string(),
+                commits: Vec::new(),
+                error: Some(e),
+            };
+            return serde_json::to_string(&res).unwrap_or_default();
+        }
+    };
+
+    let store = match GasGitStore::open(&normalized) {
+        Ok(s) => s,
+        Err(e) => {
+            let res = RepoCommitsResponse {
+                ok: false,
+                project_name: normalized,
+                head_oid: None,
+                default_branch: DEFAULT_BRANCH.to_string(),
+                commits: Vec::new(),
+                error: Some(e),
+            };
+            return serde_json::to_string(&res).unwrap_or_default();
+        }
+    };
+
+    let head_sym = store.head_symref().unwrap_or_else(|| DEFAULT_BRANCH.to_string());
+    let head_oid = store.resolve_ref("HEAD");
+    let refs_map = store.list_refs();
+
+    if head_oid.is_none() && refs_map.is_empty() {
+        let res = RepoCommitsResponse {
+            ok: true,
+            project_name: normalized,
+            head_oid: None,
+            default_branch: head_sym,
+            commits: Vec::new(),
+            error: None,
+        };
+        return serde_json::to_string(&res).unwrap_or_default();
+    }
+
+    let mut decoration_map: BTreeMap<ObjectId, Vec<String>> = BTreeMap::new();
+    for (rname, roid) in &refs_map {
+        let mut labels = Vec::new();
+        if Some(*roid) == head_oid && rname == &head_sym {
+            let short = rname.strip_prefix("refs/heads/").unwrap_or(rname);
+            labels.push(format!("HEAD -> {}", short));
+        } else if let Some(branch) = rname.strip_prefix("refs/heads/") {
+            labels.push(branch.to_string());
+        } else if let Some(tag) = rname.strip_prefix("refs/tags/") {
+            labels.push(format!("tag: {}", tag));
+        } else {
+            labels.push(rname.clone());
+        }
+        decoration_map.entry(*roid).or_default().extend(labels);
+    }
+
+    if let Some(h_oid) = head_oid {
+        let entry = decoration_map.entry(h_oid).or_default();
+        if !entry.iter().any(|s| s.starts_with("HEAD")) {
+            entry.insert(0, "HEAD".to_string());
+        }
+    }
+
+    let mut commits = Vec::new();
+    let mut visited: BTreeSet<ObjectId> = BTreeSet::new();
+    let mut queue: VecDeque<ObjectId> = VecDeque::new();
+
+    if let Some(h) = head_oid {
+        queue.push_back(h);
+    }
+    for roid in refs_map.values() {
+        if !queue.contains(roid) {
+            queue.push_back(*roid);
+        }
+    }
+
+    while let Some(oid) = queue.pop_front() {
+        if !visited.insert(oid) {
+            continue;
+        }
+        if commits.len() >= 100 {
+            break;
+        }
+        let Some(loose) = store.read_loose_object(&oid) else {
+            continue;
+        };
+        if let Ok(obj_ref) = ObjectRef::from_loose(&loose) {
+            if let ObjectRef::Commit(c) = obj_ref {
+                let parents: Vec<String> = c.parents().map(|p| p.to_hex().to_string()).collect();
+                for p in c.parents() {
+                    queue.push_back(p);
+                }
+                let (author_name, author_email) = match c.author().or_else(|_| c.committer()) {
+                    Ok(sig) => (
+                        sig.name.to_str_lossy().into_owned(),
+                        sig.email.to_str_lossy().into_owned(),
+                    ),
+                    Err(_) => ("Unknown".to_string(), String::new()),
+                };
+                let timestamp = match c.time() {
+                    Ok(t) => t.seconds,
+                    Err(_) => 0,
+                };
+                let full_msg = c.message.to_str_lossy();
+                let summary = full_msg.lines().next().unwrap_or("").to_string();
+                let body = full_msg.to_string();
+                let refs = decoration_map.get(&oid).cloned().unwrap_or_default();
+
+                let hex = oid.to_hex().to_string();
+                let short_oid = hex[..7.min(hex.len())].to_string();
+
+                commits.push(CommitItem {
+                    oid: hex,
+                    short_oid,
+                    parents,
+                    author_name,
+                    author_email,
+                    timestamp,
+                    summary,
+                    body,
+                    refs,
+                });
+            }
+        }
+    }
+
+    commits.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+
+    let res = RepoCommitsResponse {
+        ok: true,
+        project_name: normalized,
+        head_oid: head_oid.map(|h| h.to_hex().to_string()),
+        default_branch: head_sym,
+        commits,
+        error: None,
+    };
+    serde_json::to_string(&res).unwrap_or_default()
+}
+
 fn format_info_refs_output(
     service: &str,
     project_name: &str,
@@ -1579,6 +1749,18 @@ pub fn handle_do_get(event: &GasDoGetEvent) -> WebResponse {
             "list_repos" => {
                 let selected = event.parameter.get("repo").cloned();
                 let json = list_repos_json(selected);
+                return WebResponse::Text(
+                    gas_content_service::create_text_output(&json).set_mime_type(MimeType::Json),
+                );
+            }
+            "get_commits" => {
+                let repo = event
+                    .parameter
+                    .get("repo")
+                    .or_else(|| event.parameter.get("project_name"))
+                    .map(|s| s.as_str())
+                    .unwrap_or("");
+                let json = get_commits_json(repo);
                 return WebResponse::Text(
                     gas_content_service::create_text_output(&json).set_mime_type(MimeType::Json),
                 );
@@ -1692,6 +1874,22 @@ pub fn handle_do_post(event: &GasDoPostEvent) -> GasTextOutput {
         match act {
             "list_repos" => {
                 let json = list_repos_json(None);
+                return gas_content_service::create_text_output(&json)
+                    .set_mime_type(MimeType::Json);
+            }
+            "get_commits" => {
+                let repo = parsed_env
+                    .as_ref()
+                    .and_then(|e| e.project_name.as_deref().or(e.repo.as_deref()))
+                    .or_else(|| {
+                        event
+                            .parameter
+                            .get("project_name")
+                            .or_else(|| event.parameter.get("repo"))
+                            .map(|s| s.as_str())
+                    })
+                    .unwrap_or("");
+                let json = get_commits_json(repo);
                 return gas_content_service::create_text_output(&json)
                     .set_mime_type(MimeType::Json);
             }

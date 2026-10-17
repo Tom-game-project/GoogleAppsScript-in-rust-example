@@ -32,6 +32,34 @@ pub type ServerState {
   )
 }
 
+/// Single commit entry in a repository's history.
+pub type Commit {
+  Commit(
+    oid: String,
+    short_oid: String,
+    parents: List(String),
+    author_name: String,
+    author_email: String,
+    timestamp: Int,
+    summary: String,
+    body: String,
+    refs: List(String),
+  )
+}
+
+/// Response containing commit history for a repository, including client-side cache status.
+pub type RepoCommits {
+  RepoCommits(
+    ok: Bool,
+    project_name: String,
+    head_oid: String,
+    default_branch: String,
+    commits: List(Commit),
+    from_cache: Bool,
+    error: String,
+  )
+}
+
 /// Convert a possibly empty string into an `Option(String)`.
 pub fn non_empty_option(value: String) -> Option(String) {
   let trimmed = string.trim(value)

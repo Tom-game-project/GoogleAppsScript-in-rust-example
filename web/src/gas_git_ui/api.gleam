@@ -3,7 +3,7 @@
 //// All external communication is wrapped in `lustre/effect.from` without using
 //// `lustre/event.emit` or impure side effects in `update` / `view`.
 
-import gas_git_ui/types.{type ServerState}
+import gas_git_ui/types.{type RepoCommits, type ServerState}
 import lustre/effect.{type Effect}
 
 @external(javascript, "./gas_git_ffi.mjs", "loadInitialOrRemoteState")
@@ -23,6 +23,15 @@ fn ffi_create_repository(
   project_name: String,
   description: String,
   on_success: fn(ServerState) -> Nil,
+  on_error: fn(String) -> Nil,
+) -> Nil
+
+@external(javascript, "./gas_git_ffi.mjs", "fetchRepoCommits")
+fn ffi_fetch_repo_commits(
+  project_name: String,
+  head_oid: String,
+  force_refresh: Bool,
+  on_success: fn(RepoCommits) -> Nil,
   on_error: fn(String) -> Nil,
 ) -> Nil
 
@@ -61,6 +70,24 @@ pub fn create_repository(
       project_name,
       description,
       fn(state) { dispatch(to_msg(Ok(state))) },
+      fn(err) { dispatch(to_msg(Error(err))) },
+    )
+  })
+}
+
+/// Fetch commit history and decoration for a repository with client-side caching by `${project_name}:${head_oid}`.
+pub fn fetch_repo_commits(
+  project_name: String,
+  head_oid: String,
+  force_refresh: Bool,
+  to_msg: fn(Result(RepoCommits, String)) -> msg,
+) -> Effect(msg) {
+  effect.from(fn(dispatch) {
+    ffi_fetch_repo_commits(
+      project_name,
+      head_oid,
+      force_refresh,
+      fn(commits) { dispatch(to_msg(Ok(commits))) },
       fn(err) { dispatch(to_msg(Error(err))) },
     )
   })
