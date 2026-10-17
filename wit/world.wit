@@ -56,10 +56,17 @@ world my-world {
 		string-value(string),
 	}
 
-	// web (doGet / doPost & Git Smart HTTP v1 endpoints)
-	export rs-do-get: func(data: string) -> gas-text-output;
+	variant web-response {
+		text(gas-text-output),
+		html(gas-html-output),
+	}
+
+	// web (doGet / doPost, Git Smart HTTP v1 endpoints, and Web UI APIs)
+	export rs-do-get: func(data: string) -> web-response;
 	export rs-do-post: func(data: string) -> gas-text-output;
 	export git-init-repo: func(repo: option<string>) -> string;
+	export git-list-repos: func() -> string;
+	export git-create-repo: func(repo: string, description: option<string>) -> string;
 
 	export variant-func00: func() -> cell-value;
 

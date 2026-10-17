@@ -12,7 +12,7 @@ mod bindings {
 
 use args::{GasDoGetEvent, GasDoPostEvent};
 
-use bindings::Guest;
+use bindings::{Guest, WebResponse};
 use bindings::example::resouceex::example_resource;
 use bindings::gas::content_service::{
     gas_content_service,
@@ -34,22 +34,18 @@ struct Component;
 
 // Guestトレイトが、ホストに公開する関数
 impl Guest for Component {
-    // doGetはここから入る (Git Smart HTTP v1 の /info/refs リクエストも処理)
-    fn rs_do_get(data: String) -> GasTextOutput {
+    // doGetはここから入る (Git Smart HTTP v1 の /<project_name>.git/info/refs リクエストおよび Gleam + Lustre Web UI を処理)
+    fn rs_do_get(data: String) -> WebResponse {
         match serde_json::from_str::<GasDoGetEvent>(&data) {
-            Ok(event) => {
-                if let Some(git_output) = git_server::try_handle_do_get(&event) {
-                    return git_output;
-                }
-                gas_content_service::create_text_output(&format!("{:?}", event))
-                    .set_mime_type(MimeType::Text)
-            }
-            Err(e) => gas_content_service::create_text_output(&format!("failed to parse: {}", e))
-                .set_mime_type(MimeType::Text),
+            Ok(event) => git_server::handle_do_get(&event),
+            Err(e) => WebResponse::Text(
+                gas_content_service::create_text_output(&format!("failed to parse: {}", e))
+                    .set_mime_type(MimeType::Text),
+            ),
         }
     }
 
-    // doPostはここから入る (Git Smart HTTP v1 の git-upload-pack / git-receive-pack を処理)
+    // doPostはここから入る (Git Smart HTTP v1 の /<project_name>.git/git-upload-pack / git-receive-pack および Web UI API を処理)
     fn rs_do_post(data: String) -> GasTextOutput {
         match serde_json::from_str::<GasDoPostEvent>(&data) {
             Ok(event) => git_server::handle_do_post(&event),
@@ -58,26 +54,41 @@ impl Guest for Component {
         }
     }
 
-    // GAS エディタから手動で Git リポジトリを初期化するヘルパー関数
+    // GAS エディタから手動で空の Git リポジトリを Google Drive フォルダ内に作成するヘルパー関数（初期コミットは自動生成しない）
     fn git_init_repo(repo: Option<String>) -> String {
-        let repo_name = repo.as_deref().unwrap_or("default");
-        let store = git_server::GasGitStore::new(repo_name);
-        match store.ensure_initialized() {
-            Ok(oid) => {
+        let Some(repo_name) = repo.as_deref().filter(|s| !s.trim().is_empty()) else {
+            let msg = "Repository name is required (e.g. git_init_repo('my-project'))".to_string();
+            logger::log(&msg);
+            return msg;
+        };
+        match git_server::GasGitStore::create_repository(repo_name, None) {
+            Ok(summary) => {
                 let msg = format!(
-                    "Initialized GAS Git repository '{}' at HEAD -> refs/heads/main ({})",
-                    repo_name,
-                    oid.to_hex()
+                    "Created empty GAS Git repository '{}' in Google Drive (folder_id={})",
+                    summary.folder_name, summary.folder_id
                 );
                 logger::log(&msg);
                 msg
             }
             Err(err) => {
-                let msg = format!("Failed to initialize GAS Git repository '{}': {}", repo_name, err);
+                let msg = format!(
+                    "Failed to create GAS Git repository '{}': {}",
+                    repo_name, err
+                );
                 logger::log(&msg);
                 msg
             }
         }
+    }
+
+    // Web UI (google.script.run) から Google Drive 内の全 Git プロジェクト一覧を JSON として取得
+    fn git_list_repos() -> String {
+        git_server::list_repos_json(None)
+    }
+
+    // Web UI (google.script.run) から Google Drive 内に新規の空 Git リポジトリを作成し最新状態を JSON で返却
+    fn git_create_repo(repo: String, description: Option<String>) -> String {
+        git_server::create_repo_json(&repo, description.as_deref())
     }
 
     fn scream(input: String) -> String {
@@ -87,7 +98,6 @@ impl Guest for Component {
     }
 
     fn say_hello(s: String) {
-        // ホスト側(jsの機能)をRustで使用する
         logger::log(&format!("+++ {} +++", &s));
         logger::log(&logger::get_log());
     }
@@ -105,7 +115,6 @@ impl Guest for Component {
     fn get_script_properties_example() {
         let key = "FILE_ID";
 
-        // プロパティサービスの取得
         if let Some(value) = properties_service::get_script_properties().get_property(key) {
             logger::log(&format!("key - {} : value - {}", key, value));
             logger::log(&format!(
@@ -121,7 +130,7 @@ impl Guest for Component {
             let mut buf = blob.get_bytes();
 
             logger::log(&format!("byte {:?}", buf));
-            buf.push(10); // 改行を追加
+            buf.push(10);
             blob.set_bytes(&buf);
             file.set_content(&blob.get_data_as_string(None));
             logger::log("Success to set file");
@@ -174,7 +183,6 @@ impl Guest for Component {
     }
 
     fn variant_func00() -> bindings::CellValue {
-        // variant型をjsとやり取りする際の方法
         bindings::CellValue::StringValue("hello world".to_string())
     }
 
@@ -210,11 +218,9 @@ impl Guest for Component {
     }
 
     fn wasi_showcase_example() {
-        // 1. Rust標準の println! / eprintln! (wasm32-wasip2 の wasi:cli/stdout, stderr 経由で Logger.log / console.error に出力)
         println!("[Rust WASI stdout] Hello from Rust println! in GAS");
         eprintln!("[Rust WASI stderr] Hello from Rust eprintln! in GAS");
 
-        // 2. wasi:clocks/system-clock@0.3.2 & wasi:clocks/timezone@0.3.2 (Date.now() および Session.getScriptTimeZone() に連動)
         let sys_now = bindings::wasi::clocks::system_clock::now();
         let tz_id = bindings::wasi::clocks::timezone::iana_id();
         let tz_offset = bindings::wasi::clocks::timezone::utc_offset(sys_now);
@@ -223,12 +229,10 @@ impl Guest for Component {
             sys_now.seconds, sys_now.nanoseconds, tz_id, tz_offset
         ));
 
-        // 3. wasi:random/{random, insecure, insecure-seed}@0.3.2 (Utilities.getUuid + SHA-256 CSPRNG / Math.random)
         let rand_u64 = bindings::wasi::random::random::get_random_u64();
         let seed = bindings::wasi::random::insecure_seed::get_insecure_seed();
         logger::log(&format!("WASI random u64={}, seed={:?}", rand_u64, seed));
 
-        // 4. wasi:cli/environment@0.3.2 (GAS Script Properties を環境変数として取得)
         let envs = bindings::wasi::cli::environment::get_environment();
         let cwd = bindings::wasi::cli::environment::get_initial_cwd();
         logger::log(&format!("WASI environment count: {}, cwd: {:?}", envs.len(), cwd));

@@ -1,0 +1,11 @@
+name = "gas_git_ui"
+version = "0.1.0"
+target = "javascript"
+description = "GitHub-style minimal Web UI for GAS Git Server built with Gleam and Lustre (MVU)"
+
+[javascript]
+typescript_declarations = false
+
+[dependencies]
+gleam_stdlib = ">= 0.40.0 and < 2.0.0"
+lustre = ">= 4.6.0 and < 6.0.0"

@@ -1,30 +1,23 @@
-//! Git Smart HTTP v1 Server on Google Apps Script powered by `gitoxide`.
+//! Git Smart HTTP v1 Server on Google Apps Script powered by `gitoxide`,
+//! with Google Drive multi-repository storage and Gleam + Lustre Web UI backend APIs.
 //!
-//! Supported endpoints via GAS `doGet(e)` / `doPost(e)`:
-//! - `GET  ?service=git-upload-pack`  (`/info/refs?service=git-upload-pack` — `git ls-remote`, `git fetch`, `git clone`, `git pull`)
-//! - `GET  ?service=git-receive-pack` (`/info/refs?service=git-receive-pack` — `git push` ref discovery)
-//! - `POST ?service=git-upload-pack`  (`/git-upload-pack` — packfile negotiation & transfer)
-//! - `POST ?service=git-receive-pack` (`/git-receive-pack` — packfile unpack & reference updates)
+//! Supported Git Smart HTTP v1 endpoints (GitHub-style path routing without username):
+//! - `GET  /<project_name>.git/info/refs?service=git-upload-pack`  (`git ls-remote`, `git fetch`, `git clone`, `git pull`)
+//! - `GET  /<project_name>.git/info/refs?service=git-receive-pack` (`git push` ref discovery)
+//! - `POST /<project_name>.git/git-upload-pack`                    (packfile negotiation & transfer)
+//! - `POST /<project_name>.git/git-receive-pack`                   (packfile unpack & reference updates)
 //!
-//! Uses `gitoxide` crates:
-//! - `gix_hash`: SHA-1 `ObjectId` parsing, formatting, and streaming `PACK` checksum verification
-//! - `gix_object`: Git `Blob`, `Tree`, `Commit`, `Tag` decoding (`ObjectRef::from_loose`) and encoding (`WriteTo`)
-//! - `gix_packetline`: Git pkt-line wire format encoding (`blocking_io::encode`) & decoding (`StreamingPeekableIter`)
-//! - `gix_actor` & `gix_date`: Commit author/committer signatures and timestamps
-//! - `gix_validate`: Reference name validation (`gix_validate::reference::name`)
-//! - `gix_zlib`: Zlib deflate (`stream::deflate::Write`) & inflate (`Inflate`) for Git `PACK` v2 streams
+//! Supported Web UI endpoints (Browser & JSON API):
+//! - `GET  /` or `GET /<project_name>.git`                         (Gleam + Lustre Web UI via `HtmlService`)
+//! - `GET  ?action=list_repos`                                     (JSON list of repositories in `GIT_DRIVE_FOLDER_ID`)
+//! - `POST ?action=create_repo`                                    (Create a new empty `<project_name>.git` repository in Drive)
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{Cursor, Write as IoWrite};
 
-use gix_actor::Signature;
-use gix_date::Time;
 use gix_hash::{Kind as HashKind, ObjectId};
-use gix_object::{
-    Blob, Commit, Kind as ObjectKind, ObjectRef, Tree, WriteTo,
-    bstr::{BString, ByteSlice},
-    tree::{self, EntryKind},
-};
+use gix_object::{Kind as ObjectKind, ObjectRef, WriteTo, bstr::ByteSlice};
 use gix_packetline::{
     Channel, PacketLineRef,
     blocking_io::{StreamingPeekableIter, encode as pkt_encode},
@@ -33,30 +26,168 @@ use gix_zlib::{Compression, Inflate, Status as ZlibStatus, stream::deflate};
 use serde::{Deserialize, Serialize};
 
 use crate::args::{GasDoGetEvent, GasDoPostEvent};
+use crate::bindings::WebResponse;
 use crate::bindings::gas::content_service::{
     gas_content_service,
     gas_text_output::{GasTextOutput, MimeType},
 };
 use crate::bindings::gas::drive_app::{
     gas_drive_app,
-    gas_file::{CreateFileInput, TextFileSpec},
+    gas_file::{CreateFileInput, GasFile, GasFolder, TextFileSpec},
+};
+use crate::bindings::gas::html_service::{
+    gas_html_output::{GasHtmlOutput, HtmlSource, SandboxMode, XFrameOptionsMode},
+    gas_html_service,
 };
 use crate::bindings::gas::lock_service::gas_lock_service;
 use crate::bindings::gas::logger::logger;
 use crate::bindings::gas::property::properties_service;
 use crate::bindings::gas::utilities::gas_utilities::{self, BinaryOrStringInput};
 
-const DEFAULT_REPO: &str = "default";
+pub const ENV_GIT_DRIVE_FOLDER_ID: &str = "GIT_DRIVE_FOLDER_ID";
+pub const ENV_GAS_WEB_APP_URL: &str = "GAS_WEB_APP_URL";
 const DEFAULT_BRANCH: &str = "refs/heads/main";
 const MAX_SIDEBAND_CHUNK: usize = 65500;
-const DRIVE_OFFLOAD_THRESHOLD: usize = 6144;
+const HEAD_FILE_NAME: &str = "HEAD";
+const REFS_FILE_NAME: &str = "refs.json";
+const OBJECTS_FOLDER_NAME: &str = "objects";
 
-/// JSON request payload optionally sent by `git-remote-gas` to `doPost(e)`.
-#[derive(Deserialize, Debug)]
+/// Parsed route from the incoming URL path (`/<project_name>.git/...`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GitRoute {
+    /// Root path (`/`) — renders the Gleam + Lustre Web UI dashboard.
+    WebUiRoot,
+    /// Repository root (`/<project_name>.git`) — renders the Web UI focused on `project_name`
+    /// (or handles Git service if explicitly requested via query parameters).
+    WebUiRepo { project_name: String },
+    /// `GET /<project_name>.git/info/refs`
+    InfoRefs { project_name: String },
+    /// `POST /<project_name>.git/git-upload-pack`
+    UploadPack { project_name: String },
+    /// `POST /<project_name>.git/git-receive-pack`
+    ReceivePack { project_name: String },
+}
+
+/// Validate and normalize a repository path segment (e.g. `"my-project.git"` -> `"my-project"`).
+pub fn parse_project_segment(segment: &str) -> Result<String, String> {
+    let trimmed = segment.trim();
+    if trimmed.is_empty() {
+        return Err("Repository name cannot be empty".to_string());
+    }
+    let name = trimmed.strip_suffix(".git").unwrap_or(trimmed);
+    if name.is_empty() || name == "." || name == ".." {
+        return Err(format!("Invalid repository name '{}'", segment));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        return Err(format!(
+            "Invalid repository name '{}': only ASCII alphanumeric, '-', '_', and '.' are allowed",
+            name
+        ));
+    }
+    Ok(name.to_string())
+}
+
+/// Parse a URL path (from `e.pathInfo` or `git_path`) into a `GitRoute`.
+///
+/// Mirrors GitHub's URL layout (`https://github.com/username/project_name.git`) without `username`:
+/// - `/project_name.git/info/refs` -> `GitRoute::InfoRefs { project_name: "project_name" }`
+/// - `/project_name.git/git-upload-pack` -> `GitRoute::UploadPack { project_name: "project_name" }`
+/// - `/project_name.git/git-receive-pack` -> `GitRoute::ReceivePack { project_name: "project_name" }`
+/// - `/project_name.git` -> `GitRoute::WebUiRepo { project_name: "project_name" }`
+/// - `/` or `""` -> `GitRoute::WebUiRoot`
+pub fn parse_git_path(raw_path: &str) -> Result<GitRoute, String> {
+    let without_query = raw_path.split('?').next().unwrap_or("");
+    let segments: Vec<&str> = without_query
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    // Strip leading `/macros/s/<DEPLOYMENT_ID>/exec` or `/macros/s/<DEPLOYMENT_ID>/dev` if present
+    let slice: &[&str] = if segments.len() >= 4
+        && segments[0] == "macros"
+        && segments[1] == "s"
+        && (segments[3] == "exec" || segments[3] == "dev")
+    {
+        &segments[4..]
+    } else if !segments.is_empty() && (segments[0] == "exec" || segments[0] == "dev") {
+        &segments[1..]
+    } else {
+        &segments[..]
+    };
+
+    match slice {
+        [] => Ok(GitRoute::WebUiRoot),
+        [repo_seg, "info", "refs"] => {
+            let project_name = parse_project_segment(repo_seg)?;
+            Ok(GitRoute::InfoRefs { project_name })
+        }
+        [repo_seg, "git-upload-pack"] => {
+            let project_name = parse_project_segment(repo_seg)?;
+            Ok(GitRoute::UploadPack { project_name })
+        }
+        [repo_seg, "git-receive-pack"] => {
+            let project_name = parse_project_segment(repo_seg)?;
+            Ok(GitRoute::ReceivePack { project_name })
+        }
+        ["info", "refs"] | ["git-upload-pack"] | ["git-receive-pack"] => Err(
+            "Missing repository name in URL path. Expected /<project_name>.git/info/refs, /<project_name>.git/git-upload-pack, or /<project_name>.git/git-receive-pack"
+                .to_string(),
+        ),
+        [repo_seg] => {
+            let project_name = parse_project_segment(repo_seg)?;
+            Ok(GitRoute::WebUiRepo { project_name })
+        }
+        other => Err(format!(
+            "Unsupported Git URL path '/{}': expected /<project_name>.git/...",
+            other.join("/")
+        )),
+    }
+}
+
+/// Combine GAS `e.pathInfo` and `git_path` query/envelope parameter into a single normalized request path.
+pub fn extract_request_path(event: &GasDoGetEvent, envelope_git_path: Option<&str>) -> String {
+    let git_path_param = envelope_git_path
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            event
+                .parameter
+                .get("git_path")
+                .map(|s| s.as_str())
+                .filter(|s| !s.trim().is_empty())
+        });
+    let path_info = event
+        .path_info
+        .as_deref()
+        .map(|s| s.trim_matches('/'))
+        .filter(|s| !s.is_empty());
+
+    match (path_info, git_path_param) {
+        (Some(pi), Some(gp)) => {
+            let gp_trimmed = gp.trim_matches('/');
+            if gp_trimmed.starts_with(pi) {
+                format!("/{}", gp_trimmed)
+            } else {
+                format!("/{}/{}", pi, gp_trimmed)
+            }
+        }
+        (None, Some(gp)) => format!("/{}", gp.trim_matches('/')),
+        (Some(pi), None) => format!("/{}", pi),
+        (None, None) => "/".to_string(),
+    }
+}
+
+/// JSON request payload sent by `git-remote-gas` or the Web UI to `doPost(e)`.
+#[derive(Deserialize, Debug, Default)]
 pub struct GasGitPostEnvelope {
+    pub action: Option<String>,
     pub service: Option<String>,
     pub git_path: Option<String>,
     pub repo: Option<String>,
+    pub project_name: Option<String>,
+    pub description: Option<String>,
     pub encoding: Option<String>,
     pub body_base64: Option<String>,
 }
@@ -72,112 +203,286 @@ pub struct GasGitResponseEnvelope {
     pub error: Option<String>,
 }
 
-/// Persistent Git Object and Reference Store backed by Google Apps Script
-/// `PropertiesService.getScriptProperties()` (with optional `DriveApp` offloading for large objects).
+/// Metadata summary of a single Git repository stored in Google Drive (`<GIT_DRIVE_FOLDER_ID>/<name>.git`).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct RepoSummary {
+    pub name: String,
+    pub folder_name: String,
+    pub folder_id: String,
+    pub folder_url: String,
+    pub description: String,
+    pub default_branch: String,
+    pub head_oid: Option<String>,
+    pub branch_count: usize,
+    pub updated_at_ms: i64,
+}
+
+/// JSON payload returned to the Gleam + Lustre Web UI for listing and creating repositories.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct WebUiStateResponse {
+    pub ok: bool,
+    pub drive_folder_configured: bool,
+    pub drive_folder_id: String,
+    pub drive_folder_url: String,
+    pub base_url: String,
+    pub selected_project: Option<String>,
+    pub repositories: Vec<RepoSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Read an environment variable via WASI `wasi:cli/environment` (`std::env::var`)
+/// with fallback to GAS `PropertiesService.getScriptProperties()`.
+pub fn get_env_or_script_property(key: &str) -> Option<String> {
+    if let Ok(val) = std::env::var(key) {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    let props = properties_service::get_script_properties();
+    props
+        .get_property(key)
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// Retrieve the configured Google Drive Root Folder ID (`GIT_DRIVE_FOLDER_ID`).
+pub fn get_root_drive_folder_id() -> Result<String, String> {
+    get_env_or_script_property(ENV_GIT_DRIVE_FOLDER_ID).ok_or_else(|| {
+        format!(
+            "Environment variable '{}' (GAS Script Property) is not configured. \
+             Please set '{}' to the Google Drive Folder ID where Git repositories will be stored.",
+            ENV_GIT_DRIVE_FOLDER_ID, ENV_GIT_DRIVE_FOLDER_ID
+        )
+    })
+}
+
+/// Open the root Google Drive folder registered in `GIT_DRIVE_FOLDER_ID`.
+fn open_root_drive_folder() -> Result<(String, GasFolder), String> {
+    let folder_id = get_root_drive_folder_id()?;
+    let folder = gas_drive_app::get_folder_by_id(&folder_id).ok_or_else(|| {
+        format!(
+            "Google Drive folder for {}='{}' was not found or cannot be accessed.",
+            ENV_GIT_DRIVE_FOLDER_ID, folder_id
+        )
+    })?;
+    Ok((folder_id, folder))
+}
+
+fn find_child_folder_by_name(parent: &GasFolder, name: &str) -> Option<GasFolder> {
+    let iter = parent.get_folders_by_name(name);
+    while iter.has_next() {
+        let f = iter.next();
+        if !f.is_trashed() {
+            return Some(f);
+        }
+    }
+    None
+}
+
+fn find_child_file_by_name(parent: &GasFolder, name: &str) -> Option<GasFile> {
+    let iter = parent.get_files_by_name(name);
+    while iter.has_next() {
+        let f = iter.next();
+        if !f.is_trashed() {
+            return Some(f);
+        }
+    }
+    None
+}
+
+fn read_text_file(parent: &GasFolder, name: &str) -> Option<String> {
+    let file = find_child_file_by_name(parent, name)?;
+    Some(file.get_blob().get_data_as_string(None))
+}
+
+fn write_text_file(parent: &GasFolder, name: &str, content: &str, mime_type: &str) -> GasFile {
+    if let Some(existing) = find_child_file_by_name(parent, name) {
+        existing.set_content(content);
+        existing
+    } else {
+        parent.create_file(CreateFileInput::FromText(TextFileSpec {
+            name: name.to_string(),
+            content: content.to_string(),
+            mime_type: Some(mime_type.to_string()),
+        }))
+    }
+}
+
+/// Persistent Git Object and Reference Store backed by Google Drive (`DriveApp`).
+///
+/// Each project lives in `<GIT_DRIVE_FOLDER_ID>/<project_name>.git/`:
+/// - `HEAD`: Symbolic reference (e.g. `ref: refs/heads/main`)
+/// - `refs.json`: JSON map of `ref_name -> sha1_hex`
+/// - `objects/<sha1_hex>`: Base64-encoded loose Git object (`<kind> <size>\0<body>`)
 pub struct GasGitStore {
-    repo: String,
+    pub repo: String,
+    repo_folder: GasFolder,
+    objects_folder: GasFolder,
+    head_cache: RefCell<String>,
+    refs_cache: RefCell<BTreeMap<String, ObjectId>>,
+    object_cache: RefCell<BTreeMap<ObjectId, Vec<u8>>>,
 }
 
 impl GasGitStore {
-    pub fn new(repo: &str) -> Self {
-        let sanitized: String = repo
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-            .collect();
-        let repo_name = if sanitized.is_empty() {
-            DEFAULT_REPO.to_string()
-        } else {
-            sanitized
-        };
-        Self { repo: repo_name }
-    }
+    /// Open an existing Git repository `<project_name>.git` inside the Google Drive root folder (`GIT_DRIVE_FOLDER_ID`).
+    /// Does NOT auto-create the repository or seed an initial commit.
+    pub fn open(project_name: &str) -> Result<Self, String> {
+        let normalized = parse_project_segment(project_name)?;
+        let (_root_id, root_folder) = open_root_drive_folder()?;
 
-    fn init_key(&self) -> String {
-        format!("git:{}:initialized", self.repo)
-    }
+        let canonical_folder_name = format!("{}.git", normalized);
+        let repo_folder = find_child_folder_by_name(&root_folder, &canonical_folder_name)
+            .or_else(|| find_child_folder_by_name(&root_folder, &normalized))
+            .ok_or_else(|| {
+                format!(
+                    "Repository '{}.git' does not exist in the configured Google Drive folder. \
+                     Please create it from the Web UI first.",
+                    normalized
+                )
+            })?;
 
-    fn head_key(&self) -> String {
-        format!("git:{}:HEAD", self.repo)
-    }
+        let objects_folder = find_child_folder_by_name(&repo_folder, OBJECTS_FOLDER_NAME)
+            .unwrap_or_else(|| repo_folder.create_folder(OBJECTS_FOLDER_NAME));
 
-    fn ref_prefix(&self) -> String {
-        format!("git:{}:ref:", self.repo)
-    }
+        let head_raw = read_text_file(&repo_folder, HEAD_FILE_NAME)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| format!("ref: {}", DEFAULT_BRANCH));
 
-    fn ref_key(&self, ref_name: &str) -> String {
-        format!("git:{}:ref:{}", self.repo, ref_name)
-    }
-
-    fn obj_key(&self, oid: &ObjectId) -> String {
-        format!("git:{}:obj:{}", self.repo, oid.to_hex())
-    }
-
-    /// Ensure the repository has at least an initial commit on `refs/heads/main` so that
-    /// `git ls-remote` and `git clone` work immediately after deploying to GAS.
-    pub fn ensure_initialized(&self) -> Result<ObjectId, String> {
-        let props = properties_service::get_script_properties();
-        if props.get_property(&self.init_key()).as_deref() == Some("true") {
-            if let Some(oid) = self.resolve_ref("HEAD") {
-                return Ok(oid);
+        let mut refs_map = BTreeMap::new();
+        if let Some(refs_json) = read_text_file(&repo_folder, REFS_FILE_NAME) {
+            if let Ok(parsed) = serde_json::from_str::<BTreeMap<String, String>>(&refs_json) {
+                for (k, v) in parsed {
+                    if let Ok(oid) = ObjectId::from_hex(v.trim().as_bytes()) {
+                        refs_map.insert(k, oid);
+                    }
+                }
             }
         }
 
-        // Seed initial commit using gitoxide's gix-object, gix-actor, gix-date, and gix-hash
-        let readme_text = format!(
-            "# GAS Git Server (repository: {})\n\n\
-             This Git repository is hosted on **Google Apps Script** using a Rust WebAssembly Component (`wasm32-wasip2`) and **gitoxide** (`gix-*`).\n\n\
-             ## Supported Commands\n\
-             - `git ls-remote gas::https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec`\n\
-             - `git clone gas::https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec`\n\
-             - `git pull` / `git fetch`\n\
-             - `git push`\n",
-            self.repo
-        );
+        Ok(Self {
+            repo: normalized,
+            repo_folder,
+            objects_folder,
+            head_cache: RefCell::new(head_raw),
+            refs_cache: RefCell::new(refs_map),
+            object_cache: RefCell::new(BTreeMap::new()),
+        })
+    }
 
-        let blob = Blob {
-            data: readme_text.into_bytes(),
-        };
-        let blob_oid = self.write_object(&blob)?;
+    /// Create a new empty Git repository `<project_name>.git` inside the registered Google Drive folder (`GIT_DRIVE_FOLDER_ID`).
+    /// Never generates an automatic initial commit.
+    pub fn create_repository(
+        project_name: &str,
+        description: Option<&str>,
+    ) -> Result<RepoSummary, String> {
+        let normalized = parse_project_segment(project_name)?;
+        let (_root_id, root_folder) = open_root_drive_folder()?;
+        let folder_name = format!("{}.git", normalized);
 
-        let tree = Tree {
-            entries: vec![tree::Entry {
-                mode: EntryKind::Blob.into(),
-                filename: BString::from("README.md"),
-                oid: blob_oid,
-            }],
-        };
-        let tree_oid = self.write_object(&tree)?;
+        if find_child_folder_by_name(&root_folder, &folder_name).is_some()
+            || find_child_folder_by_name(&root_folder, &normalized).is_some()
+        {
+            return Err(format!("Repository '{}' already exists.", folder_name));
+        }
 
-        let sig = Signature {
-            name: BString::from("GAS Git Server (gitoxide)"),
-            email: BString::from("gitoxide-gas@script.google.com"),
-            time: Time::new(1_700_000_000, 0),
-        };
-        let commit = Commit {
-            tree: tree_oid,
-            parents: Default::default(),
-            author: sig.clone(),
-            committer: sig,
-            encoding: None,
-            message: BString::from("Initial commit from gitoxide on Google Apps Script\n"),
-            extra_headers: Vec::new(),
-        };
-        let commit_oid = self.write_object(&commit)?;
+        let repo_folder = root_folder.create_folder(&folder_name);
+        let clean_desc = description.map(|d| d.trim()).unwrap_or("");
+        if !clean_desc.is_empty() {
+            repo_folder.set_description(clean_desc);
+        }
 
-        props.set_property(&self.ref_key(DEFAULT_BRANCH), &commit_oid.to_hex().to_string());
-        props.set_property(&self.head_key(), &format!("ref: {}", DEFAULT_BRANCH));
-        props.set_property(&self.init_key(), "true");
+        let head_content = format!("ref: {}\n", DEFAULT_BRANCH);
+        write_text_file(&repo_folder, HEAD_FILE_NAME, &head_content, "text/plain");
+        write_text_file(&repo_folder, REFS_FILE_NAME, "{}\n", "application/json");
+        repo_folder.create_folder(OBJECTS_FOLDER_NAME);
 
         logger::log(&format!(
-            "[gitoxide-gas] Initialized repository '{}' with commit {}",
-            self.repo,
-            commit_oid.to_hex()
+            "[gitoxide-gas] Created empty repository '{}' in Google Drive (folder_id={})",
+            folder_name,
+            repo_folder.get_id()
         ));
-        Ok(commit_oid)
+
+        Ok(Self::summarize_folder(&normalized, &repo_folder))
+    }
+
+    /// List all Git repositories stored inside the registered Google Drive folder (`GIT_DRIVE_FOLDER_ID`).
+    pub fn list_repositories() -> Result<Vec<RepoSummary>, String> {
+        let (_root_id, root_folder) = open_root_drive_folder()?;
+        let iter = root_folder.get_folders();
+        let mut repos = Vec::new();
+
+        while iter.has_next() {
+            let folder = iter.next();
+            if folder.is_trashed() {
+                continue;
+            }
+            let raw_name = folder.get_name();
+            let project_name = if let Some(stripped) = raw_name.strip_suffix(".git") {
+                if stripped.is_empty() {
+                    continue;
+                }
+                stripped.to_string()
+            } else if find_child_file_by_name(&folder, HEAD_FILE_NAME).is_some()
+                || find_child_file_by_name(&folder, REFS_FILE_NAME).is_some()
+            {
+                raw_name.clone()
+            } else {
+                continue;
+            };
+
+            repos.push(Self::summarize_folder(&project_name, &folder));
+        }
+
+        repos.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(repos)
+    }
+
+    fn summarize_folder(project_name: &str, folder: &GasFolder) -> RepoSummary {
+        let head_raw = read_text_file(folder, HEAD_FILE_NAME)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| format!("ref: {}", DEFAULT_BRANCH));
+        let default_branch = head_raw
+            .strip_prefix("ref:")
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| DEFAULT_BRANCH.to_string());
+
+        let mut refs_map: BTreeMap<String, String> = BTreeMap::new();
+        if let Some(refs_json) = read_text_file(folder, REFS_FILE_NAME) {
+            if let Ok(parsed) = serde_json::from_str::<BTreeMap<String, String>>(&refs_json) {
+                refs_map = parsed;
+            }
+        }
+
+        let head_oid = refs_map
+            .get(&default_branch)
+            .cloned()
+            .or_else(|| refs_map.values().next().cloned());
+        let branch_count = refs_map
+            .keys()
+            .filter(|k| k.starts_with("refs/heads/"))
+            .count();
+
+        RepoSummary {
+            name: project_name.to_string(),
+            folder_name: folder.get_name(),
+            folder_id: folder.get_id(),
+            folder_url: folder.get_url(),
+            description: folder.get_description().unwrap_or_default(),
+            default_branch,
+            head_oid,
+            branch_count,
+            updated_at_ms: folder.get_last_updated(),
+        }
     }
 
     /// Serialize any `gix_object::WriteTo` implementation into loose object format (`<kind> <size>\0<body>`),
-    /// compute its SHA-1 `ObjectId` via `gix_object::compute_hash`, and persist it in GAS storage.
+    /// compute its SHA-1 `ObjectId` via `gix_object::compute_hash`, and persist it in the repository's Drive `objects/` folder.
     pub fn write_object(&self, object: &dyn WriteTo) -> Result<ObjectId, String> {
         let mut body = Vec::with_capacity(object.size() as usize);
         object
@@ -186,7 +491,7 @@ impl GasGitStore {
         self.write_raw_object(object.kind(), &body)
     }
 
-    /// Compute SHA-1 `ObjectId` for `(kind, body)` and store the loose object in GAS storage.
+    /// Compute SHA-1 `ObjectId` for `(kind, body)` and store the loose object inside `<repo>.git/objects/<oid>` on Google Drive.
     pub fn write_raw_object(&self, kind: ObjectKind, body: &[u8]) -> Result<ObjectId, String> {
         let oid = gix_object::compute_hash(HashKind::Sha1, kind, body)
             .map_err(|e| format!("Failed to compute SHA-1 hash: {}", e))?;
@@ -196,42 +501,38 @@ impl GasGitStore {
         loose_bytes.extend_from_slice(&header);
         loose_bytes.extend_from_slice(body);
 
-        let b64 = gas_utilities::base64_encode(&BinaryOrStringInput::Bytes(loose_bytes));
-        let props = properties_service::get_script_properties();
-
-        // If the object is large and GIT_DRIVE_FOLDER_ID is configured, offload to DriveApp
-        if b64.len() > DRIVE_OFFLOAD_THRESHOLD {
-            if let Some(folder_id) = props.get_property("GIT_DRIVE_FOLDER_ID") {
-                if !folder_id.is_empty() {
-                    if let Some(folder) = gas_drive_app::get_folder_by_id(&folder_id) {
-                        let file = folder.create_file(CreateFileInput::FromText(TextFileSpec {
-                            name: format!("git_obj_{}_{}.b64", self.repo, oid.to_hex()),
-                            content: b64,
-                            mime_type: Some("text/plain".to_string()),
-                        }));
-                        let file_id = file.get_id();
-                        props.set_property(&self.obj_key(&oid), &format!("drive:{}", file_id));
-                        return Ok(oid);
-                    }
-                }
-            }
+        if self.object_cache.borrow().contains_key(&oid) {
+            return Ok(oid);
         }
 
-        props.set_property(&self.obj_key(&oid), &b64);
+        let oid_hex = oid.to_hex().to_string();
+        if find_child_file_by_name(&self.objects_folder, &oid_hex).is_none() {
+            let b64 = gas_utilities::base64_encode(&BinaryOrStringInput::Bytes(loose_bytes.clone()));
+            self.objects_folder
+                .create_file(CreateFileInput::FromText(TextFileSpec {
+                    name: oid_hex,
+                    content: b64,
+                    mime_type: Some("text/plain".to_string()),
+                }));
+        }
+
+        self.object_cache.borrow_mut().insert(oid, loose_bytes);
         Ok(oid)
     }
 
-    /// Read loose object bytes (`<kind> <size>\0<body>`) by `ObjectId`.
+    /// Read loose object bytes (`<kind> <size>\0<body>`) by `ObjectId` from `<repo>.git/objects/<oid>` in Google Drive.
     pub fn read_loose_object(&self, oid: &ObjectId) -> Option<Vec<u8>> {
-        let props = properties_service::get_script_properties();
-        let val = props.get_property(&self.obj_key(oid))?;
-        let b64 = if let Some(file_id) = val.strip_prefix("drive:") {
-            let file = gas_drive_app::get_file_by_id(file_id)?;
-            file.get_blob().get_data_as_string(None)
-        } else {
-            val
-        };
-        Some(gas_utilities::base64_decode(&b64, None))
+        if let Some(cached) = self.object_cache.borrow().get(oid) {
+            return Some(cached.clone());
+        }
+
+        let oid_hex = oid.to_hex().to_string();
+        let file = find_child_file_by_name(&self.objects_folder, &oid_hex)
+            .or_else(|| find_child_file_by_name(&self.repo_folder, &oid_hex))?;
+        let b64 = file.get_blob().get_data_as_string(None);
+        let decoded = gas_utilities::base64_decode(b64.trim(), None);
+        self.object_cache.borrow_mut().insert(*oid, decoded.clone());
+        Some(decoded)
     }
 
     /// Read and decode `(ObjectKind, Vec<u8>)` (body without loose header) for `oid`.
@@ -255,25 +556,12 @@ impl GasGitStore {
 
     /// List all references (`refs/...`) in sorted order.
     pub fn list_refs(&self) -> BTreeMap<String, ObjectId> {
-        let props = properties_service::get_script_properties();
-        let prefix = self.ref_prefix();
-        let mut refs = BTreeMap::new();
-        for (k, v) in props.get_properties() {
-            if let Some(ref_name) = k.strip_prefix(&prefix) {
-                if let Ok(oid) = ObjectId::from_hex(v.trim().as_bytes()) {
-                    refs.insert(ref_name.to_string(), oid);
-                }
-            }
-        }
-        refs
+        self.refs_cache.borrow().clone()
     }
 
     /// Return the symbolic target of `HEAD` (e.g. `Some("refs/heads/main")`) if `HEAD` is a symref.
     pub fn head_symref(&self) -> Option<String> {
-        let props = properties_service::get_script_properties();
-        let head_val = props
-            .get_property(&self.head_key())
-            .unwrap_or_else(|| format!("ref: {}", DEFAULT_BRANCH));
+        let head_val = self.head_cache.borrow().clone();
         head_val
             .strip_prefix("ref:")
             .map(|target| target.trim().to_string())
@@ -281,48 +569,68 @@ impl GasGitStore {
 
     /// Resolve a reference name (`HEAD` or `refs/...`) to its `ObjectId`.
     pub fn resolve_ref(&self, name: &str) -> Option<ObjectId> {
-        let props = properties_service::get_script_properties();
         if name == "HEAD" {
             if let Some(sym) = self.head_symref() {
                 if let Some(oid) = self.resolve_ref(&sym) {
                     return Some(oid);
                 }
             }
-            if let Some(raw) = props.get_property(&self.head_key()) {
-                if let Ok(oid) = ObjectId::from_hex(raw.trim().as_bytes()) {
-                    return Some(oid);
-                }
+            let head_raw = self.head_cache.borrow().clone();
+            if let Ok(oid) = ObjectId::from_hex(head_raw.trim().as_bytes()) {
+                return Some(oid);
             }
-            // Fallback to first available branch if HEAD target doesn't exist yet
-            return self.list_refs().values().next().copied();
+            return self.refs_cache.borrow().values().next().copied();
         }
-        let hex = props.get_property(&self.ref_key(name))?;
-        ObjectId::from_hex(hex.trim().as_bytes()).ok()
+        self.refs_cache.borrow().get(name).copied()
     }
 
-    /// Update or delete a reference.
+    /// Update or delete a reference and persist `refs.json` (and `HEAD` if needed) in Google Drive.
     pub fn update_ref(&self, ref_name: &str, new_oid: &ObjectId) -> Result<(), String> {
         gix_validate::reference::name(ref_name.as_bytes().as_bstr())
             .map_err(|e| format!("Invalid reference name '{}': {}", ref_name, e))?;
 
-        let props = properties_service::get_script_properties();
-        if new_oid.is_null() {
-            props.delete_property(&self.ref_key(ref_name));
-        } else {
-            props.set_property(&self.ref_key(ref_name), &new_oid.to_hex().to_string());
-            // If HEAD points to a branch that didn't exist yet, point HEAD to this branch
-            if ref_name.starts_with("refs/heads/") {
-                if self.resolve_ref("HEAD").is_none() {
-                    props.set_property(&self.head_key(), &format!("ref: {}", ref_name));
-                }
+        let should_update_head = {
+            let mut refs = self.refs_cache.borrow_mut();
+            if new_oid.is_null() {
+                refs.remove(ref_name);
+                false
+            } else {
+                refs.insert(ref_name.to_string(), *new_oid);
+                ref_name.starts_with("refs/heads/")
+                    && self
+                        .head_symref()
+                        .map(|sym| !refs.contains_key(&sym))
+                        .unwrap_or(true)
             }
+        };
+
+        let serialized_map: BTreeMap<String, String> = self
+            .refs_cache
+            .borrow()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.to_hex().to_string()))
+            .collect();
+        let json = serde_json::to_string_pretty(&serialized_map)
+            .map_err(|e| format!("Failed to serialize refs.json: {}", e))?;
+        write_text_file(&self.repo_folder, REFS_FILE_NAME, &json, "application/json");
+
+        if should_update_head {
+            let new_head = format!("ref: {}", ref_name);
+            *self.head_cache.borrow_mut() = new_head.clone();
+            write_text_file(
+                &self.repo_folder,
+                HEAD_FILE_NAME,
+                &format!("{}\n", new_head),
+                "text/plain",
+            );
         }
+
         Ok(())
     }
 }
 
-/// Handle `GET /info/refs?service=git-upload-pack` or `git-receive-pack` using `gix_packetline`.
-pub fn handle_info_refs(service: &str, repo: &str) -> Result<Vec<u8>, String> {
+/// Handle `GET /<project_name>.git/info/refs?service=git-upload-pack` or `git-receive-pack` using `gix_packetline`.
+pub fn handle_info_refs(service: &str, project_name: &str) -> Result<Vec<u8>, String> {
     if service != "git-upload-pack" && service != "git-receive-pack" {
         return Err(format!(
             "Unsupported Git Smart HTTP service '{}': expected 'git-upload-pack' or 'git-receive-pack'",
@@ -330,9 +638,7 @@ pub fn handle_info_refs(service: &str, repo: &str) -> Result<Vec<u8>, String> {
         ));
     }
 
-    let store = GasGitStore::new(repo);
-    store.ensure_initialized()?;
-
+    let store = GasGitStore::open(project_name)?;
     let refs = store.list_refs();
     let head_sym = store
         .head_symref()
@@ -340,7 +646,6 @@ pub fn handle_info_refs(service: &str, repo: &str) -> Result<Vec<u8>, String> {
     let head_oid = store.resolve_ref("HEAD");
 
     let mut out = Vec::with_capacity(512);
-    // Smart HTTP v1 service header preamble
     let header_line = format!("# service={}", service);
     pkt_encode::text_to_write(header_line.as_bytes(), &mut out)
         .map_err(|e| format!("pkt-line encode error: {}", e))?;
@@ -348,11 +653,11 @@ pub fn handle_info_refs(service: &str, repo: &str) -> Result<Vec<u8>, String> {
 
     let capabilities = if service == "git-upload-pack" {
         format!(
-            "multi_ack thin-pack side-band side-band-64k ofs-delta shallow no-progress include-tag allow-tip-sha1-in-want allow-reachable-sha1-in-want symref=HEAD:{} object-format=sha1 agent=gitoxide-gas/0.1.0",
+            "multi_ack thin-pack side-band side-band-64k ofs-delta shallow no-progress include-tag allow-tip-sha1-in-want allow-reachable-sha1-in-want symref=HEAD:{} object-format=sha1 agent=gitoxide-gas/0.2.0",
             head_sym
         )
     } else {
-        "report-status delete-refs side-band-64k quiet atomic ofs-delta object-format=sha1 agent=gitoxide-gas/0.1.0"
+        "report-status delete-refs side-band-64k quiet atomic ofs-delta object-format=sha1 agent=gitoxide-gas/0.2.0"
             .to_string()
     };
 
@@ -365,6 +670,7 @@ pub fn handle_info_refs(service: &str, repo: &str) -> Result<Vec<u8>, String> {
     }
 
     if advertised.is_empty() {
+        // Empty repository (0 commits): advertise capabilities on zero-OID capabilities^{}
         let zero_oid = ObjectId::null(HashKind::Sha1);
         let first_line = format!("{} capabilities^{{}}\0{}", zero_oid.to_hex(), capabilities);
         pkt_encode::text_to_write(first_line.as_bytes(), &mut out)
@@ -385,12 +691,9 @@ pub fn handle_info_refs(service: &str, repo: &str) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-/// Handle `POST /git-upload-pack` (`git fetch`, `git clone`, `git pull`).
-/// Parses `want` and `have` packet-lines via `gix_packetline`, traverses reachable objects via
-/// `gix_object::ObjectRef::from_loose`, and builds a zlib-compressed `PACK` v2 stream with `gix_zlib` & `gix_hash`.
-pub fn handle_upload_pack(req_body: &[u8], repo: &str) -> Result<Vec<u8>, String> {
-    let store = GasGitStore::new(repo);
-    store.ensure_initialized()?;
+/// Handle `POST /<project_name>.git/git-upload-pack` (`git fetch`, `git clone`, `git pull`).
+pub fn handle_upload_pack(req_body: &[u8], project_name: &str) -> Result<Vec<u8>, String> {
+    let store = GasGitStore::open(project_name)?;
 
     let mut wants: Vec<ObjectId> = Vec::new();
     let mut haves: BTreeSet<ObjectId> = BTreeSet::new();
@@ -406,7 +709,6 @@ pub fn handle_upload_pack(req_body: &[u8], repo: &str) -> Result<Vec<u8>, String
                 .map_err(|e| format!("upload-pack decode error: {}", e))?;
             if let Some(text) = pkt.as_text() {
                 let raw = text.as_slice();
-                // First `want` line may contain NUL-separated or space-separated capabilities
                 let (main_part, cap_part) = match raw.find_byte(0) {
                     Some(nul_idx) => (&raw[..nul_idx], Some(&raw[nul_idx + 1..])),
                     None => (raw, None),
@@ -461,7 +763,6 @@ pub fn handle_upload_pack(req_body: &[u8], repo: &str) -> Result<Vec<u8>, String
         }
     }
 
-    // Determine common ancestors already known to the client
     let mut excluded_oids: BTreeSet<ObjectId> = BTreeSet::new();
     let mut first_common_have: Option<ObjectId> = None;
     for have_oid in &haves {
@@ -473,7 +774,6 @@ pub fn handle_upload_pack(req_body: &[u8], repo: &str) -> Result<Vec<u8>, String
         }
     }
 
-    // Traverse all objects reachable from `wants` that are not in `excluded_oids`
     let mut objects_to_send: Vec<(ObjectId, ObjectKind, Vec<u8>)> = Vec::new();
     let mut visited: BTreeSet<ObjectId> = excluded_oids;
     let mut queue: VecDeque<ObjectId> = wants.iter().copied().collect();
@@ -489,7 +789,6 @@ pub fn handle_upload_pack(req_body: &[u8], repo: &str) -> Result<Vec<u8>, String
             .map_err(|e| format!("Failed to decode loose header for {}: {}", oid.to_hex(), e))?;
         let body = loose_bytes[offset..offset + (size as usize)].to_vec();
 
-        // Parse object with gitoxide's ObjectRef::from_loose to enqueue referenced child objects
         let obj_ref = ObjectRef::from_loose(&loose_bytes)
             .map_err(|e| format!("Failed to parse object {}: {}", oid.to_hex(), e))?;
         match obj_ref {
@@ -555,7 +854,6 @@ pub fn handle_upload_pack(req_body: &[u8], repo: &str) -> Result<Vec<u8>, String
     Ok(out)
 }
 
-/// Collect all reachable objects from `root` into `visited` (used for `have` exclusion).
 fn collect_reachable_objects(
     store: &GasGitStore,
     root: ObjectId,
@@ -593,10 +891,8 @@ fn collect_reachable_objects(
     Ok(())
 }
 
-/// Build a Git `PACK` v2 binary stream using `gix_zlib::stream::deflate::Write` and `gix_hash::hasher`.
 fn build_pack_v2(objects: &[(ObjectId, ObjectKind, Vec<u8>)]) -> Result<Vec<u8>, String> {
     let mut pack = Vec::with_capacity(12 + objects.len() * 128 + 20);
-    // 12-byte PACK v2 header: "PACK" + version (2) + num_objects
     pack.extend_from_slice(b"PACK");
     pack.extend_from_slice(&2u32.to_be_bytes());
     pack.extend_from_slice(&(objects.len() as u32).to_be_bytes());
@@ -621,7 +917,6 @@ fn build_pack_v2(objects: &[(ObjectId, ObjectKind, Vec<u8>)]) -> Result<Vec<u8>,
         pack.extend_from_slice(&compressed);
     }
 
-    // Append 20-byte SHA-1 checksum of the entire pack using gitoxide's gix_hash::hasher
     let mut hasher = gix_hash::hasher(HashKind::Sha1);
     hasher.update(&pack);
     let checksum = hasher
@@ -632,7 +927,6 @@ fn build_pack_v2(objects: &[(ObjectId, ObjectKind, Vec<u8>)]) -> Result<Vec<u8>,
     Ok(pack)
 }
 
-/// Encode Git PACK variable-length object type and uncompressed size header.
 fn encode_pack_obj_header(type_id: u8, mut size: usize, out: &mut Vec<u8>) {
     let mut byte = ((type_id & 0x07) << 4) | ((size & 0x0f) as u8);
     size >>= 4;
@@ -651,15 +945,18 @@ struct RefUpdateCommand {
     ref_name: String,
 }
 
-/// Handle `POST /git-receive-pack` (`git push`).
-/// Reads ref update commands via `gix_packetline`, unpacks and verifies incoming `PACK` v2 objects
-/// via `gix_zlib` + `gix_object` + `gix_hash`, validates ref names via `gix_validate`, and returns `report-status`.
-pub fn handle_receive_pack(req_body: &[u8], repo: &str) -> Result<Vec<u8>, String> {
+/// Handle `POST /<project_name>.git/git-receive-pack` (`git push`).
+pub fn handle_receive_pack(req_body: &[u8], project_name: &str) -> Result<Vec<u8>, String> {
     let lock = gas_lock_service::get_script_lock();
     let _locked = lock.try_lock(10_000);
 
-    let store = GasGitStore::new(repo);
-    store.ensure_initialized()?;
+    let store = match GasGitStore::open(project_name) {
+        Ok(s) => s,
+        Err(e) => {
+            lock.release_lock();
+            return Err(e);
+        }
+    };
 
     let mut commands: Vec<RefUpdateCommand> = Vec::new();
     let mut client_caps: BTreeSet<String> = BTreeSet::new();
@@ -668,9 +965,17 @@ pub fn handle_receive_pack(req_body: &[u8], repo: &str) -> Result<Vec<u8>, Strin
     {
         let mut reader = StreamingPeekableIter::new(&mut cursor, &[PacketLineRef::Flush], false);
         while let Some(line_res) = reader.read_line() {
-            let pkt = line_res
-                .map_err(|e| format!("receive-pack io error: {}", e))?
-                .map_err(|e| format!("receive-pack decode error: {}", e))?;
+            let pkt = match line_res {
+                Ok(Ok(p)) => p,
+                Ok(Err(e)) => {
+                    lock.release_lock();
+                    return Err(format!("receive-pack decode error: {}", e));
+                }
+                Err(e) => {
+                    lock.release_lock();
+                    return Err(format!("receive-pack io error: {}", e));
+                }
+            };
             if let Some(slice) = pkt.as_slice() {
                 let slice = slice.strip_suffix(b"\n").unwrap_or(slice);
                 let (cmd_part, cap_part) = match slice.find_byte(0) {
@@ -687,10 +992,14 @@ pub fn handle_receive_pack(req_body: &[u8], repo: &str) -> Result<Vec<u8>, Strin
                 if let (Some(old_hex), Some(new_hex), Some(ref_name)) =
                     (parts.next(), parts.next(), parts.next())
                 {
-                    let old_oid = ObjectId::from_hex(old_hex.as_bytes())
-                        .map_err(|e| format!("Invalid old OID '{}': {}", old_hex, e))?;
-                    let new_oid = ObjectId::from_hex(new_hex.as_bytes())
-                        .map_err(|e| format!("Invalid new OID '{}': {}", new_hex, e))?;
+                    let old_oid = ObjectId::from_hex(old_hex.as_bytes()).map_err(|e| {
+                        lock.release_lock();
+                        format!("Invalid old OID '{}': {}", old_hex, e)
+                    })?;
+                    let new_oid = ObjectId::from_hex(new_hex.as_bytes()).map_err(|e| {
+                        lock.release_lock();
+                        format!("Invalid new OID '{}': {}", new_hex, e)
+                    })?;
                     commands.push(RefUpdateCommand {
                         old_oid,
                         new_oid,
@@ -725,12 +1034,10 @@ pub fn handle_receive_pack(req_body: &[u8], repo: &str) -> Result<Vec<u8>, Strin
             ref_statuses.push(format!("ng {} unpacker failed", cmd.ref_name));
             continue;
         }
-        // Validate ref name using gitoxide's gix_validate
         if let Err(e) = gix_validate::reference::name(cmd.ref_name.as_bytes().as_bstr()) {
             ref_statuses.push(format!("ng {} invalid refname ({})", cmd.ref_name, e));
             continue;
         }
-        // Check old_oid matches current server state (if not zero-oid creation)
         let current_oid = store
             .resolve_ref(&cmd.ref_name)
             .unwrap_or_else(|| ObjectId::null(HashKind::Sha1));
@@ -751,7 +1058,6 @@ pub fn handle_receive_pack(req_body: &[u8], repo: &str) -> Result<Vec<u8>, Strin
 
     lock.release_lock();
 
-    // Encode report-status lines using gix_packetline
     let mut status_pkt = Vec::with_capacity(256);
     pkt_encode::text_to_write(unpack_status.as_bytes(), &mut status_pkt)
         .map_err(|e| format!("pkt-line encode error: {}", e))?;
@@ -776,8 +1082,6 @@ pub fn handle_receive_pack(req_body: &[u8], repo: &str) -> Result<Vec<u8>, Strin
     }
 }
 
-/// Unpack a Git `PACK` v2 stream using `gix_zlib::Inflate`, `gix_hash`, and `gix_object`,
-/// resolving both base objects (`Commit`, `Tree`, `Blob`, `Tag`) and delta objects (`OFS_DELTA`, `REF_DELTA`).
 fn unpack_pack_v2(pack: &[u8], store: &GasGitStore) -> Result<usize, String> {
     if pack.len() < 32 {
         return Err(format!("pack too short ({} bytes)", pack.len()));
@@ -808,7 +1112,6 @@ fn unpack_pack_v2(pack: &[u8], store: &GasGitStore) -> Result<usize, String> {
 
     let mut pos = 12usize;
     let mut inflate = Inflate::default();
-    // Map of pack byte offset -> (ObjectKind, Vec<u8>, ObjectId) for OFS_DELTA resolution
     let mut by_offset: BTreeMap<usize, (ObjectKind, Vec<u8>, ObjectId)> = BTreeMap::new();
     let mut by_oid: BTreeMap<ObjectId, (ObjectKind, Vec<u8>)> = BTreeMap::new();
 
@@ -850,16 +1153,13 @@ fn unpack_pack_v2(pack: &[u8], store: &GasGitStore) -> Result<usize, String> {
                     inflate_pack_entry(&mut inflate, &pack[pos..data_end], uncompressed_size)?;
                 pos += consumed;
 
-                // Validate with gitoxide ObjectRef::from_bytes and persist
-                ObjectRef::from_bytes(kind, &decompressed).map_err(|e| {
-                    format!("invalid {} object in pack: {}", kind, e)
-                })?;
+                ObjectRef::from_bytes(kind, &decompressed)
+                    .map_err(|e| format!("invalid {} object in pack: {}", kind, e))?;
                 let oid = store.write_raw_object(kind, &decompressed)?;
                 by_offset.insert(entry_start, (kind, decompressed.clone(), oid));
                 by_oid.insert(oid, (kind, decompressed));
             }
             6 => {
-                // OBJ_OFS_DELTA: negative byte offset from `entry_start`
                 if pos >= data_end {
                     return Err("truncated OFS_DELTA header".to_string());
                 }
@@ -887,15 +1187,13 @@ fn unpack_pack_v2(pack: &[u8], store: &GasGitStore) -> Result<usize, String> {
                 pos += consumed;
 
                 let target_data = apply_git_delta(&base_data, &delta_bytes)?;
-                ObjectRef::from_bytes(base_kind, &target_data).map_err(|e| {
-                    format!("invalid delta-reconstructed {} object: {}", base_kind, e)
-                })?;
+                ObjectRef::from_bytes(base_kind, &target_data)
+                    .map_err(|e| format!("invalid delta-reconstructed {} object: {}", base_kind, e))?;
                 let oid = store.write_raw_object(base_kind, &target_data)?;
                 by_offset.insert(entry_start, (base_kind, target_data.clone(), oid));
                 by_oid.insert(oid, (base_kind, target_data));
             }
             7 => {
-                // OBJ_REF_DELTA: 20-byte base ObjectId
                 if pos + 20 > data_end {
                     return Err("truncated REF_DELTA base OID".to_string());
                 }
@@ -918,9 +1216,8 @@ fn unpack_pack_v2(pack: &[u8], store: &GasGitStore) -> Result<usize, String> {
                 pos += consumed;
 
                 let target_data = apply_git_delta(&base_data, &delta_bytes)?;
-                ObjectRef::from_bytes(base_kind, &target_data).map_err(|e| {
-                    format!("invalid REF_DELTA {} object: {}", base_kind, e)
-                })?;
+                ObjectRef::from_bytes(base_kind, &target_data)
+                    .map_err(|e| format!("invalid REF_DELTA {} object: {}", base_kind, e))?;
                 let oid = store.write_raw_object(base_kind, &target_data)?;
                 by_offset.insert(entry_start, (base_kind, target_data.clone(), oid));
                 by_oid.insert(oid, (base_kind, target_data));
@@ -934,7 +1231,6 @@ fn unpack_pack_v2(pack: &[u8], store: &GasGitStore) -> Result<usize, String> {
     Ok(num_objects)
 }
 
-/// Inflate a single zlib-compressed entry from `input` of known `expected_size` using `gix_zlib::Inflate`.
 fn inflate_pack_entry(
     inflate: &mut Inflate,
     input: &[u8],
@@ -955,7 +1251,6 @@ fn inflate_pack_entry(
     Ok((out, consumed_in))
 }
 
-/// Apply a standard Git pack delta instruction stream to `base`.
 fn apply_git_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, String> {
     let mut pos = 0usize;
     let src_size = read_delta_varint(delta, &mut pos)?;
@@ -973,7 +1268,6 @@ fn apply_git_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, String> {
         let cmd = delta[pos];
         pos += 1;
         if cmd & 0x80 != 0 {
-            // Copy from base
             let mut cp_off = 0usize;
             let mut cp_size = 0usize;
             if cmd & 0x01 != 0 {
@@ -1012,7 +1306,6 @@ fn apply_git_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, String> {
             }
             out.extend_from_slice(&base[cp_off..cp_off + cp_size]);
         } else if cmd != 0 {
-            // Insert literal bytes from delta
             let len = cmd as usize;
             if pos + len > delta.len() {
                 return Err("delta literal insert out of bounds".to_string());
@@ -1051,39 +1344,105 @@ fn read_delta_varint(data: &[u8], pos: &mut usize) -> Result<usize, String> {
     }
 }
 
-/// Route a GAS `doGet(e)` event if it targets the Git Smart HTTP v1 server.
-/// Returns `Some(GasTextOutput)` if `service` or `git_path` is present, or `None` for non-Git `doGet` requests.
-pub fn try_handle_do_get(event: &GasDoGetEvent) -> Option<GasTextOutput> {
-    let service = event
-        .parameter
-        .get("service")
-        .map(|s| s.as_str())
-        .or_else(|| {
-            match event.parameter.get("git_path").map(|s| s.as_str()) {
-                Some(p) if p.contains("git-upload-pack") => Some("git-upload-pack"),
-                Some(p) if p.contains("git-receive-pack") => Some("git-receive-pack"),
-                _ => None,
+/// Build the `WebUiStateResponse` containing all existing repositories in `GIT_DRIVE_FOLDER_ID`.
+pub fn build_web_ui_state(
+    selected_project: Option<String>,
+    message: Option<String>,
+) -> WebUiStateResponse {
+    let base_url = get_env_or_script_property(ENV_GAS_WEB_APP_URL)
+        .unwrap_or_else(|| "https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec".to_string());
+
+    match open_root_drive_folder() {
+        Ok((folder_id, root_folder)) => {
+            let folder_url = root_folder.get_url();
+            match GasGitStore::list_repositories() {
+                Ok(repos) => WebUiStateResponse {
+                    ok: true,
+                    drive_folder_configured: true,
+                    drive_folder_id: folder_id,
+                    drive_folder_url: folder_url,
+                    base_url,
+                    selected_project,
+                    repositories: repos,
+                    message,
+                    error: None,
+                },
+                Err(err) => WebUiStateResponse {
+                    ok: false,
+                    drive_folder_configured: true,
+                    drive_folder_id: folder_id,
+                    drive_folder_url: folder_url,
+                    base_url,
+                    selected_project,
+                    repositories: Vec::new(),
+                    message: None,
+                    error: Some(err),
+                },
             }
-        })?;
+        }
+        Err(err) => WebUiStateResponse {
+            ok: false,
+            drive_folder_configured: false,
+            drive_folder_id: String::new(),
+            drive_folder_url: String::new(),
+            base_url,
+            selected_project,
+            repositories: Vec::new(),
+            message: None,
+            error: Some(err),
+        },
+    }
+}
 
-    let repo = event
-        .parameter
-        .get("repo")
-        .map(|s| s.as_str())
-        .unwrap_or(DEFAULT_REPO);
-    let encoding = event
-        .parameter
-        .get("encoding")
-        .map(|s| s.as_str())
-        .unwrap_or("raw");
-    let format = event
-        .parameter
-        .get("format")
-        .map(|s| s.as_str())
-        .unwrap_or("text");
+/// Serialize the current repository list state as JSON (used by `git_list_repos` and `?action=list_repos`).
+pub fn list_repos_json(selected_project: Option<String>) -> String {
+    let state = build_web_ui_state(selected_project, None);
+    serde_json::to_string(&state).unwrap_or_else(|_| "{}".to_string())
+}
 
+/// Create a new empty repository in Google Drive and return the updated `WebUiStateResponse` as JSON.
+pub fn create_repo_json(project_name: &str, description: Option<&str>) -> String {
+    match GasGitStore::create_repository(project_name, description) {
+        Ok(summary) => {
+            let msg = format!(
+                "Repository '{}.git' created in Google Drive.",
+                summary.name
+            );
+            let state = build_web_ui_state(Some(summary.name), Some(msg));
+            serde_json::to_string(&state).unwrap_or_else(|_| "{}".to_string())
+        }
+        Err(err) => {
+            let mut state = build_web_ui_state(None, None);
+            state.ok = false;
+            state.error = Some(err);
+            serde_json::to_string(&state).unwrap_or_else(|_| "{}".to_string())
+        }
+    }
+}
+
+/// Render the Gleam + Lustre Web UI HTML output with hydrated initial state.
+pub fn render_web_ui_html(selected_project: Option<String>) -> GasHtmlOutput {
+    let initial_state_json = list_repos_json(selected_project);
+    let template = include_str!("../dist/index.html");
+    let state_script = format!(
+        "<script>window.__GAS_GIT_INITIAL_STATE__ = {};</script>\n\t</head>",
+        initial_state_json
+    );
+    let html_str = template.replace("</head>", &state_script);
+    gas_html_service::create_html_output(Some(HtmlSource::Html(html_str)))
+        .set_title("GAS Git Server")
+        .set_sandbox_mode(SandboxMode::Iframe)
+        .set_x_frame_options_mode(XFrameOptionsMode::Allowall)
+}
+
+fn format_info_refs_output(
+    service: &str,
+    project_name: &str,
+    encoding: &str,
+    format: &str,
+) -> GasTextOutput {
     let content_type = format!("application/x-{}-advertisement", service);
-    match handle_info_refs(service, repo) {
+    match handle_info_refs(service, project_name) {
         Ok(bytes) => {
             if format == "json" {
                 let b64 = gas_utilities::base64_encode(&BinaryOrStringInput::Bytes(bytes));
@@ -1095,37 +1454,142 @@ pub fn try_handle_do_get(event: &GasDoGetEvent) -> Option<GasTextOutput> {
                     error: None,
                 };
                 let json = serde_json::to_string(&env).unwrap_or_default();
-                Some(gas_content_service::create_text_output(&json).set_mime_type(MimeType::Json))
+                gas_content_service::create_text_output(&json).set_mime_type(MimeType::Json)
             } else if encoding == "base64" {
                 let b64 = gas_utilities::base64_encode(&BinaryOrStringInput::Bytes(bytes));
-                Some(gas_content_service::create_text_output(&b64).set_mime_type(MimeType::Text))
+                gas_content_service::create_text_output(&b64).set_mime_type(MimeType::Text)
             } else {
                 let text = String::from_utf8_lossy(&bytes);
-                Some(gas_content_service::create_text_output(&text).set_mime_type(MimeType::Text))
+                gas_content_service::create_text_output(&text).set_mime_type(MimeType::Text)
             }
         }
         Err(err) => {
             if format == "json" {
                 let env = GasGitResponseEnvelope {
                     ok: false,
-                    status: 400,
+                    status: 404,
                     content_type,
                     body_base64: String::new(),
                     error: Some(err),
                 };
                 let json = serde_json::to_string(&env).unwrap_or_default();
-                Some(gas_content_service::create_text_output(&json).set_mime_type(MimeType::Json))
+                gas_content_service::create_text_output(&json).set_mime_type(MimeType::Json)
             } else {
-                Some(
-                    gas_content_service::create_text_output(&format!("ERR {}", err))
-                        .set_mime_type(MimeType::Text),
-                )
+                gas_content_service::create_text_output(&format!("ERR {}", err))
+                    .set_mime_type(MimeType::Text)
             }
         }
     }
 }
 
-/// Handle a GAS `doPost(e)` event for `/git-upload-pack` and `/git-receive-pack`.
+/// Handle GAS `doGet(e)` requests:
+/// - JSON API (`?action=list_repos` or `?action=create_repo`)
+/// - Git Smart HTTP v1 (`GET /<project_name>.git/info/refs?service=git-upload-pack|git-receive-pack`)
+/// - Browser Web UI (`GET /` or `GET /<project_name>.git`) -> returns Gleam + Lustre `GasHtmlOutput`
+pub fn handle_do_get(event: &GasDoGetEvent) -> WebResponse {
+    if let Some(action) = event.parameter.get("action").map(|s| s.as_str()) {
+        match action {
+            "list_repos" => {
+                let selected = event.parameter.get("repo").cloned();
+                let json = list_repos_json(selected);
+                return WebResponse::Text(
+                    gas_content_service::create_text_output(&json).set_mime_type(MimeType::Json),
+                );
+            }
+            "create_repo" => {
+                let name = event
+                    .parameter
+                    .get("project_name")
+                    .or_else(|| event.parameter.get("repo"))
+                    .map(|s| s.as_str())
+                    .unwrap_or("");
+                let desc = event.parameter.get("description").map(|s| s.as_str());
+                let json = create_repo_json(name, desc);
+                return WebResponse::Text(
+                    gas_content_service::create_text_output(&json).set_mime_type(MimeType::Json),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    let req_path = extract_request_path(event, None);
+    let encoding = event
+        .parameter
+        .get("encoding")
+        .map(|s| s.as_str())
+        .unwrap_or("raw");
+    let format = event
+        .parameter
+        .get("format")
+        .map(|s| s.as_str())
+        .unwrap_or("text");
+    let explicit_service = event.parameter.get("service").map(|s| s.as_str());
+
+    match parse_git_path(&req_path) {
+        Ok(GitRoute::InfoRefs { project_name }) => {
+            let service = explicit_service.unwrap_or("git-upload-pack");
+            WebResponse::Text(format_info_refs_output(
+                service,
+                &project_name,
+                encoding,
+                format,
+            ))
+        }
+        Ok(GitRoute::UploadPack { project_name }) => WebResponse::Text(format_info_refs_output(
+            "git-upload-pack",
+            &project_name,
+            encoding,
+            format,
+        )),
+        Ok(GitRoute::ReceivePack { project_name }) => WebResponse::Text(format_info_refs_output(
+            "git-receive-pack",
+            &project_name,
+            encoding,
+            format,
+        )),
+        Ok(GitRoute::WebUiRepo { project_name }) => {
+            if let Some(service) = explicit_service {
+                WebResponse::Text(format_info_refs_output(
+                    service,
+                    &project_name,
+                    encoding,
+                    format,
+                ))
+            } else {
+                WebResponse::Html(render_web_ui_html(Some(project_name)))
+            }
+        }
+        Ok(GitRoute::WebUiRoot) => {
+            if let Some(service) = explicit_service {
+                // If someone called `?service=git-upload-pack` without `/<project_name>.git` in path, return clear error
+                let msg = format!(
+                    "ERR Missing repository name in URL path for service '{}'. Use gas::https://script.google.com/macros/s/<ID>/exec/<project_name>.git",
+                    service
+                );
+                WebResponse::Text(
+                    gas_content_service::create_text_output(&msg).set_mime_type(MimeType::Text),
+                )
+            } else {
+                WebResponse::Html(render_web_ui_html(None))
+            }
+        }
+        Err(err) => {
+            if explicit_service.is_some() || format == "json" {
+                WebResponse::Text(
+                    gas_content_service::create_text_output(&format!("ERR {}", err))
+                        .set_mime_type(MimeType::Text),
+                )
+            } else {
+                WebResponse::Html(render_web_ui_html(None))
+            }
+        }
+    }
+}
+
+/// Handle a GAS `doPost(e)` event for:
+/// - Web UI JSON APIs (`action=create_repo`, `action=list_repos`)
+/// - Git Smart HTTP v1 (`POST /<project_name>.git/git-upload-pack` and `POST /<project_name>.git/git-receive-pack`)
 pub fn handle_do_post(event: &GasDoPostEvent) -> GasTextOutput {
     let raw_contents = event
         .post_data
@@ -1133,34 +1597,52 @@ pub fn handle_do_post(event: &GasDoPostEvent) -> GasTextOutput {
         .map(|p| p.contents.as_str())
         .unwrap_or("");
 
-    // Support both JSON envelope (`{"service": "...", "body_base64": "..."}`) and query-param + base64/raw body
     let parsed_env: Option<GasGitPostEnvelope> = serde_json::from_str(raw_contents).ok();
 
-    let service = parsed_env
+    let action = parsed_env
+        .as_ref()
+        .and_then(|e| e.action.as_deref())
+        .or_else(|| event.parameter.get("action").map(|s| s.as_str()));
+
+    if let Some(act) = action {
+        match act {
+            "list_repos" => {
+                let json = list_repos_json(None);
+                return gas_content_service::create_text_output(&json)
+                    .set_mime_type(MimeType::Json);
+            }
+            "create_repo" => {
+                let repo_name = parsed_env
+                    .as_ref()
+                    .and_then(|e| e.project_name.as_deref().or(e.repo.as_deref()))
+                    .or_else(|| {
+                        event
+                            .parameter
+                            .get("project_name")
+                            .or_else(|| event.parameter.get("repo"))
+                            .map(|s| s.as_str())
+                    })
+                    .unwrap_or("");
+                let description = parsed_env
+                    .as_ref()
+                    .and_then(|e| e.description.as_deref())
+                    .or_else(|| event.parameter.get("description").map(|s| s.as_str()));
+                let json = create_repo_json(repo_name, description);
+                return gas_content_service::create_text_output(&json)
+                    .set_mime_type(MimeType::Json);
+            }
+            _ => {}
+        }
+    }
+
+    let req_path = extract_request_path(
+        event,
+        parsed_env.as_ref().and_then(|e| e.git_path.as_deref()),
+    );
+    let explicit_service = parsed_env
         .as_ref()
         .and_then(|e| e.service.as_deref())
-        .or_else(|| event.parameter.get("service").map(|s| s.as_str()))
-        .or_else(|| {
-            let path = parsed_env
-                .as_ref()
-                .and_then(|e| e.git_path.as_deref())
-                .or_else(|| event.parameter.get("git_path").map(|s| s.as_str()))
-                .or_else(|| event.path_info.as_deref())?;
-            if path.contains("git-receive-pack") {
-                Some("git-receive-pack")
-            } else if path.contains("git-upload-pack") {
-                Some("git-upload-pack")
-            } else {
-                None
-            }
-        })
-        .unwrap_or("git-upload-pack");
-
-    let repo = parsed_env
-        .as_ref()
-        .and_then(|e| e.repo.as_deref())
-        .or_else(|| event.parameter.get("repo").map(|s| s.as_str()))
-        .unwrap_or(DEFAULT_REPO);
+        .or_else(|| event.parameter.get("service").map(|s| s.as_str()));
 
     let response_encoding = parsed_env
         .as_ref()
@@ -1174,24 +1656,46 @@ pub fn handle_do_post(event: &GasDoPostEvent) -> GasTextOutput {
         .map(|s| s.as_str())
         .unwrap_or("text");
 
-    let req_bytes: Vec<u8> = if let Some(b64) = parsed_env.as_ref().and_then(|e| e.body_base64.as_deref()) {
-        gas_utilities::base64_decode(b64.trim(), None)
-    } else if event.parameter.get("req_encoding").map(|s| s.as_str()) == Some("raw") {
-        raw_contents.as_bytes().to_vec()
-    } else {
-        // Default: decode base64 body if valid base64, otherwise treat as raw bytes
-        let trimmed = raw_contents.trim();
-        if !trimmed.is_empty() && !trimmed.starts_with("00") {
-            gas_utilities::base64_decode(trimmed, None)
-        } else {
+    let req_bytes: Vec<u8> =
+        if let Some(b64) = parsed_env.as_ref().and_then(|e| e.body_base64.as_deref()) {
+            gas_utilities::base64_decode(b64.trim(), None)
+        } else if event.parameter.get("req_encoding").map(|s| s.as_str()) == Some("raw") {
             raw_contents.as_bytes().to_vec()
-        }
-    };
+        } else {
+            let trimmed = raw_contents.trim();
+            if !trimmed.is_empty() && !trimmed.starts_with("00") {
+                gas_utilities::base64_decode(trimmed, None)
+            } else {
+                raw_contents.as_bytes().to_vec()
+            }
+        };
 
-    let result = match service {
-        "git-upload-pack" => handle_upload_pack(&req_bytes, repo),
-        "git-receive-pack" => handle_receive_pack(&req_bytes, repo),
-        other => Err(format!("Unsupported POST service '{}'", other)),
+    let (service, result) = match parse_git_path(&req_path) {
+        Ok(GitRoute::UploadPack { project_name }) => (
+            "git-upload-pack",
+            handle_upload_pack(&req_bytes, &project_name),
+        ),
+        Ok(GitRoute::ReceivePack { project_name }) => (
+            "git-receive-pack",
+            handle_receive_pack(&req_bytes, &project_name),
+        ),
+        Ok(GitRoute::WebUiRepo { project_name }) | Ok(GitRoute::InfoRefs { project_name }) => {
+            let svc = explicit_service.unwrap_or("git-upload-pack");
+            let res = match svc {
+                "git-upload-pack" => handle_upload_pack(&req_bytes, &project_name),
+                "git-receive-pack" => handle_receive_pack(&req_bytes, &project_name),
+                other => Err(format!("Unsupported POST service '{}'", other)),
+            };
+            (svc, res)
+        }
+        Ok(GitRoute::WebUiRoot) => (
+            explicit_service.unwrap_or("git-upload-pack"),
+            Err(
+                "Missing repository name in URL path. Expected /<project_name>.git/git-upload-pack or /<project_name>.git/git-receive-pack"
+                    .to_string(),
+            ),
+        ),
+        Err(err) => (explicit_service.unwrap_or("git-upload-pack"), Err(err)),
     };
 
     let content_type = format!("application/x-{}-result", service);
@@ -1233,5 +1737,54 @@ pub fn handle_do_post(event: &GasDoPostEvent) -> GasTextOutput {
                 gas_content_service::create_text_output(&b64).set_mime_type(MimeType::Text)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GitRoute, parse_git_path, parse_project_segment};
+
+    #[test]
+    fn test_parse_project_segment() {
+        assert_eq!(
+            parse_project_segment("my-project.git").unwrap(),
+            "my-project"
+        );
+        assert_eq!(parse_project_segment("my_repo").unwrap(), "my_repo");
+        assert!(parse_project_segment("").is_err());
+        assert!(parse_project_segment(".git").is_err());
+        assert!(parse_project_segment("../secret").is_err());
+    }
+
+    #[test]
+    fn test_parse_git_path_routes() {
+        assert_eq!(parse_git_path("/").unwrap(), GitRoute::WebUiRoot);
+        assert_eq!(parse_git_path("").unwrap(), GitRoute::WebUiRoot);
+        assert_eq!(
+            parse_git_path("/sample-repo.git").unwrap(),
+            GitRoute::WebUiRepo {
+                project_name: "sample-repo".to_string()
+            }
+        );
+        assert_eq!(
+            parse_git_path("/sample-repo.git/info/refs").unwrap(),
+            GitRoute::InfoRefs {
+                project_name: "sample-repo".to_string()
+            }
+        );
+        assert_eq!(
+            parse_git_path("sample-repo.git/git-upload-pack").unwrap(),
+            GitRoute::UploadPack {
+                project_name: "sample-repo".to_string()
+            }
+        );
+        assert_eq!(
+            parse_git_path("/macros/s/AKfycb123/exec/my_project.git/git-receive-pack").unwrap(),
+            GitRoute::ReceivePack {
+                project_name: "my_project".to_string()
+            }
+        );
+        assert!(parse_git_path("/info/refs").is_err());
+        assert!(parse_git_path("/git-upload-pack").is_err());
     }
 }

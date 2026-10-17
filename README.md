@@ -1,15 +1,27 @@
-# GoogleAppsScript-in-rust-example (with `gitoxide` GAS Git Server & WASI 0.3.2)
+# GoogleAppsScript-in-rust-example (with `gitoxide` GAS Git Server, Google Drive Storage & Gleam/Lustre Web UI)
 
-Rust (`wasm32-wasip2` WebAssembly Component) を Google Apps Script (GAS) の V8 ランタイム上で動作させるテンプレート＆実装プロジェクトです。
-**`gitoxide` (`gix-*`) を用いた GAS Git Smart HTTP v1 サーバー実装** と、GAS 特有の 302 リダイレクト・ログイン認証を処理する Python 製クライアントヘルパー **`git-remote-gas` (`gas::` プレフィックス)** を備えています。
+Rust (`wasm32-wasip2` WebAssembly Component) を Google Apps Script (GAS) の V8 ランタイム上で動作させるプロジェクトです。
+- **`gitoxide` (`gix-*`) を用いた GAS Git Smart HTTP v1 サーバー実装** (`/<project_name>.git` の URL パスルーティング対応)
+- **Google Drive (`DriveApp`) をデフォルトストレージとした複数 Git リポジトリ管理** (`GIT_DRIVE_FOLDER_ID` 内に複数の `<project_name>.git` を格納)
+- **Gleam + Lustre (MVU) によるブラウザ Web UI** (`web/src/gas_git_ui.gleam` — 既存 Git プロジェクト一覧の把握・空リポジトリの新規作成)
+- **Python 製クライアントヘルパー `git-remote-gas` (`gas::` プレフィックス)**
 
 ---
 
-## Git Server on Google Apps Script (`gitoxide` + `git-remote-gas`)
+## Git Server on Google Apps Script (`gitoxide` + `git-remote-gas` + Gleam/Lustre Web UI)
 
 詳細なドキュメントは以下を参照してください（日本語・英語）：
 - **日本語ドキュメント**: [`docs/GAS_GIT_SERVER_JA.md`](docs/GAS_GIT_SERVER_JA.md)
 - **English Documentation**: [`docs/GAS_GIT_SERVER_EN.md`](docs/GAS_GIT_SERVER_EN.md)
+
+### 必須の環境変数（GAS スクリプトプロパティ）
+
+本サーバーは Google Drive フォルダーをデフォルトの保存先として使用し、登録したフォルダー内に複数の Git プロジェクト (`<project_name>.git`) を格納します。`wasi:cli/environment` (`js/wasi-cli.ts`) を通じて GAS のスクリプトプロパティ (`PropertiesService.getScriptProperties()`) が Rust Wasm 側の環境変数 (`std::env::var`) として渡されます。
+
+| 環境変数名（スクリプトプロパティ） | 必須/任意 | 説明 |
+| :--- | :---: | :--- |
+| **`GIT_DRIVE_FOLDER_ID`** | **必須** | Git リポジトリ群 (`<project_name>.git` サブフォルダ) を格納する Google Drive フォルダーの ID (`https://drive.google.com/drive/folders/<FOLDER_ID>` の `<FOLDER_ID>` 部分) |
+| **`GAS_WEB_APP_URL`** | 任意 | デプロイ済み GAS Web アプリの `/exec` URL (`https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec`)。Web UI 上でリモート URL コマンド例を表示する際に使用 |
 
 ### クイックスタート / Quick Start
 
@@ -17,12 +29,19 @@ Rust (`wasm32-wasip2` WebAssembly Component) を Google Apps Script (GAS) の V8
 # 1. git-remote-gas を PATH に追加 (または make install-git-remote-gas)
 export PATH="$(pwd)/tools:$PATH"
 
-# 2. ローカル E2E テストで git ls-remote / clone / push / pull の動作を確認
+# 2. ローカル E2E テストで Web UI リポジトリ作成 & git remote add / push / clone / pull の動作を確認
 make test-git-e2e
 
-# 3. デプロイ済み GAS Web アプリに対して git コマンドを実行 (`gas::` プレフィックス)
-git ls-remote gas::https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec
-git clone gas::https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec my-gas-repo
+# 3. ブラウザで GAS Web アプリ URL (https://script.google.com/macros/s/<ID>/exec) を開き、
+#    Gleam + Lustre Web UI から新しい空リポジトリ (例: project_name.git) を作成
+
+# 4. ローカルの Git リポジトリからリモートを追加して push (`gas::` プレフィックス + `/project_name.git`)
+git init
+git remote add origin gas::https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec/project_name.git
+git add .
+git commit -m "first commit"
+git branch -M main
+git push -u origin main
 ```
 
 ---
@@ -60,7 +79,7 @@ git clone gas::https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec my-gas-re
 | **`wasi:random@0.3.2`** (`wasi-random`) | `random`, `insecure`, `insecure-seed` | **実装済** | `js/wasi-random.ts` — `Utilities.getUuid()` + `Utilities.computeDigest(SHA_256)` による暗号論的擬似乱数生成および `Math.random()` |
 | **`wasi:clocks@0.3.2`** (`wasi-clocks`) | `types`, `system-clock`, `timezone` | **実装済** | `js/wasi-clocks.ts` / `js/wasi-wall-clock.ts` — `Date.now()`、`Session.getScriptTimeZone()`、`Utilities.formatDate()` による実タイムゾーン・UTCオフセット計算 |
 | **`wasi:clocks@0.3.2`** (`wasi-clocks`) | `monotonic-clock` (`now`, `get-resolution`) | **実装済 (同期部)** | `js/wasi-monotonic-clock.ts` — 非減少モノトニック時刻を提供。非同期タイマー待機 (`wait-for`, `wait-until`) は `WasiNotImplementedError` |
-| **`wasi:cli@0.3.2`** (`wasi-cli`) | `environment`, `exit`, `terminal-*` | **実装済** | `js/wasi-cli.ts` — `PropertiesService.getScriptProperties()` を環境変数として提供。Rust 標準の `println!` / `eprintln!` は WASI 0.2 `getStdout`/`getStderr` (`js/wasi-io.ts`) 経由で `Logger.log` / `console.error` に出力 |
+| **`wasi:cli@0.3.2`** (`wasi-cli`) | `environment`, `exit`, `terminal-*` | **実装済** | `js/wasi-cli.ts` — `PropertiesService.getScriptProperties()` を環境変数 (`GIT_DRIVE_FOLDER_ID` 等) として提供。Rust 標準の `println!` / `eprintln!` は WASI 0.2 `getStdout`/`getStderr` (`js/wasi-io.ts`) 経由で `Logger.log` / `console.error` に出力 |
 | **`wasi:logging`** (`wasi-logging-0.1.0-draft`) | `logging` | **実装済** | `js/log-host.ts` — レベル別に `console.debug` / `info` / `warn` / `error` へ出力 |
 | **`wasi:filesystem@0.3.2`** (`wasi-filesystem`) | `types`, `preopens` | **未実装通知** | `js/wasi-filesystem.ts` — GAS にはローカル POSIX ファイルシステムが存在しないため `WasiNotImplementedError` を送出（`gas:drive-app` の利用を案内） |
 | **`wasi:sockets@0.3.2`** (`wasi-sockets`) | `types`, `ip-name-lookup` | **未実装通知** | `js/wasi-sockets.ts` — GAS は生の TCP/UDP ソケット・直接 DNS 解決を提供しないため `WasiNotImplementedError` を送出 |

@@ -16,6 +16,21 @@ JCO_FLAGS = \
 	--no-nodejs-compat \
 	--tla-compat
 
+DIST_HTML := dist/index.html
+
+GLEAM_SRCS := \
+	web/gleam.toml \
+	web/index.html \
+	web/src/gas_git_ui.gleam \
+	web/src/gas_git_ui/page.gleam \
+	web/src/gas_git_ui/types.gleam \
+	web/src/gas_git_ui/api.gleam \
+	web/src/gas_git_ui/gas_git_ffi.mjs \
+	web/src/gas_git_ui/components/header.gleam \
+	web/src/gas_git_ui/components/repo_form.gleam \
+	web/src/gas_git_ui/components/repo_list.gleam \
+	web/src/gas_git_ui/components/quick_setup.gleam
+
 # host impls
 JS_SHIMS = \
 	js/wasi-random.ts \
@@ -67,9 +82,22 @@ JS_SHIMS = \
 RS_SRCS = \
 	src/lib.rs \
 	src/args.rs \
-	src/git_server.rs
+	src/git_server.rs \
+	wit/world.wit
 
-$(WASM_SRC): $(RS_SRCS)
+# Gleam + Lustre のビルドおよび単一ファイル dist/index.html へのバンドル
+$(DIST_HTML): $(GLEAM_SRCS) tools/bundle_web_html.mjs
+	@if command -v gleam >/dev/null 2>&1; then \
+		echo "Building Gleam + Lustre Web UI (target=javascript)..."; \
+		cd web && gleam build --target javascript; \
+	else \
+		echo "gleam CLI not found; bundling with fallback runtime"; \
+	fi
+	node ./tools/bundle_web_html.mjs
+
+build-ui: $(DIST_HTML)
+
+$(WASM_SRC): $(RS_SRCS) $(DIST_HTML)
 	cargo build $(CARGO_FLAGS)
 
 # グルーコードの生成
@@ -192,10 +220,11 @@ $(JCO_OUT_DIR): $(WASM_SRC) $(JS_SHIMS)
 	cp $(JS_SHIMS) $(JCO_OUT_DIR)
 	echo "success to jco transpile"
 
-# packing
-build-pack: $(JCO_OUT_DIR)
+# packing (dist/main.js + dist/index.html)
+build-pack: $(JCO_OUT_DIR) $(DIST_HTML)
 	echo $(WASM_SRC)
 	pnpm exec webpack --progress
+	node ./tools/bundle_web_html.mjs
 
 push: build-pack
 	cp ./appsscript.json ./dist
@@ -207,7 +236,7 @@ install-git-remote-gas:
 	chmod +x $(HOME)/.local/bin/git-remote-gas
 	@echo "Installed git-remote-gas to $(HOME)/.local/bin/git-remote-gas"
 
-test-git-e2e:
+test-git-e2e: $(DIST_HTML)
 	python3 ./tools/test_gas_git_e2e.py
 
-.PHONY: build-pack push install-git-remote-gas test-git-e2e
+.PHONY: build-ui build-pack push install-git-remote-gas test-git-e2e

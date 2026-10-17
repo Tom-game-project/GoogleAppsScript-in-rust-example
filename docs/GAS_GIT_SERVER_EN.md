@@ -1,172 +1,122 @@
-# Google Apps Script (GAS) Git Server with `gitoxide` & `git-remote-gas` — English Guide
+# Google Apps Script (GAS) Git Server with `gitoxide`, Google Drive & Gleam/Lustre Web UI — English Guide
 
-This guide explains how to run a **Git Smart HTTP v1 Server** on Google Apps Script (GAS) powered by a Rust WebAssembly Component (`wasm32-wasip2`) and **`gitoxide` (`gix-*`)**, along with the Python client-side Git remote helper **`git-remote-gas`** (`gas::` URL prefix) that transparently handles GAS HTTP 302 redirects and Google authentication.
+This guide explains how to run a **Git Smart HTTP v1 Server** on Google Apps Script (GAS) powered by a Rust WebAssembly Component (`wasm32-wasip2`) and **`gitoxide` (`gix-*`)**, using **Google Drive (`DriveApp`) as the default multi-project storage backend**, a **Gleam + Lustre browser Web UI**, and the Python client-side Git remote helper **`git-remote-gas`** (`gas::` URL prefix).
 
 ---
 
 ## 1. Architecture Overview
 
-### 1.1 Why Is a Client-Side Helper (`git-remote-gas` / `gas::`) Needed?
-Google Apps Script Web App URLs (`https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec`) have three platform behaviors that standard Git HTTP transport (`git-remote-http`) cannot handle out of the box:
+### 1.1 GitHub-Style URL Path Routing (`.../exec/<project_name>.git`)
+Modeled after GitHub's repository URLs (`https://github.com/username/project_name.git`) without the `username` segment, each repository is addressed by appending `/<project_name>.git` to the GAS Web App `/exec` URL:
 
-1. **HTTP 302 Redirects on Both `GET` and `POST`**
-   - Every GAS `doGet(e)` and `doPost(e)` execution that returns a `ContentService.TextOutput` responds with `HTTP 302 Moved Temporarily` pointing to a one-time URL on `https://script.googleusercontent.com/macros/echo?user_content_key=...`.
-   - Crucially, for **`POST` requests (`/git-upload-pack` and `/git-receive-pack`)**, GAS executes `doPost(e)` during the initial `POST` request and requires the client to follow the `302` redirect using a **`GET` request** to retrieve the output (re-POSTing to `script.googleusercontent.com/macros/echo` fails with `405 Method Not Allowed`).
-2. **Google Account Login & Authentication**
-   - When `appsscript.json` configures `webapp.access` as `"MYSELF"`, `"DOMAIN"`, or `"ANYONE"` (requiring Google sign-in), unauthenticated requests are redirected (`302`) to `https://accounts.google.com/ServiceLogin`.
-   - `git-remote-gas` automatically attaches OAuth 2.0 Bearer tokens (from `GAS_GIT_TOKEN`, `~/.config/gas-git/token.json`, `~/.clasprc.json` with automatic refresh, or `gcloud auth print-access-token`) or session cookies (`GAS_GIT_COOKIE` / `GAS_GIT_COOKIE_FILE`), and strips the `Authorization` header when crossing domains to `script.googleusercontent.com`.
-3. **Binary-Safe Transport over `ContentService.TextOutput`**
-   - Because GAS `ContentService` only returns UTF-8 strings, raw binary Git `PACK` v2 streams and sideband channels would be corrupted if returned as plain text.
-   - Our server and client use base64 framing (`encoding=base64` and JSON envelopes) backed by GAS `Utilities.base64Encode` / `Utilities.base64Decode` for 100% binary fidelity.
-
----
-
-### 1.2 How `gitoxide` Powers the GAS Git Server (`src/git_server.rs`)
-The Rust Wasm Component (`src/git_server.rs`) implements the Git Smart HTTP v1 protocol using the vendored **`gitoxide`** crates under `crates/gix-*`:
-
-| `gitoxide` Crate (`crates/`) | Role in `src/git_server.rs` |
-| :--- | :--- |
-| **`gix-packetline`** | Encodes and decodes the Git pkt-line wire format (`# service=git-upload-pack`, `want`/`have`/`done` negotiation, `side-band-64k` multiplexing, and `report-status`) via `StreamingPeekableIter` and `blocking_io::encode`. |
-| **`gix-object`** | Serializes (`WriteTo`) and parses (`ObjectRef::from_loose`) Git `Blob`, `Tree`, `Commit`, and `Tag` objects for commit-graph traversal and pack verification. |
-| **`gix-hash`** | Parses and formats 20-byte SHA-1 `ObjectId` digests and verifies/computes `PACK` v2 trailers via `gix_hash::hasher(Kind::Sha1)`. |
-| **`gix-zlib`** | Compresses (`stream::deflate::Write`) and decompresses (`Inflate::once`) `PACK` v2 entries using pure-Rust `zlib-rs`. |
-| **`gix-actor` & `gix-date`** | Constructs author/committer signatures and timestamps when seeding the initial commit (`README.md` on `refs/heads/main`). |
-| **`gix-validate`** | Validates reference names (`refs/heads/*`, `refs/tags/*`) during `git push` (`gix_validate::reference::name`). |
-
----
-
-## 2. Setup Instructions
-
-### 2.1 Building and Deploying the GAS Git Server
-
-#### Prerequisites
-- Rust toolchain with the `wasm32-wasip2` target (`rustup target add wasm32-wasip2`)
-- Node.js & `pnpm` (`pnpm install`)
-- `@google/clasp` (for pushing and deploying to Google Apps Script)
-
-#### Build & Deploy Steps
 ```bash
-# 1. Compile Rust to wasm32-wasip2, transpile via jco, and bundle with Webpack
+git remote add origin gas::https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec/project_name.git
+```
+
+Both the Rust server (`parse_git_path` in `src/git_server.rs`) and the client helper (`parse_gas_remote_url` in `tools/git-remote-gas`) parse the URL path and route requests to:
+- `GET  /<project_name>.git/info/refs?service=git-upload-pack` (`git ls-remote`, `git clone`, `git fetch`, `git pull`)
+- `GET  /<project_name>.git/info/refs?service=git-receive-pack` (`git push` reference discovery)
+- `POST /<project_name>.git/git-upload-pack` (packfile negotiation and transfer)
+- `POST /<project_name>.git/git-receive-pack` (packfile unpacking and reference updates)
+- `GET  /` or `GET /<project_name>.git` (renders the Gleam + Lustre Web UI when accessed from a browser)
+
+### 1.2 Google Drive Storage by Default (Multi-Project Folder Layout)
+All repositories are stored by default inside the Google Drive folder specified by the **`GIT_DRIVE_FOLDER_ID`** environment variable (GAS Script Property). Multiple Git projects live side by side inside that folder as `<project_name>.git` subfolders:
+
+```text
+<Google Drive Folder (GIT_DRIVE_FOLDER_ID)>/
+├── project-alpha.git/
+│   ├── HEAD                 ("ref: refs/heads/main\n")
+│   ├── refs.json            ({"refs/heads/main": "<sha1-hex>", ...})
+│   └── objects/
+│       ├── <sha1-hex>       (base64-encoded loose Git object `<kind> <size>\0<body>`)
+│       └── ...
+├── project-beta.git/
+│   ├── HEAD
+│   ├── refs.json
+│   └── objects/
+└── ...
+```
+
+### 1.3 No Automatic Initial Commit & Gleam + Lustre Browser Web UI (`web/`)
+- **No Unwanted Initial Commits**: The server never fabricates an automatic initial commit behind your back. Newly created repositories start completely empty (`0` commits, unborn `HEAD -> refs/heads/main`), so you can immediately run `git remote add origin ...` and `git push -u origin main` from any local repository without non-fast-forward conflicts.
+- **Gleam + Lustre Web UI (`web/src/gas_git_ui.gleam`)**:
+  - Opening `https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec` in a browser serves a GitHub-like minimal Web UI implemented in **Gleam + Lustre**.
+  - **Pure Elm Architecture (MVU)**: Uses `lustre.application(init, update, view)` and `lustre/effect.from` without impure side-effecting `event.emit` patterns.
+  - **Zero npm Frontend Dependencies**: Built purely with Gleam (`target = "javascript"`) and Lustre.
+  - **Core Browser Capabilities**:
+    1. View all existing Git projects inside the configured Google Drive folder (`GIT_DRIVE_FOLDER_ID`), including repository status, `HEAD` branch/commit, and remote URLs.
+    2. Create new empty Git repositories (`<project_name>.git`) in Google Drive and view copy-pasteable `git init` / `git remote add origin` / `git push -u origin main` quick-setup commands.
+
+---
+
+## 2. Environment Variables (GAS Script Properties & Client Variables)
+
+### 2.1 Server-Side Environment Variables (GAS Script Properties via `wasi:cli/environment`)
+
+In this repository, `wasi:cli/environment` (`js/wasi-cli.ts`) maps **Google Apps Script's `PropertiesService.getScriptProperties()`** directly to WASI environment variables (`std::env::var`) inside the Rust Wasm component.
+
+| Environment Variable (Script Property Key) | Required | Example Value | Description |
+| :--- | :---: | :--- | :--- |
+| **`GIT_DRIVE_FOLDER_ID`** | **Required** | `1a2b3c4d5e6f7g8h9i0j...` | The Google Drive Folder ID where multiple Git repositories (`<project_name>.git` subfolders) are stored. Extract this ID from `https://drive.google.com/drive/folders/<FOLDER_ID>`. |
+| **`GAS_WEB_APP_URL`** | Optional | `https://script.google.com/macros/s/<ID>/exec` | The deployed GAS Web App `/exec` URL. Used by the Web UI to display exact `git remote add origin gas::...` commands when rendered inside GAS's `googleusercontent.com` iframe. |
+
+#### How to Configure `GIT_DRIVE_FOLDER_ID` in Google Apps Script
+1. Open Google Drive in your browser, create or open the folder where you want to store your Git repositories, and copy `<FOLDER_ID>` from the URL `https://drive.google.com/drive/folders/<FOLDER_ID>`.
+2. Open your Google Apps Script project in the browser and navigate to **Project Settings (gear icon) > Script Properties**.
+3. Click **Add script property** and set:
+   - **Property**: `GIT_DRIVE_FOLDER_ID`
+   - **Value**: `<FOLDER_ID>`
+4. Save the script properties.
+
+### 2.2 Client-Side Environment Variables (`git-remote-gas`)
+
+| Environment Variable | Required | Description |
+| :--- | :---: | :--- |
+| **`GAS_GIT_TOKEN`** | Optional | OAuth 2.0 Bearer access token for authenticated GAS Web Apps (e.g., `export GAS_GIT_TOKEN="$(gcloud auth print-access-token)"`). If unset, `git-remote-gas` automatically tries anonymous access, cached credentials, and `~/.clasprc.json`. |
+| **`GAS_GIT_COOKIE`** | Optional | Browser session cookie (`SID=...; HSID=...`) if using cookie authentication instead of OAuth tokens. |
+
+---
+
+## 3. Build, Deploy, and Usage
+
+### 3.1 Build and Deploy to GAS
+```bash
+# 1. Build Gleam + Lustre Web UI (if gleam is installed), compile Rust to wasm32-wasip2, transpile via jco, and bundle with Webpack
 make build-pack
 
 # 2. Push dist/ bundle and appsscript.json to Google Apps Script
 make push
 
-# 3. Deploy as a Web App (or via the GAS Editor: Deploy > New deployment > Web app)
-pnpm exec clasp deploy --description "gitoxide Smart HTTP v1 Git Server"
+# 3. Deploy as a Web App
+pnpm exec clasp deploy --description "gitoxide Smart HTTP v1 Git Server on Google Drive"
 ```
 
-Once deployed, GAS provides a Web App URL ending in `/exec`:
-```text
-https://script.google.com/macros/s/AKfycbxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx/exec
-```
+### 3.2 Create a Repository from the Browser Web UI
+1. Open `https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec` in your browser.
+2. Under **Create a new repository**, enter a project name (e.g. `my-project`) and optional description, then click **Create repository**.
+3. The server creates an empty `<GIT_DRIVE_FOLDER_ID>/my-project.git` folder in Google Drive and displays the quick-setup commands.
 
-> **Automatic Initial Commit Seeding**:
-> On the first request to a newly deployed repository (or when running `git_init_repo()` in the GAS editor), `gitoxide` automatically seeds an initial commit containing `README.md` on `refs/heads/main` (`HEAD -> refs/heads/main`) in `PropertiesService.getScriptProperties()`. This means `git ls-remote` and `git clone` work immediately after deployment!
-
----
-
-### 2.2 Installing the Client-Side `git-remote-gas` Helper
-
-Whenever Git encounters a remote URL prefixed with `gas::`, it automatically invokes the **`git-remote-gas`** executable on your `$PATH`.
-
+### 3.3 Push and Clone Using `git-remote-gas`
 ```bash
-# Option A: Install to ~/.local/bin (Recommended)
-make install-git-remote-gas
-export PATH="$HOME/.local/bin:$PATH"
-
-# Option B: Add the repository's tools/ directory directly to PATH
+# 1. Add tools/ to PATH (or run make install-git-remote-gas)
 export PATH="$(pwd)/tools:$PATH"
+
+# 2. Initialize a local repository, add the GAS remote with /my-project.git, and push
+mkdir my-project && cd my-project
+echo "# my-project" >> README.md
+git init
+git add README.md
+git commit -m "first commit"
+git branch -M main
+git remote add origin gas::https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec/my-project.git
+git push -u origin main
+
+# 3. Clone the repository into another directory
+git clone gas::https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec/my-project.git my-project-clone
 ```
 
-`git-remote-gas` uses only the Python 3 standard library and requires zero external `pip` packages.
-
----
-
-## 3. Authentication & Login Configuration
-
-Depending on your GAS Web App's access setting (`webapp.access` in `appsscript.json`), `git-remote-gas` supports the following authentication methods in priority order:
-
-### Method 1: Automatic `@google/clasp` Credentials (`~/.clasprc.json`)
-If you have already logged in via `npx @google/clasp login`, `git-remote-gas` automatically reads `~/.clasprc.json` and refreshes your OAuth 2.0 access token on the fly. No extra configuration is needed.
-
-### Method 2: Environment Variable `GAS_GIT_TOKEN` or Saved Token
-You can provide an OAuth 2.0 access token via environment variable or save it to `~/.config/gas-git/token.json`:
-```bash
-# Pass via environment variable
-export GAS_GIT_TOKEN="$(gcloud auth print-access-token)"
-
-# Or save to ~/.config/gas-git/token.json
-git-remote-gas --save-token "$(gcloud auth print-access-token)"
-
-# Or enable automatic gcloud invocation
-export GAS_GIT_USE_GCLOUD=1
-```
-
-### Method 3: Browser Cookies (`GAS_GIT_COOKIE` / `GAS_GIT_COOKIE_FILE`)
-```bash
-export GAS_GIT_COOKIE="SID=...; HSID=...; SSID=..."
-# Or specify a Netscape-format cookie file
-export GAS_GIT_COOKIE_FILE="$HOME/.config/gas-git/cookies.txt"
-```
-
-### Method 4: Anonymous Web App Deployment (`ANYONE_ANONYMOUS`)
-If you deploy the GAS Web App with **"Who has access: Anyone"**, no authentication token is required and `git-remote-gas` will handle the 302 redirects automatically.
-
----
-
-## 4. Usage Examples (`gas::` URLs)
-
-Prefix your GAS Web App URL with **`gas::`** to use standard Git commands:
-
-### 4.1 `git ls-remote` (Inspect Remote References)
-```bash
-git ls-remote gas::https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec
-```
-Example output:
-```text
-c46e020074d6334b9332c3f2f6d6693f503e0b7b	HEAD
-c46e020074d6334b9332c3f2f6d6693f503e0b7b	refs/heads/main
-```
-
-### 4.2 `git clone` (Clone Repository)
-```bash
-git clone gas::https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec my-gas-repo
-cd my-gas-repo
-cat README.md
-```
-
-### 4.3 `git push` (Commit and Push Changes)
-```bash
-echo "Hello from gitoxide on GAS!" > hello.txt
-git add hello.txt
-git commit -m "Add hello.txt"
-git push origin main
-```
-
-### 4.4 `git fetch` & `git pull` (Fetch and Merge Updates)
-```bash
-git fetch origin
-git pull origin main
-```
-
----
-
-## 5. Advanced Features
-
-### 5.1 Multi-Repository Hosting on a Single GAS Deployment (`?repo=<name>`)
-You can host multiple independent Git repositories on a single GAS Web App deployment by appending `?repo=<name>` to the URL:
-```bash
-git clone "gas::https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec?repo=frontend"
-git clone "gas::https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec?repo=backend"
-```
-
-### 5.2 Automatic Google Drive Offloading for Large Objects (`GIT_DRIVE_FOLDER_ID`)
-Because GAS `PropertiesService` enforces a 9 KB per-key limit, setting the **`GIT_DRIVE_FOLDER_ID`** script property to a Google Drive folder ID causes `GasGitStore` to automatically offload any Git object larger than 6 KB into `DriveApp` while storing a lightweight `drive:<file_id>` pointer in `PropertiesService`.
-
-### 5.3 Running the End-to-End Test Suite (`make test-git-e2e`)
-The repository includes an offline E2E test suite (`tools/test_gas_git_e2e.py`) that simulates GAS's exact `302 Found` redirect behavior on `GET` and `POST`, `/macros/echo` `GET`-only enforcement, and `accounts.google.com` login redirects, running real `git ls-remote`, `git clone`, `git push`, and `git pull` commands:
-
+### 3.4 Run the End-to-End Test Suite (`make test-git-e2e`)
 ```bash
 make test-git-e2e
 # or

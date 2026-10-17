@@ -5,6 +5,8 @@ import {
     rsDoGet,
     rsDoPost,
     gitInitRepo,
+    gitListRepos,
+    gitCreateRepo,
     resourceExample,
     helloworldExample,
     getScriptPropertiesExample,
@@ -20,11 +22,19 @@ import "./textencoderdecoder";
 import { GasTextOutput } from "./js/gas-content-service-text-output";
 import { GasHtmlOutput } from "./js/gas-html-service-output";
 
+type WitWebResponse =
+    | { tag: "text"; val: GasTextOutput }
+    | { tag: "html"; val: GasHtmlOutput };
+
 interface GasGlobal {
-    doGet: (e: GoogleAppsScript.Events.DoGet) => GoogleAppsScript.Content.TextOutput;
+    doGet: (
+        e: GoogleAppsScript.Events.DoGet,
+    ) => GoogleAppsScript.Content.TextOutput | GoogleAppsScript.HTML.HtmlOutput;
     do_get_test00: () => void;
     doPost: (e: GoogleAppsScript.Events.DoPost) => GoogleAppsScript.Content.TextOutput;
-    git_init_repo: () => string;
+    git_init_repo: (repo?: string) => string;
+    git_list_repos: () => string;
+    git_create_repo: (repo: string, description?: string) => string;
     aaa: () => void;
     resource_example: () => void;
     helloworldExample: () => void;
@@ -39,8 +49,16 @@ interface GasGlobal {
 
 declare const global: GasGlobal;
 
-global.doGet = function(e: GoogleAppsScript.Events.DoGet): GoogleAppsScript.Content.TextOutput {
-    const r = rsDoGet(JSON.stringify(e)) as unknown as GasTextOutput;
+global.doGet = function(
+    e: GoogleAppsScript.Events.DoGet,
+): GoogleAppsScript.Content.TextOutput | GoogleAppsScript.HTML.HtmlOutput {
+    const r = rsDoGet(JSON.stringify(e)) as unknown as WitWebResponse | GasTextOutput;
+    if ("tag" in r) {
+        if (r.tag === "html") {
+            return r.val.rawHtmlOutput;
+        }
+        return r.val.rawTextOutput;
+    }
     return r.rawTextOutput;
 };
 
@@ -48,20 +66,28 @@ global.do_get_test00 = function(): void {
     const a = `
             {
                "parameter": {
-                 "service": "git-upload-pack"
+                 "service": "git-upload-pack",
+                 "git_path": "/sample.git/info/refs"
                },
                "contextPath": "",
                "contentLength": -1,
                "parameters": {
                  "service": [
                    "git-upload-pack"
+                 ],
+                 "git_path": [
+                   "/sample.git/info/refs"
                  ]
                },
-               "queryString": "service=git-upload-pack"
+               "queryString": "service=git-upload-pack&git_path=/sample.git/info/refs"
              }
     `;
-    const r = rsDoGet(a) as unknown as GasTextOutput;
-    Logger.log(r.getContent());
+    const r = rsDoGet(a) as unknown as WitWebResponse;
+    if (r.tag === "text") {
+        Logger.log(r.val.getContent());
+    } else {
+        Logger.log(r.val.getContent());
+    }
 };
 
 global.doPost = function(e: GoogleAppsScript.Events.DoPost): GoogleAppsScript.Content.TextOutput {
@@ -69,8 +95,16 @@ global.doPost = function(e: GoogleAppsScript.Events.DoPost): GoogleAppsScript.Co
     return r.rawTextOutput;
 };
 
-global.git_init_repo = function(): string {
-    return gitInitRepo(undefined);
+global.git_init_repo = function(repo?: string): string {
+    return gitInitRepo(repo);
+};
+
+global.git_list_repos = function(): string {
+    return gitListRepos();
+};
+
+global.git_create_repo = function(repo: string, description?: string): string {
+    return gitCreateRepo(repo, description);
 };
 
 global.aaa = function(): void {

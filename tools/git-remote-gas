@@ -2,20 +2,27 @@
 """
 git-remote-gas: Git remote helper for Google Apps Script (GAS) Web Apps.
 
+Supports GitHub-style repository URLs (without username):
+  git remote add origin gas::https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec/project_name.git
+  git clone gas::https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec/project_name.git
+
 Handles:
-1. URL normalization: keeps `/exec` intact (avoids `/exec/info/refs` 404s).
-2. HTTP 302 redirects across `script.google.com` and `script.googleusercontent.com`
+1. URL path parsing: extracts the GAS `/exec` (or `/dev`) endpoint and the `/<project_name>.git`
+   repository path, forwarding `/<project_name>.git/info/refs`, `/<project_name>.git/git-upload-pack`,
+   and `/<project_name>.git/git-receive-pack` cleanly.
+2. Empty repository (0-commit) advertisement (`0000... capabilities^{}`) so newly created
+   repositories can receive their initial `git push -u origin main` from the client.
+3. HTTP 302 redirects across `script.google.com` and `script.googleusercontent.com`
    (including converting POST -> GET on 302 redirect to `/macros/echo`).
-3. Step-by-step authentication fallback:
-   - Step 1: Anonymous request (works immediately if Web App is deployed for "Anyone").
-   - Step 2: Cached credentials / `~/.clasprc.json` OAuth token (with auto-refresh).
-   - Step 3: Interactive browser login prompt if authentication fails or 404/403 occurs.
+4. Step-by-step authentication fallback (env token/cookie, anonymous, cached credentials,
+   `~/.clasprc.json` OAuth auto-refresh, and interactive login prompt).
 """
 
 import base64
 import http.cookiejar
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -30,21 +37,94 @@ from typing import Dict, List, Optional, Tuple
 AUTH_CACHE_PATH = Path.home() / ".config" / "git-remote-gas" / "auth.json"
 CLASPRC_PATH = Path.home() / ".clasprc.json"
 
+VALID_PROJECT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
 
 def log_err(msg: str) -> None:
     sys.stderr.write(f"[git-remote-gas] {msg}\n")
     sys.stderr.flush()
 
 
-def normalize_gas_url(base_url: str, sub_path: str, query_params: Dict[str, str]) -> str:
+def parse_gas_remote_url(raw_url: str) -> Tuple[str, str, str]:
     """
-    GAS Web Apps return 404 if extra path segments like `/info/refs` are appended
-    after `/exec` or `/dev`. We preserve the `/exec` endpoint and pass `git_path`
-    and `service` as query parameters.
+    Parse a GAS Git remote URL of the form:
+      https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec/<project_name>.git
+
+    Returns `(endpoint_url, project_name, repo_path)` where:
+      - `endpoint_url`: `https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec`
+      - `project_name`: `<project_name>` (without `.git`)
+      - `repo_path`: `/<project_name>.git`
     """
-    parsed = urllib.parse.urlparse(base_url)
+    cleaned = raw_url.strip()
+    if cleaned.startswith("gas::"):
+        cleaned = cleaned[len("gas::") :]
+
+    parsed = urllib.parse.urlparse(cleaned)
+    if not parsed.scheme or not parsed.netloc:
+        raise ValueError(
+            f"Invalid GAS remote URL '{raw_url}'. Expected: "
+            "gas::https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec/<project_name>.git"
+        )
+
+    segments = [seg for seg in parsed.path.split("/") if seg]
+
+    # Locate `/exec` or `/dev` boundary in the URL path
+    exec_idx: Optional[int] = None
+    for idx, seg in enumerate(segments):
+        if seg in ("exec", "dev"):
+            exec_idx = idx
+            break
+
+    if exec_idx is not None:
+        base_segments = segments[: exec_idx + 1]
+        after_exec = segments[exec_idx + 1 :]
+    else:
+        # Fallback if custom reverse-proxy URL without `/exec` is used: last segment is `<project_name>.git`
+        if len(segments) >= 1 and segments[-1].endswith(".git"):
+            base_segments = segments[:-1]
+            after_exec = [segments[-1]]
+        else:
+            after_exec = []
+            base_segments = segments
+
+    if len(after_exec) != 1:
+        raise ValueError(
+            f"Repository name missing or invalid in URL '{raw_url}'. "
+            "Specify the project name at the end of the URL like GitHub:\n"
+            "  gas::https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec/project_name.git"
+        )
+
+    raw_repo_seg = after_exec[0].strip()
+    project_name = raw_repo_seg[:-4] if raw_repo_seg.endswith(".git") else raw_repo_seg
+    if (
+        not project_name
+        or project_name in (".", "..")
+        or not VALID_PROJECT_RE.match(project_name)
+    ):
+        raise ValueError(f"Invalid project name '{raw_repo_seg}' in URL '{raw_url}'.")
+
+    repo_path = f"/{project_name}.git"
+    endpoint_path = "/" + "/".join(base_segments)
+    endpoint_url = urllib.parse.urlunparse(
+        (parsed.scheme, parsed.netloc, endpoint_path, parsed.params, parsed.query, "")
+    )
+    return endpoint_url, project_name, repo_path
+
+
+def normalize_gas_url(
+    endpoint_url: str,
+    repo_path: str,
+    sub_path: str,
+    query_params: Dict[str, str],
+) -> str:
+    """
+    Preserve the `/exec` (or `/dev`) endpoint and pass the full Git path
+    `/<project_name>.git/<sub_path>` via `git_path` so GAS routes the request to `doGet`/`doPost`.
+    """
+    parsed = urllib.parse.urlparse(endpoint_url)
     existing_qs = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
-    existing_qs["git_path"] = sub_path
+    clean_sub = sub_path.lstrip("/")
+    existing_qs["git_path"] = f"{repo_path}/{clean_sub}" if clean_sub else repo_path
     existing_qs.update(query_params)
     new_query = urllib.parse.urlencode(existing_qs)
     return urllib.parse.urlunparse(
@@ -112,7 +192,6 @@ class GasAuthManager:
             return None
         try:
             raw = json.loads(CLASPRC_PATH.read_text(encoding="utf-8"))
-            # Support both clasp v2 (token top-level) and clasp v3 (tokens.default)
             token_obj = raw.get("token") or raw.get("tokens", {}).get("default") or raw
             access_token = token_obj.get("access_token")
             refresh_token = token_obj.get("refresh_token")
@@ -165,7 +244,6 @@ class GasAuthManager:
         log_err("  2. ブラウザで未承認の初回実行、またはデプロイIDの不一致")
         log_err("============================================================")
 
-        # Check if we have an interactive terminal via /dev/tty
         try:
             tty_in = open("/dev/tty", "r", encoding="utf-8")
             tty_out = open("/dev/tty", "w", encoding="utf-8")
@@ -252,9 +330,16 @@ class GasAuthManager:
 
 
 class GasHttpClient:
-    def __init__(self, base_url: str):
-        self.base_url = base_url.rstrip("/")
-        self.auth = GasAuthManager(self.base_url)
+    def __init__(self, raw_url: str):
+        endpoint_url, project_name, repo_path = parse_gas_remote_url(raw_url)
+        self.endpoint_url = endpoint_url.rstrip("/")
+        self.project_name = project_name
+        self.repo_path = repo_path
+        self.auth = GasAuthManager(self.endpoint_url)
+
+    def full_git_path(self, sub_path: str) -> str:
+        clean_sub = sub_path.lstrip("/")
+        return f"{self.repo_path}/{clean_sub}" if clean_sub else self.repo_path
 
     def request(
         self,
@@ -264,13 +349,8 @@ class GasHttpClient:
         body: Optional[bytes] = None,
         content_type: Optional[str] = None,
     ) -> bytes:
-        url = normalize_gas_url(self.base_url, sub_path, query_params)
+        url = normalize_gas_url(self.endpoint_url, self.repo_path, sub_path, query_params)
 
-        # Build candidate auth strategies in order:
-        # 1. Explicit env var if set
-        # 2. Anonymous (no Authorization header! Prevents 404 on "Anyone" deployments)
-        # 3. Cached auth from ~/.config/git-remote-gas/auth.json
-        # 4. Clasp OAuth token from ~/.clasprc.json
         strategies: List[Tuple[str, Dict[str, str]]] = []
         env_headers = self.auth.get_env_auth_headers()
         if env_headers:
@@ -288,14 +368,13 @@ class GasHttpClient:
 
         last_error: Optional[Exception] = None
 
-        for label, auth_headers in strategies:
+        for _label, auth_headers in strategies:
             try:
                 return self._execute_with_redirects(url, method, body, content_type, auth_headers)
             except PermissionError as e:
                 last_error = e
                 continue
 
-        # All automatic strategies failed -> trigger interactive browser login prompt
         interactive_headers = self.auth.prompt_browser_login(url)
         if interactive_headers is not None:
             try:
@@ -324,12 +403,11 @@ class GasHttpClient:
 
         for _ in range(max_redirects):
             headers = {
-                "User-Agent": "git-remote-gas/0.2",
+                "User-Agent": "git-remote-gas/0.3",
                 "Accept": "*/*",
             }
             if content_type and curr_body is not None:
                 headers["Content-Type"] = content_type
-            # Only send Authorization to script.google.com, not to googleusercontent echo
             parsed_curr = urllib.parse.urlparse(curr_url)
             if "googleusercontent.com" not in parsed_curr.netloc:
                 headers.update(auth_headers)
@@ -339,7 +417,6 @@ class GasHttpClient:
             req = urllib.request.Request(curr_url, data=curr_body, headers=headers, method=curr_method)
             try:
                 with opener.open(req, timeout=60) as resp:
-                    status = resp.getcode()
                     raw = resp.read()
             except urllib.error.HTTPError as e:
                 status = e.code
@@ -350,8 +427,9 @@ class GasHttpClient:
                         raise RuntimeError(f"HTTP {status} without Location header")
                     next_url = urllib.parse.urljoin(curr_url, location)
                     if "accounts.google.com" in next_url or "ServiceLogin" in next_url:
-                        raise PermissionError(f"Redirected to Google Login ({next_url})")
-                    # GAS Web App redirects POST /exec -> 302 GET /macros/echo
+                        raise PermissionError(
+                            f"Redirected to Google Login page ({next_url})"
+                        )
                     if status in (301, 302, 303):
                         curr_method = "GET"
                         curr_body = None
@@ -361,7 +439,6 @@ class GasHttpClient:
                     raise PermissionError(f"HTTP {status}: {e.reason}")
                 raise RuntimeError(f"HTTP error {status} from GAS: {e.reason}")
 
-            # Check if response is an HTML login page disguised as 200 OK
             if raw.lstrip().startswith((b"<!DOCTYPE html", b"<html", b"<HTML")):
                 text_preview = raw[:1024].decode("utf-8", errors="ignore")
                 if "accounts.google.com" in text_preview or "ServiceLogin" in text_preview or "Google Drive" in text_preview:
@@ -373,14 +450,11 @@ class GasHttpClient:
 
     @staticmethod
     def _decode_gas_payload(raw: bytes) -> bytes:
-        """
-         GAS ContentService only returns text. Our Rust server can return either
-        base64-encoded packets (prefixed with `GAS_GIT_B64:` or pure base64) or raw pkt-lines.
-        """
         trimmed = raw.strip()
+        if trimmed.startswith(b"ERR "):
+            return trimmed
         if trimmed.startswith(b"GAS_GIT_B64:"):
             return base64.b64decode(trimmed[len(b"GAS_GIT_B64:") :])
-        # If it already looks like a Git pkt-line (4 hex digits like `001e# service=`)
         if len(raw) >= 4:
             try:
                 int(raw[:4].decode("ascii"), 16)
@@ -397,7 +471,13 @@ class GasHttpClient:
 
 
 def parse_refs_from_advertisement(data: bytes) -> Tuple[List[Tuple[str, str]], Optional[str]]:
-    """Parses Smart HTTP v1 pkt-line ref advertisement."""
+    """
+    Parses Smart HTTP v1 pkt-line ref advertisement.
+    Handles empty repositories (`0000... capabilities^{}`) without emitting a fake ref.
+    """
+    if data.startswith(b"ERR "):
+        raise RuntimeError(data[4:].decode("utf-8", errors="replace").strip())
+
     idx = 0
     refs: List[Tuple[str, str]] = []
     symref_head: Optional[str] = None
@@ -415,6 +495,8 @@ def parse_refs_from_advertisement(data: bytes) -> Tuple[List[Tuple[str, str]], O
 
         if payload.startswith(b"#"):
             continue
+        if payload.startswith(b"ERR "):
+            raise RuntimeError(payload[4:].decode("utf-8", errors="replace").strip())
 
         line = payload.rstrip(b"\r\n")
         caps: List[str] = []
@@ -431,21 +513,32 @@ def parse_refs_from_advertisement(data: bytes) -> Tuple[List[Tuple[str, str]], O
         parts = ref_part.decode("utf-8", errors="replace").split(" ", 1)
         if len(parts) == 2:
             oid, refname = parts
+            # Skip empty-repo capability advertisement (`0000... capabilities^{}`)
+            if refname == "capabilities^{}" or oid == "0" * 40:
+                continue
             refs.append((oid, refname))
 
     return refs, symref_head
 
 
 def main() -> int:
+    if len(sys.argv) == 3 and sys.argv[1] == "--save-token":
+        auth = GasAuthManager("")
+        auth.save_cached_auth(token=sys.argv[2].strip())
+        print(f"Saved token to {AUTH_CACHE_PATH}")
+        return 0
+
     if len(sys.argv) < 3:
         log_err("Usage: git-remote-gas <remote-name> <url>")
         return 1
 
     raw_url = sys.argv[2]
-    if raw_url.startswith("gas::"):
-        raw_url = raw_url[len("gas::") :]
+    try:
+        client = GasHttpClient(raw_url)
+    except ValueError as e:
+        log_err(str(e))
+        return 1
 
-    client = GasHttpClient(raw_url)
     cached_refs: Optional[Tuple[List[Tuple[str, str]], Optional[str]]] = None
 
     def get_refs(for_push: bool = False) -> Tuple[List[Tuple[str, str]], Optional[str]]:
@@ -477,7 +570,7 @@ def main() -> int:
                 log_err(str(e))
                 return 1
 
-            if symref_head:
+            if symref_head and refs:
                 sys.stdout.write(f"@{symref_head} HEAD\n")
             for oid, refname in refs:
                 sys.stdout.write(f"{oid} {refname}\n")
@@ -498,19 +591,36 @@ def main() -> int:
                 req_lines.extend(f"{len(pkt) + 4:04x}".encode("ascii") + pkt)
             req_lines.extend(b"00000009done\n")
 
+            envelope = json.dumps(
+                {
+                    "service": "git-upload-pack",
+                    "git_path": client.full_git_path("/git-upload-pack"),
+                    "encoding": "base64",
+                    "body_base64": base64.b64encode(bytes(req_lines)).decode("ascii"),
+                }
+            ).encode("utf-8")
+
             resp = client.request(
                 "POST",
                 "/git-upload-pack",
                 {"service": "git-upload-pack", "encoding": "base64"},
-                body=base64.b64encode(bytes(req_lines)),
-                content_type="text/plain",
+                body=envelope,
+                content_type="application/json",
             )
-            # Extract packfile after NAK / ACK pkt-lines
             pack_idx = resp.find(b"PACK")
             if pack_idx == -1:
-                raise RuntimeError("No PACK signature found in upload-pack response")
+                raise RuntimeError(
+                    f"No PACK signature found in upload-pack response: {resp[:200]!r}"
+                )
             pack_data = resp[pack_idx:]
-            proc = subprocess.run(["git", "index-pack", "--stdin", "--fix-thin"], input=pack_data, check=False)
+            if pack_data.endswith(b"0000"):
+                pack_data = pack_data[:-4]
+            proc = subprocess.run(
+                ["git", "index-pack", "--stdin", "--fix-thin"],
+                input=pack_data,
+                stdout=subprocess.DEVNULL,
+                check=False,
+            )
             if proc.returncode != 0:
                 return proc.returncode
             sys.stdout.write("\n")
@@ -522,7 +632,11 @@ def main() -> int:
                 specs.append(line[len("push ") :])
                 line = sys.stdin.readline().rstrip("\r\n")
 
-            refs, _ = get_refs(for_push=True)
+            try:
+                refs, _ = get_refs(for_push=True)
+            except Exception as e:
+                log_err(str(e))
+                return 1
             remote_map = {refname: oid for oid, refname in refs}
 
             cmds = bytearray()
@@ -537,9 +651,9 @@ def main() -> int:
                 if src == "":
                     new_oid = "0" * 40
                 else:
-                    new_oid = (
-                        subprocess.check_output(["git", "rev-parse", src], text=True).strip()
-                    )
+                    new_oid = subprocess.check_output(
+                        ["git", "rev-parse", src], text=True
+                    ).strip()
                     rev_args.append(new_oid)
                     if old_oid != "0" * 40:
                         rev_args.append(f"^{old_oid}")
@@ -562,15 +676,34 @@ def main() -> int:
                 pack_data = pack_proc.stdout
 
             full_payload = bytes(cmds) + pack_data
-            client.request(
+            envelope = json.dumps(
+                {
+                    "service": "git-receive-pack",
+                    "git_path": client.full_git_path("/git-receive-pack"),
+                    "encoding": "base64",
+                    "body_base64": base64.b64encode(full_payload).decode("ascii"),
+                }
+            ).encode("utf-8")
+
+            resp = client.request(
                 "POST",
                 "/git-receive-pack",
                 {"service": "git-receive-pack", "encoding": "base64"},
-                body=base64.b64encode(full_payload),
-                content_type="text/plain",
+                body=envelope,
+                content_type="application/json",
             )
+            text_resp = resp.decode("utf-8", errors="replace")
+            if "ERR " in text_resp:
+                log_err(text_resp.strip())
+                return 1
+
             for dst in results:
-                sys.stdout.write(f"ok {dst}\n")
+                ng_marker = f"ng {dst} "
+                if ng_marker in text_resp:
+                    reason = text_resp.split(ng_marker, 1)[1].splitlines()[0]
+                    sys.stdout.write(f"error {dst} {reason}\n")
+                else:
+                    sys.stdout.write(f"ok {dst}\n")
             sys.stdout.write("\n")
             sys.stdout.flush()
 

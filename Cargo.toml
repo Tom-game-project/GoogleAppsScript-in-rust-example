@@ -18,8 +18,6 @@ gix-hash = "0.22"
 gix-object = "0.56"
 gix-packetline = { version = "0.21", default-features = false, features = ["blocking-io"] }
 gix-zlib = "0.1"
-gix-actor = "0.39"
-gix-date = "0.14"
 gix-validate = "0.11"
 
 [package.metadata.component]
@@ -55,4 +53,3 @@ world = "gas"
 "wasi:filesystem" = { path = "wit/deps/wasi-filesystem" }
 "wasi:http" = { path = "wit/deps/wasi-http" }
 "wasi:sockets" = { path = "wit/deps/wasi-sockets" }
-
