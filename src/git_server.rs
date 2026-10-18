@@ -2976,33 +2976,32 @@ fn render_autoindex_html_document(
         let json_rel = serde_json::to_string(redirect_rel)
             .unwrap_or_else(|_| "\"\"".to_string())
             .replace("</", "<\\/");
+        // Do NOT emit `<meta http-equiv="refresh">`! Inside GAS HtmlService's sandboxed iframe
+        // (`*.googleusercontent.com`), `<meta http-equiv="refresh">` navigates the inner iframe
+        // (`Sec-Fetch-Dest: iframe`, `Sec-Fetch-Site: cross-site`) to `script.google.com`, which
+        // triggers a cross-site redirect to `accounts.google.com/ServiceLogin` and fails with 401.
+        // Instead, in GAS HtmlService we update the top-level URL bar in-place via
+        // `google.script.history.replace(null, params, "")` while Page 1 is already rendered in body.
         head_extra.push_str(&format!(
-            r#"<meta http-equiv="refresh" content="0; url={}">
-<script>
+            r#"<script>
 (function() {{
   var targetHref = {};
   var targetRel = {};
-  function findExecBase() {{
-    var refs = [];
-    try {{ if (document.referrer) refs.push(document.referrer); }} catch (e) {{}}
-    try {{
-      if (window.parent && window.parent !== window && window.parent.document && window.parent.document.referrer) {{
-        refs.push(window.parent.document.referrer);
-      }}
-    }} catch (e) {{}}
-    for (var i = 0; i < refs.length; i++) {{
-      var m = refs[i].match(/^(https:\/\/script\.google\.com\/macros\/s\/[^\/?#]+\/(?:exec|dev))/);
-      if (m) return m[1];
-    }}
-    return null;
-  }}
   try {{
     if (window.location.hostname.indexOf("googleusercontent.com") !== -1) {{
-      var base = findExecBase();
-      if (base && window.top) {{
-        window.top.location.replace(base + "/" + targetRel);
-      }} else if (targetHref.indexOf("https://script.google.com/") === 0 && window.top) {{
-        window.top.location.replace(targetHref);
+      if (window.google && window.google.script && window.google.script.history && typeof window.google.script.history.replace === "function") {{
+        var qIdx = targetRel.indexOf("?");
+        var params = {{ page: "1" }};
+        if (qIdx !== -1) {{
+          var pairs = targetRel.slice(qIdx + 1).split("&");
+          for (var i = 0; i < pairs.length; i++) {{
+            var kv = pairs[i].split("=");
+            if (kv[0]) {{
+              params[decodeURIComponent(kv[0])] = decodeURIComponent(kv[1] || "");
+            }}
+          }}
+        }}
+        window.google.script.history.replace(null, params, "");
       }}
     }} else {{
       window.location.replace(targetHref);
@@ -3011,7 +3010,6 @@ fn render_autoindex_html_document(
 }})();
 </script>
 "#,
-            escape_html(redirect_href),
             json_href,
             json_rel
         ));

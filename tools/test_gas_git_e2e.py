@@ -952,9 +952,6 @@ class GasWebAppMockServer:
             redirect_pair: Optional[Tuple[str, str]] = None,
         ) -> bytes:
             meta_redir = ""
-            if redirect_pair:
-                r_href, _r_rel = redirect_pair
-                meta_redir = f'<meta http-equiv="refresh" content="0; url={escape_html(r_href)}">\n'
             body_pre = "\n".join(lines)
             doc = (
                 "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n"
