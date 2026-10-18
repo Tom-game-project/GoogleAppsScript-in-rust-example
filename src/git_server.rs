@@ -2638,7 +2638,16 @@ pub fn handle_do_get(event: &GasDoGetEvent) -> WebResponse {
                     format,
                 ))
             } else {
-                WebResponse::Html(render_web_ui_html(Some(project_name)))
+                let trailing_slash = req_path.len() > 1 && req_path.ends_with('/');
+                handle_commit_browser_get(
+                    event,
+                    &project_name,
+                    "",
+                    &[],
+                    trailing_slash,
+                    encoding,
+                    format,
+                )
             }
         }
         Ok(GitRoute::CommitBrowser {
@@ -2973,11 +2982,28 @@ fn render_autoindex_html_document(
 (function() {{
   var targetHref = {};
   var targetRel = {};
+  function findExecBase() {{
+    var refs = [];
+    try {{ if (document.referrer) refs.push(document.referrer); }} catch (e) {{}}
+    try {{
+      if (window.parent && window.parent !== window && window.parent.document && window.parent.document.referrer) {{
+        refs.push(window.parent.document.referrer);
+      }}
+    }} catch (e) {{}}
+    for (var i = 0; i < refs.length; i++) {{
+      var m = refs[i].match(/^(https:\/\/script\.google\.com\/macros\/s\/[^\/?#]+\/(?:exec|dev))/);
+      if (m) return m[1];
+    }}
+    return null;
+  }}
   try {{
     if (window.location.hostname.indexOf("googleusercontent.com") !== -1) {{
-      var ref = document.referrer || "";
-      var m = ref.match(/^(https:\/\/script\.google\.com\/macros\/s\/[^\/?#]+\/(?:exec|dev))/);
-      if (m && window.top) {{ window.top.location.replace(m[1] + "/" + targetRel); }}
+      var base = findExecBase();
+      if (base && window.top) {{
+        window.top.location.replace(base + "/" + targetRel);
+      }} else if (targetHref.indexOf("https://script.google.com/") === 0 && window.top) {{
+        window.top.location.replace(targetHref);
+      }}
     }} else {{
       window.location.replace(targetHref);
     }}
@@ -2995,10 +3021,19 @@ fn render_autoindex_html_document(
         r#"<script>
 document.addEventListener("DOMContentLoaded", function() {
   if (window.location.hostname.indexOf("googleusercontent.com") === -1) return;
-  var ref = document.referrer || "";
-  var m = ref.match(/^(https:\/\/script\.google\.com\/macros\/s\/[^\/?#]+\/(?:exec|dev))/);
-  if (!m) return;
-  var base = m[1];
+  var refs = [];
+  try { if (document.referrer) refs.push(document.referrer); } catch (e) {}
+  try {
+    if (window.parent && window.parent !== window && window.parent.document && window.parent.document.referrer) {
+      refs.push(window.parent.document.referrer);
+    }
+  } catch (e) {}
+  var base = null;
+  for (var r = 0; r < refs.length; r++) {
+    var m = refs[r].match(/^(https:\/\/script\.google\.com\/macros\/s\/[^\/?#]+\/(?:exec|dev))/);
+    if (m) { base = m[1]; break; }
+  }
+  if (!base) return;
   var links = document.querySelectorAll("a[data-exec-rel]");
   for (var i = 0; i < links.length; i++) {
     var rel = links[i].getAttribute("data-exec-rel");
@@ -3063,6 +3098,7 @@ pub fn render_not_found_error_document(
 }
 
 /// Core resolver for:
+/// - `exec/<project_name>.git` (displays commit hash list for `<project_name>.git`)
 /// - `exec/<project_name>.git/<commit hash>`
 /// - `exec/<project_name>.git/<commit hash>/<dir path>`
 /// - `exec/<project_name>.git/<commit hash>/<file path>`
@@ -3080,10 +3116,15 @@ pub fn resolve_commit_browser_request(
     custom_per_page: Option<usize>,
 ) -> CommitBrowserOutput {
     let effective_page_size = page_size.max(1);
-    let repo_prefix = format!("{}.git/", encode_uri_segment(project_name));
+    let repo_encoded = format!("{}.git", encode_uri_segment(project_name));
+    let repo_prefix = format!("{}/", repo_encoded);
 
-    // Path after `/exec/` has `1 (project_name.git) + 1 (commit_ref) + subpath.len()` segments
-    let seg_count = 2 + subpath.len();
+    let trimmed_commit_ref = commit_ref.trim();
+    let seg_count = if trimmed_commit_ref.is_empty() {
+        1
+    } else {
+        2 + subpath.len()
+    };
     let up_levels = if trailing_slash {
         seg_count
     } else {
@@ -3108,6 +3149,15 @@ pub fn resolve_commit_browser_request(
         (exec_rel, href)
     };
 
+    let make_repo_root_urls = |query_suffix: &str| -> (String, String) {
+        let exec_rel = format!("{}{}", repo_encoded, query_suffix);
+        let href = match base_clean {
+            Some(b) => format!("{}/{}", b, exec_rel),
+            None => format!("{}{}", rel_prefix, exec_rel),
+        };
+        (exec_rel, href)
+    };
+
     let make_page_query = |p: usize| -> String {
         match custom_per_page {
             Some(pp) => format!("?page={}&per_page={}", p, pp),
@@ -3116,7 +3166,7 @@ pub fn resolve_commit_browser_request(
     };
 
     let mut all_commits = reader.list_commits();
-    let q = commit_ref.trim().to_ascii_lowercase();
+    let q = trimmed_commit_ref.to_ascii_lowercase();
     let is_hex = !q.is_empty() && q.len() <= 40 && q.chars().all(|c| c.is_ascii_hexdigit());
 
     if is_hex && q.len() == 40 && !all_commits.iter().any(|c| c.oid.eq_ignore_ascii_case(&q)) {
@@ -3156,23 +3206,16 @@ pub fn resolve_commit_browser_request(
         }
     }
 
-    let matched_commits: Vec<CommitItem> = if is_hex {
-        all_commits
-            .iter()
-            .filter(|c| c.oid.to_ascii_lowercase().starts_with(&q))
-            .cloned()
-            .collect()
-    } else {
-        Vec::new()
-    };
-
     let render_404 = |req_display: &str,
                       reason: &str,
-                      back_target: &str,
+                      back_target_after_repo: Option<&str>,
                       back_label: &str|
      -> CommitBrowserOutput {
         let title = "404 Not Found - Path Does Not Exist (Not a Raw File)".to_string();
-        let (back_rel, back_href) = make_urls(back_target);
+        let (back_rel, back_href) = match back_target_after_repo {
+            Some(t) => make_urls(t),
+            None => make_repo_root_urls(""),
+        };
         let html = render_not_found_error_document(
             &title,
             req_display,
@@ -3190,11 +3233,25 @@ pub fn resolve_commit_browser_request(
     let render_commit_list = |list: &[CommitItem],
                               heading_prefix: &str,
                               page: usize,
-                              is_redirect: bool|
+                              is_redirect: bool,
+                              is_repo_root: bool|
      -> CommitBrowserOutput {
         let total = list.len();
         let total_pages = (total.max(1) + effective_page_size - 1) / effective_page_size;
-        let enc_ref = encode_uri_segment(commit_ref);
+        let enc_ref = encode_uri_segment(trimmed_commit_ref);
+
+        let build_page_url = |p: usize| -> (String, String, String) {
+            let qp = make_page_query(p);
+            if is_repo_root {
+                let (rel, href) = make_repo_root_urls(&qp);
+                let label = format!("{}.git?page={}", project_name, p);
+                (rel, href, label)
+            } else {
+                let (rel, href) = make_urls(&format!("{}{}", enc_ref, qp));
+                let label = format!("{}?page={}", trimmed_commit_ref, p);
+                (rel, href, label)
+            }
+        };
 
         let title = if total_pages > 1 {
             format!("{} (Page {}/{})", heading_prefix, page, total_pages)
@@ -3204,11 +3261,10 @@ pub fn resolve_commit_browser_request(
 
         let mut lines: Vec<String> = Vec::new();
         let redirect_pair = if is_redirect {
-            let q1 = make_page_query(1);
-            let (r_rel, r_href) = make_urls(&format!("{}{}", enc_ref, q1));
+            let (r_rel, r_href, r_label) = build_page_url(1);
             lines.push(format!(
                 "Redirecting to {} ...",
-                format_autoindex_link(&r_rel, &r_href, &format!("{}{}", commit_ref, q1), None)
+                format_autoindex_link(&r_rel, &r_href, &r_label, None)
             ));
             lines.push(String::new());
             Some((r_href, r_rel))
@@ -3238,8 +3294,7 @@ pub fn resolve_commit_browser_request(
             lines.push(String::new());
             let mut page_links: Vec<String> = Vec::with_capacity(total_pages);
             for p in 1..=total_pages {
-                let qp = make_page_query(p);
-                let (p_rel, p_href) = make_urls(&format!("{}{}", enc_ref, qp));
+                let (p_rel, p_href, _) = build_page_url(p);
                 let link = format_autoindex_link(&p_rel, &p_href, &p.to_string(), None);
                 if p == page {
                     page_links.push(format!("[{}]", link));
@@ -3249,9 +3304,7 @@ pub fn resolve_commit_browser_request(
             }
             lines.push(format!("Pages: {}", page_links.join(" ")));
             for p in 1..=total_pages {
-                let qp = make_page_query(p);
-                let (p_rel, p_href) = make_urls(&format!("{}{}", enc_ref, qp));
-                let path_label = format!("{}?page={}", commit_ref, p);
+                let (p_rel, p_href, path_label) = build_page_url(p);
                 let status_col = if p == page {
                     format!("page {} (current)", p)
                 } else {
@@ -3281,48 +3334,97 @@ pub fn resolve_commit_browser_request(
         }
     };
 
+    // Case 0: Repository root `exec/<project_name>.git` (`commit_ref` is empty) -> render commit hash list
+    if trimmed_commit_ref.is_empty() {
+        let total = all_commits.len();
+        let total_pages = (total.max(1) + effective_page_size - 1) / effective_page_size;
+        let heading = format!("Index of /{}.git (commits)", project_name);
+
+        if let Some(raw_p) = page_param {
+            if let Ok(p) = raw_p.trim().parse::<usize>() {
+                if p >= 1 && p <= total_pages {
+                    return render_commit_list(&all_commits, &heading, p, false, true);
+                }
+            }
+            return render_404(
+                &format!("/{}.git?page={}", project_name, raw_p),
+                &format!(
+                    "Invalid page number '{}' (valid pages: 1..={})",
+                    raw_p, total_pages
+                ),
+                None,
+                &format!("{}.git", project_name),
+            );
+        }
+
+        if total > effective_page_size {
+            return render_commit_list(&all_commits, &heading, 1, true, true);
+        } else {
+            return render_commit_list(&all_commits, &heading, 1, false, true);
+        }
+    }
+
+    let matched_commits: Vec<CommitItem> = if is_hex {
+        all_commits
+            .iter()
+            .filter(|c| c.oid.to_ascii_lowercase().starts_with(&q))
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     // Case 1: Invalid commit hash (0 matches)
     if matched_commits.is_empty() {
         let total = all_commits.len();
         let total_pages = (total.max(1) + effective_page_size - 1) / effective_page_size;
         let heading = format!(
             "Index of /{}.git commits (invalid commit hash: {})",
-            project_name, commit_ref
+            project_name, trimmed_commit_ref
         );
 
         if subpath.is_empty() {
             if let Some(raw_p) = page_param {
                 if let Ok(p) = raw_p.trim().parse::<usize>() {
                     if p >= 1 && p <= total_pages {
-                        return render_commit_list(&all_commits, &heading, p, false);
+                        return render_commit_list(&all_commits, &heading, p, false, false);
                     }
                 }
                 return render_404(
-                    &format!("/{}.git/{}?page={}", project_name, commit_ref, raw_p),
+                    &format!("/{}.git/{}?page={}", project_name, trimmed_commit_ref, raw_p),
                     &format!(
                         "Invalid page number '{}' (valid pages: 1..={})",
                         raw_p, total_pages
                     ),
-                    &format!("{}{}", encode_uri_segment(commit_ref), make_page_query(1)),
-                    &format!("{}?page=1", commit_ref),
+                    Some(&format!(
+                        "{}{}",
+                        encode_uri_segment(trimmed_commit_ref),
+                        make_page_query(1)
+                    )),
+                    &format!("{}?page=1", trimmed_commit_ref),
                 );
             }
             if total > effective_page_size {
-                return render_commit_list(&all_commits, &heading, 1, true);
+                return render_commit_list(&all_commits, &heading, 1, true, false);
             } else {
-                return render_commit_list(&all_commits, &heading, 1, false);
+                return render_commit_list(&all_commits, &heading, 1, false, false);
             }
         }
 
-        let requested_full = format!("/{}.git/{}/{}", project_name, commit_ref, subpath.join("/"));
+        let requested_full = format!(
+            "/{}.git/{}/{}",
+            project_name,
+            trimmed_commit_ref,
+            subpath.join("/")
+        );
         return render_404(
             &requested_full,
             &format!(
                 "Commit hash '{}' is invalid and path '{}' cannot be resolved.",
-                commit_ref, requested_full
+                trimmed_commit_ref, requested_full
             ),
-            &encode_uri_segment(commit_ref),
-            &format!("View commit list ({})", commit_ref),
+            Some(&encode_uri_segment(trimmed_commit_ref)),
+            &format!("View commit list ({})", trimmed_commit_ref),
         );
     }
 
@@ -3332,42 +3434,51 @@ pub fn resolve_commit_browser_request(
         let total_pages = (total.max(1) + effective_page_size - 1) / effective_page_size;
         let heading = format!(
             "Index of candidate commits in /{}.git for prefix {} ({} matches)",
-            project_name, commit_ref, total
+            project_name, trimmed_commit_ref, total
         );
 
         if subpath.is_empty() {
             if let Some(raw_p) = page_param {
                 if let Ok(p) = raw_p.trim().parse::<usize>() {
                     if p >= 1 && p <= total_pages {
-                        return render_commit_list(&matched_commits, &heading, p, false);
+                        return render_commit_list(&matched_commits, &heading, p, false, false);
                     }
                 }
                 return render_404(
-                    &format!("/{}.git/{}?page={}", project_name, commit_ref, raw_p),
+                    &format!("/{}.git/{}?page={}", project_name, trimmed_commit_ref, raw_p),
                     &format!(
                         "Invalid page number '{}' for candidate commits (valid pages: 1..={})",
                         raw_p, total_pages
                     ),
-                    &format!("{}{}", encode_uri_segment(commit_ref), make_page_query(1)),
-                    &format!("{}?page=1", commit_ref),
+                    Some(&format!(
+                        "{}{}",
+                        encode_uri_segment(trimmed_commit_ref),
+                        make_page_query(1)
+                    )),
+                    &format!("{}?page=1", trimmed_commit_ref),
                 );
             }
             if total > effective_page_size {
-                return render_commit_list(&matched_commits, &heading, 1, true);
+                return render_commit_list(&matched_commits, &heading, 1, true, false);
             } else {
-                return render_commit_list(&matched_commits, &heading, 1, false);
+                return render_commit_list(&matched_commits, &heading, 1, false, false);
             }
         }
 
-        let requested_full = format!("/{}.git/{}/{}", project_name, commit_ref, subpath.join("/"));
+        let requested_full = format!(
+            "/{}.git/{}/{}",
+            project_name,
+            trimmed_commit_ref,
+            subpath.join("/")
+        );
         return render_404(
             &requested_full,
             &format!(
                 "Commit prefix '{}' is ambiguous ({} candidate commits) for path '{}'",
-                commit_ref, total, requested_full
+                trimmed_commit_ref, total, requested_full
             ),
-            &encode_uri_segment(commit_ref),
-            &format!("View candidate commits for {}", commit_ref),
+            Some(&encode_uri_segment(trimmed_commit_ref)),
+            &format!("View candidate commits for {}", trimmed_commit_ref),
         );
     }
 
@@ -3379,7 +3490,7 @@ pub fn resolve_commit_browser_request(
         return render_404(
             &format!("/{}.git/{}", project_name, resolved_oid_str),
             &format!("Corrupt commit OID '{}'", resolved_oid_str),
-            "",
+            None,
             "../",
         );
     };
@@ -3387,7 +3498,7 @@ pub fn resolve_commit_browser_request(
         return render_404(
             &format!("/{}.git/{}", project_name, resolved_oid_str),
             &format!("Commit object '{}' missing", resolved_oid_str),
-            "",
+            None,
             "../",
         );
     };
@@ -3395,7 +3506,7 @@ pub fn resolve_commit_browser_request(
         return render_404(
             &format!("/{}.git/{}", project_name, resolved_oid_str),
             &format!("Object '{}' is not a commit", resolved_oid_str),
-            "",
+            None,
             "../",
         );
     };
@@ -3406,7 +3517,7 @@ pub fn resolve_commit_browser_request(
             return render_404(
                 &format!("/{}.git/{}", project_name, resolved_oid_str),
                 &format!("Tree object '{}' missing", tree_oid.to_hex()),
-                &encode_uri_segment(resolved_oid_str),
+                Some(&encode_uri_segment(resolved_oid_str)),
                 resolved_oid_str,
             );
         };
@@ -3414,7 +3525,7 @@ pub fn resolve_commit_browser_request(
             return render_404(
                 &format!("/{}.git/{}", project_name, resolved_oid_str),
                 &format!("Object '{}' is not a directory tree", tree_oid.to_hex()),
-                &encode_uri_segment(resolved_oid_str),
+                Some(&encode_uri_segment(resolved_oid_str)),
                 resolved_oid_str,
             );
         };
@@ -3460,7 +3571,10 @@ pub fn resolve_commit_browser_request(
 
         let mut lines: Vec<String> = Vec::new();
 
-        if !dir_subpath.is_empty() {
+        if dir_subpath.is_empty() {
+            let (p_rel, p_href) = make_repo_root_urls("");
+            lines.push(format_autoindex_link(&p_rel, &p_href, "../", None));
+        } else {
             let parent_target = if dir_subpath.len() == 1 {
                 enc_oid.clone()
             } else {
@@ -3550,7 +3664,7 @@ pub fn resolve_commit_browser_request(
             return render_404(
                 &full_req_display,
                 &format!("Invalid path segment '{}' in '{}'", seg, full_req_display),
-                &encode_uri_segment(resolved_oid_str),
+                Some(&encode_uri_segment(resolved_oid_str)),
                 &format!("{}/", resolved_oid_str),
             );
         }
@@ -3562,7 +3676,7 @@ pub fn resolve_commit_browser_request(
             return render_404(
                 &full_req_display,
                 &format!("Directory tree does not exist along '{}'", full_req_display),
-                &encode_uri_segment(resolved_oid_str),
+                Some(&encode_uri_segment(resolved_oid_str)),
                 &format!("{}/", resolved_oid_str),
             );
         };
@@ -3570,7 +3684,7 @@ pub fn resolve_commit_browser_request(
             return render_404(
                 &full_req_display,
                 &format!("Intermediate object is not a directory along '{}'", full_req_display),
-                &encode_uri_segment(resolved_oid_str),
+                Some(&encode_uri_segment(resolved_oid_str)),
                 &format!("{}/", resolved_oid_str),
             );
         };
@@ -3585,7 +3699,7 @@ pub fn resolve_commit_browser_request(
                     "Directory '{}' does not exist in commit {}",
                     seg, resolved_oid_str
                 ),
-                &encode_uri_segment(resolved_oid_str),
+                Some(&encode_uri_segment(resolved_oid_str)),
                 &format!("{}/", resolved_oid_str),
             );
         };
@@ -3594,7 +3708,7 @@ pub fn resolve_commit_browser_request(
             return render_404(
                 &full_req_display,
                 &format!("Git object for '{}' not found", seg),
-                &encode_uri_segment(resolved_oid_str),
+                Some(&encode_uri_segment(resolved_oid_str)),
                 &format!("{}/", resolved_oid_str),
             );
         };
@@ -3602,7 +3716,7 @@ pub fn resolve_commit_browser_request(
             return render_404(
                 &full_req_display,
                 &format!("Corrupt Git object for '{}'", seg),
-                &encode_uri_segment(resolved_oid_str),
+                Some(&encode_uri_segment(resolved_oid_str)),
                 &format!("{}/", resolved_oid_str),
             );
         };
@@ -3613,7 +3727,7 @@ pub fn resolve_commit_browser_request(
                     "'{}' is a file, not a directory (cannot traverse '{}')",
                     seg, full_req_display
                 ),
-                &encode_uri_segment(resolved_oid_str),
+                Some(&encode_uri_segment(resolved_oid_str)),
                 &format!("{}/", resolved_oid_str),
             );
         }
@@ -3625,7 +3739,7 @@ pub fn resolve_commit_browser_request(
         return render_404(
             &full_req_display,
             &format!("Parent directory does not exist for '{}'", full_req_display),
-            &encode_uri_segment(resolved_oid_str),
+            Some(&encode_uri_segment(resolved_oid_str)),
             &format!("{}/", resolved_oid_str),
         );
     };
@@ -3633,7 +3747,7 @@ pub fn resolve_commit_browser_request(
         return render_404(
             &full_req_display,
             &format!("Parent object is not a directory for '{}'", full_req_display),
-            &encode_uri_segment(resolved_oid_str),
+            Some(&encode_uri_segment(resolved_oid_str)),
             &format!("{}/", resolved_oid_str),
         );
     };
@@ -3649,7 +3763,7 @@ pub fn resolve_commit_browser_request(
                 subpath.join("/"),
                 resolved_oid_str
             ),
-            &encode_uri_segment(resolved_oid_str),
+            Some(&encode_uri_segment(resolved_oid_str)),
             &format!("{}/", resolved_oid_str),
         );
     };
@@ -3659,7 +3773,7 @@ pub fn resolve_commit_browser_request(
         return render_404(
             &full_req_display,
             &format!("Git object '{}' is missing", target_oid.to_hex()),
-            &encode_uri_segment(resolved_oid_str),
+            Some(&encode_uri_segment(resolved_oid_str)),
             &format!("{}/", resolved_oid_str),
         );
     };
@@ -3669,7 +3783,7 @@ pub fn resolve_commit_browser_request(
         return render_404(
             &full_req_display,
             &format!("Corrupt Git object for '{}'", full_req_display),
-            &encode_uri_segment(resolved_oid_str),
+            Some(&encode_uri_segment(resolved_oid_str)),
             &format!("{}/", resolved_oid_str),
         );
     };
@@ -3684,7 +3798,7 @@ pub fn resolve_commit_browser_request(
                         "'{}' is a regular file, not a directory (trailing '/' is invalid)",
                         subpath.join("/")
                     ),
-                    &encode_uri_segment(resolved_oid_str),
+                    Some(&encode_uri_segment(resolved_oid_str)),
                     &format!("{}/", resolved_oid_str),
                 );
             }
@@ -3701,7 +3815,7 @@ pub fn resolve_commit_browser_request(
         _ => render_404(
             &full_req_display,
             &format!("Unsupported Git object kind at '{}'", full_req_display),
-            &encode_uri_segment(resolved_oid_str),
+            Some(&encode_uri_segment(resolved_oid_str)),
             &format!("{}/", resolved_oid_str),
         ),
     }
@@ -3731,13 +3845,21 @@ fn handle_commit_browser_get(
         .max(1);
 
     let page_param = event.parameter.get("page").map(|s| s.as_str());
-    let configured_base = get_env_or_script_property(ENV_GAS_WEB_APP_URL);
+    let configured_base = event
+        .web_app_url
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| get_env_or_script_property(ENV_GAS_WEB_APP_URL));
 
     let store = match GasGitStore::open(project_name) {
         Ok(s) => s,
         Err(err) => {
             let title = "404 Not Found - Repository Does Not Exist (Not a Raw File)";
-            let req_display = format!("/{}.git/{}", project_name, commit_ref);
+            let req_display = if commit_ref.is_empty() {
+                format!("/{}.git", project_name)
+            } else {
+                format!("/{}.git/{}", project_name, commit_ref)
+            };
             let html = render_not_found_error_document(title, &req_display, &err, None);
             if format == "json" {
                 let env = GasGitResponseEnvelope {
@@ -3959,7 +4081,7 @@ mod tests {
     }
 
     #[test]
-    fn test_commit_browser_invalid_and_ambiguous_commits_with_page_param() {
+    fn test_commit_browser_repo_root_and_full_exec_urls() {
         let commits = vec![
             CommitItem {
                 oid: "a1b2c3d400000000000000000000000000000001".to_string(),
@@ -3989,6 +4111,30 @@ mod tests {
             objects: BTreeMap::new(),
         };
 
+        let gas_exec_url = "https://script.google.com/macros/s/AKfycbyTestId/exec";
+
+        // Accessing `exec/my-repo.git` (`commit_ref = ""`) renders commit hash list with full `https://script.google.com/.../exec/...` hrefs
+        let repo_root_out = resolve_commit_browser_request(
+            &reader,
+            "my-repo",
+            "",
+            &[],
+            false,
+            None,
+            Some(gas_exec_url),
+            20,
+            None,
+        );
+        match repo_root_out {
+            CommitBrowserOutput::Html { status, html, .. } => {
+                assert_eq!(status, 200);
+                assert!(html.contains(
+                    "href=\"https://script.google.com/macros/s/AKfycbyTestId/exec/my-repo.git/a1b2c3d400000000000000000000000000000001\""
+                ));
+            }
+            _ => panic!("Expected Html output for repo root commit list"),
+        }
+
         // Ambiguous prefix `a1b2` matches both commits (and redirects to `?page=1` when page_size=1)
         let ambig_redir = resolve_commit_browser_request(
             &reader,
@@ -3997,7 +4143,7 @@ mod tests {
             &[],
             false,
             None,
-            None,
+            Some(gas_exec_url),
             1,
             Some(1),
         );
@@ -4011,37 +4157,11 @@ mod tests {
                 assert_eq!(status, 302);
                 assert_eq!(
                     redirect_to.as_deref(),
-                    Some("../my-repo.git/a1b2?page=1&per_page=1")
+                    Some("https://script.google.com/macros/s/AKfycbyTestId/exec/my-repo.git/a1b2?page=1&per_page=1")
                 );
                 assert!(html.contains("a1b2?page=2"));
             }
             _ => panic!("Expected redirect Html output for ambiguous prefix with page_size=1"),
-        }
-
-        // Invalid commit hash with page_size=1 redirects to `?page=1` and links to `?page=2`
-        let inv_redir = resolve_commit_browser_request(
-            &reader,
-            "my-repo",
-            "badhash",
-            &[],
-            false,
-            None,
-            None,
-            1,
-            None,
-        );
-        match inv_redir {
-            CommitBrowserOutput::Html {
-                status,
-                html,
-                redirect_to,
-                ..
-            } => {
-                assert_eq!(status, 302);
-                assert_eq!(redirect_to.as_deref(), Some("../my-repo.git/badhash?page=1"));
-                assert!(html.contains("badhash?page=2"));
-            }
-            _ => panic!("Expected redirect Html output for invalid hash"),
         }
     }
 }

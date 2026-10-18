@@ -53,9 +53,23 @@ interface GasGlobal {
 
 declare const global: GasGlobal;
 
+function attachWebAppUrl(e: GoogleAppsScript.Events.DoGet | GoogleAppsScript.Events.DoPost): void {
+    try {
+        if (typeof ScriptApp !== "undefined" && typeof ScriptApp.getService === "function") {
+            const url = ScriptApp.getService().getUrl();
+            if (url && url.trim() !== "") {
+                (e as unknown as Record<string, unknown>).webAppUrl = url.trim();
+            }
+        }
+    } catch {
+        // Ignore if ScriptApp.getService() is unavailable
+    }
+}
+
 global.doGet = function(
     e: GoogleAppsScript.Events.DoGet,
 ): GoogleAppsScript.Content.TextOutput | GoogleAppsScript.HTML.HtmlOutput {
+    attachWebAppUrl(e);
     const r = rsDoGet(JSON.stringify(e)) as unknown as WitWebResponse | GasTextOutput;
     if ("tag" in r) {
         if (r.tag === "html") {
@@ -95,6 +109,7 @@ global.do_get_test00 = function(): void {
 };
 
 global.doPost = function(e: GoogleAppsScript.Events.DoPost): GoogleAppsScript.Content.TextOutput {
+    attachWebAppUrl(e);
     const r = rsDoPost(JSON.stringify(e)) as unknown as GasTextOutput;
     return r.rawTextOutput;
 };

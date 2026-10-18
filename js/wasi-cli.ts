@@ -10,18 +10,34 @@ import {
 
 // wasi:cli/environment (@0.3.2 & @0.2.0)
 export function getEnvironment(): Array<[string, string]> {
+	const entries: Record<string, string> = {};
 	try {
 		if (
 			typeof PropertiesService !== "undefined" &&
 			typeof PropertiesService.getScriptProperties === "function"
 		) {
 			const props = PropertiesService.getScriptProperties().getProperties();
-			return Object.entries(props);
+			Object.assign(entries, props);
 		}
 	} catch {
-		// スクリプトプロパティにアクセスできない場合は空リストを返す
+		// スクリプトプロパティにアクセスできない場合は無視
 	}
-	return [];
+	if (!entries.GAS_WEB_APP_URL || entries.GAS_WEB_APP_URL.trim() === "") {
+		try {
+			if (
+				typeof ScriptApp !== "undefined" &&
+				typeof ScriptApp.getService === "function"
+			) {
+				const serviceUrl = ScriptApp.getService().getUrl();
+				if (serviceUrl && serviceUrl.trim() !== "") {
+					entries.GAS_WEB_APP_URL = serviceUrl.trim();
+				}
+			}
+		} catch {
+			// ScriptApp.getService() が利用できない場合は無視
+		}
+	}
+	return Object.entries(entries);
 }
 
 export function getArguments(): string[] {

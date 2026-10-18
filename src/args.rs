@@ -46,6 +46,10 @@ pub struct GasDoGetEvent {
     /// POST データ (doPost の場合のみ存在)
     #[serde(default)]
     pub post_data: Option<GasPostData>,
+
+    /// デプロイ済み Web App のベース URL (`ScriptApp.getService().getUrl()`)
+    #[serde(default)]
+    pub web_app_url: Option<String>,
 }
 
 pub type GasDoPostEvent = GasDoGetEvent;

@@ -899,6 +899,7 @@ class GasWebAppMockServer:
         subpath: List[str],
         trailing_slash: bool,
         page_param: Optional[str] = None,
+        configured_base_url: Optional[str] = None,
         page_size: int = 20,
         custom_per_page: Optional[int] = None,
     ) -> Tuple[int, str, bytes, Optional[str], Optional[str]]:
@@ -907,14 +908,22 @@ class GasWebAppMockServer:
         Returns `(http_status, content_type, body_bytes, redirect_location, download_filename)`.
         """
         effective_page_size = max(1, page_size)
-        repo_prefix = f"{encode_uri_segment(route_proj)}.git/"
-        seg_count = 2 + len(subpath)
+        repo_encoded = f"{encode_uri_segment(route_proj)}.git"
+        repo_prefix = f"{repo_encoded}/"
+        trimmed_ref = commit_ref.strip()
+        seg_count = 1 if not trimmed_ref else (2 + len(subpath))
         up_levels = seg_count if trailing_slash else max(0, seg_count - 1)
         rel_prefix = "./" if up_levels == 0 else ("../" * up_levels)
+        base_clean = configured_base_url.rstrip("/") if configured_base_url else None
 
         def make_urls(target_after_repo: str) -> Tuple[str, str]:
             exec_rel = f"{repo_prefix}{target_after_repo}"
-            href = f"{rel_prefix}{exec_rel}"
+            href = f"{base_clean}/{exec_rel}" if base_clean else f"{rel_prefix}{exec_rel}"
+            return (exec_rel, href)
+
+        def make_repo_root_urls(query_suffix: str) -> Tuple[str, str]:
+            exec_rel = f"{repo_encoded}{query_suffix}"
+            href = f"{base_clean}/{exec_rel}" if base_clean else f"{rel_prefix}{exec_rel}"
             return (exec_rel, href)
 
         def make_page_query(p: int) -> str:
@@ -1001,10 +1010,20 @@ class GasWebAppMockServer:
             heading_prefix: str,
             page: int,
             is_redirect: bool,
+            is_repo_root: bool = False,
         ) -> Tuple[int, str, bytes, Optional[str], Optional[str]]:
             total = len(commits_list)
             total_pages = (max(1, total) + effective_page_size - 1) // effective_page_size
-            enc_ref = encode_uri_segment(commit_ref)
+            enc_ref = encode_uri_segment(trimmed_ref)
+
+            def build_page_url(p: int) -> Tuple[str, str, str]:
+                qp = make_page_query(p)
+                if is_repo_root:
+                    rel, href = make_repo_root_urls(qp)
+                    return (rel, href, f"{route_proj}.git?page={p}")
+                rel, href = make_urls(f"{enc_ref}{qp}")
+                return (rel, href, f"{trimmed_ref}?page={p}")
+
             title = (
                 f"{heading_prefix} (Page {page}/{total_pages})"
                 if total_pages > 1
@@ -1013,10 +1032,9 @@ class GasWebAppMockServer:
             lines: List[str] = []
             redirect_pair: Optional[Tuple[str, str]] = None
             if is_redirect:
-                q1 = make_page_query(1)
-                r_rel, r_href = make_urls(f"{enc_ref}{q1}")
+                r_rel, r_href, r_label = build_page_url(1)
                 lines.append(
-                    f"Redirecting to {fmt_link(r_rel, r_href, f'{commit_ref}{q1}')} ..."
+                    f"Redirecting to {fmt_link(r_rel, r_href, r_label)} ..."
                 )
                 lines.append("")
                 redirect_pair = (r_href, r_rel)
@@ -1037,19 +1055,17 @@ class GasWebAppMockServer:
                 lines.append("")
                 page_links: List[str] = []
                 for p in range(1, total_pages + 1):
-                    qp = make_page_query(p)
-                    p_rel, p_href = make_urls(f"{enc_ref}{qp}")
+                    p_rel, p_href, _ = build_page_url(p)
                     lnk = fmt_link(p_rel, p_href, str(p))
                     page_links.append(f"[{lnk}]" if p == page else lnk)
                 lines.append(f"Pages: {' '.join(page_links)}")
                 for p in range(1, total_pages + 1):
-                    qp = make_page_query(p)
-                    p_rel, p_href = make_urls(f"{enc_ref}{qp}")
+                    p_rel, p_href, p_label = build_page_url(p)
                     lines.append(
                         fmt_link(
                             p_rel,
                             p_href,
-                            f"{commit_ref}?page={p}",
+                            p_label,
                             f"page {p} (current)" if p == page else f"page {p}",
                         )
                     )
@@ -1062,6 +1078,26 @@ class GasWebAppMockServer:
                 wrap_html(title, lines, redirect_pair),
                 redir_loc,
                 None,
+            )
+
+        # Case 0: Repository root `exec/<project_name>.git` (`commit_ref` is empty)
+        if not trimmed_ref:
+            total = len(all_commits)
+            total_pages = (max(1, total) + effective_page_size - 1) // effective_page_size
+            heading = f"Index of /{route_proj}.git (commits)"
+            if page_param is not None:
+                if page_param.strip().isdigit():
+                    p = int(page_param.strip())
+                    if 1 <= p <= total_pages:
+                        return render_commit_list(all_commits, heading, p, False, True)
+                return render_404(
+                    f"/{route_proj}.git?page={page_param}",
+                    f"Invalid page number '{page_param}'",
+                    "",
+                    f"{route_proj}.git",
+                )
+            return render_commit_list(
+                all_commits, heading, 1, total > effective_page_size, True
             )
 
         # Case 1: Invalid commit hash
@@ -1377,10 +1413,18 @@ class GasWebAppMockServer:
                         self._redirect_to_echo(f"ERR {e}")
                     return
 
-                if route == "commit_browser":
-                    r_proj, commit_ref, subpath, trailing_slash = (
-                        parse_commit_browser_route(git_path)
-                    )
+                if route in ("commit_browser", "web_repo") and service is None:
+                    if route == "web_repo":
+                        assert proj_name is not None
+                        r_proj = proj_name
+                        commit_ref = ""
+                        subpath = []
+                        without_q = git_path.split("?", 1)[0]
+                        trailing_slash = len(without_q) > 1 and without_q.endswith("/")
+                    else:
+                        r_proj, commit_ref, subpath, trailing_slash = (
+                            parse_commit_browser_route(git_path)
+                        )
                     raw_per_page = qs.get("per_page", [None])[0]
                     custom_pp = (
                         int(raw_per_page)
@@ -1396,6 +1440,7 @@ class GasWebAppMockServer:
                             subpath,
                             trailing_slash,
                             page_param=page_param,
+                            configured_base_url=base_url,
                             page_size=per_page,
                             custom_per_page=custom_pp,
                         )
@@ -1775,7 +1820,16 @@ def run_e2e_tests() -> None:
                 assert "Hello GAS Git!" in entries_by_path["src/main.rs"]["content"]
             print("[OK] 10. `get_commit_detail` API returned unified diffs (`changes`) and full directory/file tree (`tree_entries`) at target commit.")
 
-            # 11. Verify `exec/<commit hash>` WITHOUT `/<project_name>.git` is rejected as invalid
+            # 11. Verify `exec/<project_name>.git` renders the commit hash list with full `exec/<project_name>.git/<commit_oid>` links, and `exec/<commit hash>` is rejected
+            req_repo_commits = urllib.request.Request(
+                f"{exec_base_url}/project-alpha.git",
+                headers={"Authorization": "Bearer secret-gas-oauth-token-123"},
+            )
+            with urllib.request.urlopen(req_repo_commits, timeout=5) as r_repo_list:
+                repo_list_html = r_repo_list.read().decode("utf-8")
+                assert "Index of /project-alpha.git (commits)" in repo_list_html
+                assert f'href="{exec_base_url}/project-alpha.git/{head_commit_oid}"' in repo_list_html
+
             req_direct_commit = urllib.request.Request(
                 f"{exec_base_url}/{head_commit_oid}",
                 headers={"Authorization": "Bearer secret-gas-oauth-token-123"},
@@ -1788,7 +1842,7 @@ def run_e2e_tests() -> None:
                 err_body = he.read().decode("utf-8")
                 assert "[ERROR 404 / NOT A RAW FILE]" in err_body
                 assert "must start with /&lt;project_name&gt;.git" in err_body
-            print("[OK] 11. Direct `exec/<commit hash>` without `/<project_name>.git` is rejected with an explicit non-raw-file HTML error page.")
+            print("[OK] 11. `exec/<project_name>.git` rendered the commit hash list with full `/exec/` URLs, and direct `exec/<commit hash>` was rejected.")
 
             # 12. Verify `exec/<project_name>.git/<commit hash>` (full & short prefix) renders nginx-autoindex root directory with full 40-char hash
             req_root_full = urllib.request.Request(

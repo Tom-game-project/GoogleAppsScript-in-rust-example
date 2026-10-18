@@ -28,6 +28,24 @@ export class Properties {
 
 	getProperty(key: string): string | undefined {
 		const val = this.properties.getProperty(key);
+		if (val !== null && val !== undefined && val.trim() !== "") {
+			return val;
+		}
+		if (key === "GAS_WEB_APP_URL") {
+			try {
+				if (
+					typeof ScriptApp !== "undefined" &&
+					typeof ScriptApp.getService === "function"
+				) {
+					const serviceUrl = ScriptApp.getService().getUrl();
+					if (serviceUrl && serviceUrl.trim() !== "") {
+						return serviceUrl.trim();
+					}
+				}
+			} catch {
+				// ScriptApp.getService() が利用できない場合は無視
+			}
+		}
 		return val === null ? undefined : val;
 	}
 
