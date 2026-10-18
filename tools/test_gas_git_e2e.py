@@ -39,6 +39,20 @@ def pkt_band(channel: int, data: bytes) -> bytes:
     return pkt_line(bytes([channel]) + data)
 
 
+def escape_html(text: str) -> str:
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&#39;")
+    )
+
+
+def encode_uri_segment(seg: str) -> str:
+    return urllib.parse.quote(seg, safe="-._~")
+
+
 def parse_git_path(raw_path: str) -> Tuple[str, Optional[str]]:
     """
     Mirrors `parse_git_path` in `src/git_server.rs`:
@@ -47,6 +61,8 @@ def parse_git_path(raw_path: str) -> Tuple[str, Optional[str]]:
       - `/<project_name>.git/info/refs` -> ("info_refs", project_name)
       - `/<project_name>.git/git-upload-pack` -> ("upload_pack", project_name)
       - `/<project_name>.git/git-receive-pack` -> ("receive_pack", project_name)
+      - `/<project_name>.git/<commit_hash>[/<subpath>...]` -> ("commit_browser", project_name)
+      - Any path after `/exec/` not starting with `/<project_name>.git` (e.g. `/exec/<commit_hash>`) raises ValueError!
     """
     without_query = raw_path.split("?", 1)[0]
     segments = [s for s in without_query.split("/") if s]
@@ -64,24 +80,54 @@ def parse_git_path(raw_path: str) -> Tuple[str, Optional[str]]:
     if not segments:
         return ("web_root", None)
 
+    if segments in (["info", "refs"], ["git-upload-pack"], ["git-receive-pack"]):
+        raise ValueError("Missing repository name in URL path")
+
+    if not segments[0].endswith(".git"):
+        raise ValueError(
+            f"Invalid URL path '/{'/'.join(segments)}': path after /exec/ must start with /<project_name>.git (direct /exec/<commit_hash> is disabled)"
+        )
+
     def norm_proj(seg: str) -> str:
         name = seg[:-4] if seg.endswith(".git") else seg
         if not name or name in (".", ".."):
             raise ValueError(f"Invalid repository name '{seg}'")
         return name
 
+    proj = norm_proj(segments[0])
     if len(segments) == 3 and segments[1] == "info" and segments[2] == "refs":
-        return ("info_refs", norm_proj(segments[0]))
+        return ("info_refs", proj)
     if len(segments) == 2 and segments[1] == "git-upload-pack":
-        return ("upload_pack", norm_proj(segments[0]))
+        return ("upload_pack", proj)
     if len(segments) == 2 and segments[1] == "git-receive-pack":
-        return ("receive_pack", norm_proj(segments[0]))
-    if segments in (["info", "refs"], ["git-upload-pack"], ["git-receive-pack"]):
-        raise ValueError("Missing repository name in URL path")
+        return ("receive_pack", proj)
     if len(segments) == 1:
-        return ("web_repo", norm_proj(segments[0]))
+        return ("web_repo", proj)
 
-    raise ValueError(f"Unsupported Git URL path '/{'/'.join(segments)}'")
+    return ("commit_browser", proj)
+
+
+def parse_commit_browser_route(
+    raw_path: str,
+) -> Tuple[str, str, List[str], bool]:
+    without_query = raw_path.split("?", 1)[0]
+    trailing_slash = len(without_query) > 1 and without_query.endswith("/")
+    segments = [s for s in without_query.split("/") if s]
+    if (
+        len(segments) >= 4
+        and segments[0] == "macros"
+        and segments[1] == "s"
+        and segments[3] in ("exec", "dev")
+    ):
+        segments = segments[4:]
+    elif segments and segments[0] in ("exec", "dev"):
+        segments = segments[1:]
+
+    assert len(segments) >= 2 and segments[0].endswith(".git")
+    proj = segments[0][:-4]
+    commit_ref = urllib.parse.unquote(segments[1])
+    subpath = [urllib.parse.unquote(s) for s in segments[2:]]
+    return (proj, commit_ref, subpath, trailing_slash)
 
 
 class SimulatedDriveGitStore:
@@ -812,6 +858,398 @@ class GasWebAppMockServer:
                 "error": str(e),
             }
 
+    def render_not_found_error_doc(
+        self,
+        title: str,
+        requested_path: str,
+        reason: str,
+        back_link: Optional[Tuple[str, str, str]] = None,
+    ) -> bytes:
+        lines = [
+            "================================================================================",
+            "[ERROR 404 / NOT A RAW FILE] 指定されたファイルまたはディレクトリは存在しません。",
+            "※ このレスポンスはエラー通知用の HTML ページであり、リポジトリ内の生のファイルではありません。",
+            "   (This response is an HTML error page, NOT a raw repository file.)",
+            "================================================================================",
+            "",
+            f"Requested Path : {escape_html(requested_path)}",
+            f"Error Detail   : {escape_html(reason)}",
+        ]
+        if back_link:
+            b_rel, b_href, b_label = back_link
+            lines.append("")
+            lines.append(
+                f'<a target="_top" data-exec-rel="{escape_html(b_rel)}" '
+                f'href="{escape_html(b_href)}">{escape_html(b_label)}</a>'
+            )
+        body_pre = "\n".join(lines)
+        doc = (
+            "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n"
+            "<base target=\"_top\">\n"
+            f"<title>{escape_html(title)}</title>\n</head>\n<body>\n"
+            "<h1>404 Not Found (File or Directory Does Not Exist)</h1>\n<hr>\n"
+            f"<pre>\n{body_pre}\n</pre>\n<hr>\n</body>\n</html>\n"
+        )
+        return doc.encode("utf-8")
+
+    def resolve_commit_browser(
+        self,
+        route_proj: str,
+        commit_ref: str,
+        subpath: List[str],
+        trailing_slash: bool,
+        page_param: Optional[str] = None,
+        page_size: int = 20,
+        custom_per_page: Optional[int] = None,
+    ) -> Tuple[int, str, bytes, Optional[str], Optional[str]]:
+        """
+        Mirrors `resolve_commit_browser_request` in `src/git_server.rs`.
+        Returns `(http_status, content_type, body_bytes, redirect_location, download_filename)`.
+        """
+        effective_page_size = max(1, page_size)
+        repo_prefix = f"{encode_uri_segment(route_proj)}.git/"
+        seg_count = 2 + len(subpath)
+        up_levels = seg_count if trailing_slash else max(0, seg_count - 1)
+        rel_prefix = "./" if up_levels == 0 else ("../" * up_levels)
+
+        def make_urls(target_after_repo: str) -> Tuple[str, str]:
+            exec_rel = f"{repo_prefix}{target_after_repo}"
+            href = f"{rel_prefix}{exec_rel}"
+            return (exec_rel, href)
+
+        def make_page_query(p: int) -> str:
+            if custom_per_page is not None:
+                return f"?page={p}&per_page={custom_per_page}"
+            return f"?page={p}"
+
+        def fmt_link(
+            exec_rel: str,
+            href: str,
+            display_text: str,
+            right_col: Optional[str] = None,
+        ) -> str:
+            a_tag = (
+                f'<a target="_top" data-exec-rel="{escape_html(exec_rel)}" '
+                f'href="{escape_html(href)}">{escape_html(display_text)}</a>'
+            )
+            if right_col is not None:
+                pad = max(2, 64 - len(display_text))
+                return f"{a_tag}{' ' * pad}{escape_html(right_col)}"
+            return a_tag
+
+        def wrap_html(
+            title: str,
+            lines: List[str],
+            redirect_pair: Optional[Tuple[str, str]] = None,
+        ) -> bytes:
+            meta_redir = ""
+            if redirect_pair:
+                r_href, _r_rel = redirect_pair
+                meta_redir = f'<meta http-equiv="refresh" content="0; url={escape_html(r_href)}">\n'
+            body_pre = "\n".join(lines)
+            doc = (
+                "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n"
+                "<base target=\"_top\">\n"
+                f"<title>{escape_html(title)}</title>\n{meta_redir}</head>\n<body>\n"
+                f"<h1>{escape_html(title)}</h1>\n<hr>\n<pre>\n{body_pre}\n</pre>\n<hr>\n"
+                "</body>\n</html>\n"
+            )
+            return doc.encode("utf-8")
+
+        def render_404(
+            req_display: str,
+            reason: str,
+            back_target: str,
+            back_label: str,
+        ) -> Tuple[int, str, bytes, Optional[str], Optional[str]]:
+            b_rel, b_href = make_urls(back_target)
+            doc = self.render_not_found_error_doc(
+                "404 Not Found - Path Does Not Exist (Not a Raw File)",
+                req_display,
+                reason,
+                (b_rel, b_href, back_label),
+            )
+            return (404, "text/html; charset=utf-8", doc, None, None)
+
+        try:
+            store = SimulatedDriveGitStore(self.drive_root, route_proj)
+        except Exception as e:
+            doc = self.render_not_found_error_doc(
+                "404 Not Found - Repository Does Not Exist (Not a Raw File)",
+                f"/{route_proj}.git/{commit_ref}",
+                str(e),
+                None,
+            )
+            return (404, "text/html; charset=utf-8", doc, None, None)
+
+        c_res = store.get_commits()
+        all_commits: List[Dict[str, object]] = sorted(
+            c_res.get("commits", []),  # type: ignore[arg-type]
+            key=lambda c: (-int(c["timestamp"]), str(c["oid"])),
+        )
+
+        q = commit_ref.strip().lower()
+        is_hex = bool(q) and len(q) <= 40 and all(ch in "0123456789abcdef" for ch in q)
+        matched_commits = (
+            [c for c in all_commits if str(c["oid"]).lower().startswith(q)]
+            if is_hex
+            else []
+        )
+
+        def render_commit_list(
+            commits_list: List[Dict[str, object]],
+            heading_prefix: str,
+            page: int,
+            is_redirect: bool,
+        ) -> Tuple[int, str, bytes, Optional[str], Optional[str]]:
+            total = len(commits_list)
+            total_pages = (max(1, total) + effective_page_size - 1) // effective_page_size
+            enc_ref = encode_uri_segment(commit_ref)
+            title = (
+                f"{heading_prefix} (Page {page}/{total_pages})"
+                if total_pages > 1
+                else heading_prefix
+            )
+            lines: List[str] = []
+            redirect_pair: Optional[Tuple[str, str]] = None
+            if is_redirect:
+                q1 = make_page_query(1)
+                r_rel, r_href = make_urls(f"{enc_ref}{q1}")
+                lines.append(
+                    f"Redirecting to {fmt_link(r_rel, r_href, f'{commit_ref}{q1}')} ..."
+                )
+                lines.append("")
+                redirect_pair = (r_href, r_rel)
+
+            if not commits_list:
+                lines.append("(no commits found)")
+            else:
+                start = (page - 1) * effective_page_size
+                end = min(total, start + effective_page_size)
+                for c in commits_list[start:end]:
+                    c_oid = str(c["oid"])
+                    c_rel, c_href = make_urls(encode_uri_segment(c_oid))
+                    lines.append(
+                        fmt_link(c_rel, c_href, c_oid, f"{c['timestamp']}  {c['summary']}")
+                    )
+
+            if total_pages > 1:
+                lines.append("")
+                page_links: List[str] = []
+                for p in range(1, total_pages + 1):
+                    qp = make_page_query(p)
+                    p_rel, p_href = make_urls(f"{enc_ref}{qp}")
+                    lnk = fmt_link(p_rel, p_href, str(p))
+                    page_links.append(f"[{lnk}]" if p == page else lnk)
+                lines.append(f"Pages: {' '.join(page_links)}")
+                for p in range(1, total_pages + 1):
+                    qp = make_page_query(p)
+                    p_rel, p_href = make_urls(f"{enc_ref}{qp}")
+                    lines.append(
+                        fmt_link(
+                            p_rel,
+                            p_href,
+                            f"{commit_ref}?page={p}",
+                            f"page {p} (current)" if p == page else f"page {p}",
+                        )
+                    )
+
+            status = 302 if is_redirect else 200
+            redir_loc = redirect_pair[0] if redirect_pair else None
+            return (
+                status,
+                "text/html; charset=utf-8",
+                wrap_html(title, lines, redirect_pair),
+                redir_loc,
+                None,
+            )
+
+        # Case 1: Invalid commit hash
+        if not matched_commits:
+            total = len(all_commits)
+            total_pages = (max(1, total) + effective_page_size - 1) // effective_page_size
+            heading = f"Index of /{route_proj}.git commits (invalid commit hash: {commit_ref})"
+            if not subpath:
+                if page_param is not None:
+                    if page_param.strip().isdigit():
+                        p = int(page_param.strip())
+                        if 1 <= p <= total_pages:
+                            return render_commit_list(all_commits, heading, p, False)
+                    return render_404(
+                        f"/{route_proj}.git/{commit_ref}?page={page_param}",
+                        f"Invalid page number '{page_param}' (valid pages: 1..={total_pages})",
+                        f"{encode_uri_segment(commit_ref)}{make_page_query(1)}",
+                        f"{commit_ref}?page=1",
+                    )
+                return render_commit_list(
+                    all_commits, heading, 1, total > effective_page_size
+                )
+            req_full = f"/{route_proj}.git/{commit_ref}/{'/'.join(subpath)}"
+            return render_404(
+                req_full,
+                f"Commit hash '{commit_ref}' is invalid and path '{req_full}' cannot be resolved.",
+                encode_uri_segment(commit_ref),
+                f"View commit list ({commit_ref})",
+            )
+
+        # Case 2: Ambiguous commit hash prefix
+        if len(matched_commits) > 1:
+            total = len(matched_commits)
+            total_pages = (max(1, total) + effective_page_size - 1) // effective_page_size
+            heading = f"Index of candidate commits in /{route_proj}.git for prefix {commit_ref} ({total} matches)"
+            if not subpath:
+                if page_param is not None:
+                    if page_param.strip().isdigit():
+                        p = int(page_param.strip())
+                        if 1 <= p <= total_pages:
+                            return render_commit_list(matched_commits, heading, p, False)
+                    return render_404(
+                        f"/{route_proj}.git/{commit_ref}?page={page_param}",
+                        f"Invalid page number '{page_param}' for candidate commits",
+                        f"{encode_uri_segment(commit_ref)}{make_page_query(1)}",
+                        f"{commit_ref}?page=1",
+                    )
+                return render_commit_list(
+                    matched_commits, heading, 1, total > effective_page_size
+                )
+            req_full = f"/{route_proj}.git/{commit_ref}/{'/'.join(subpath)}"
+            return render_404(
+                req_full,
+                f"Commit prefix '{commit_ref}' is ambiguous ({total} candidate commits)",
+                encode_uri_segment(commit_ref),
+                f"View candidate commits for {commit_ref}",
+            )
+
+        # Case 3: Uniquely resolved commit (always uses resolved 40-char commit hash)
+        commit_obj = matched_commits[0]
+        resolved_oid = str(commit_obj["oid"])
+        detail = store.get_commit_detail(resolved_oid)
+        entries_list: List[Dict[str, object]] = detail.get("tree_entries", [])  # type: ignore[assignment]
+        entries_by_path: Dict[str, Dict[str, object]] = {
+            str(e["path"]): e for e in entries_list
+        }
+
+        def render_dir(
+            dir_subpath: List[str],
+        ) -> Tuple[int, str, bytes, Optional[str], Optional[str]]:
+            parent_dir = "/".join(dir_subpath)
+            dirs: List[str] = []
+            files: List[Tuple[str, int]] = []
+            for e in entries_list:
+                if str(e["parent_dir"]) == parent_dir:
+                    if e["kind"] == "tree":
+                        dirs.append(str(e["name"]))
+                    elif e["kind"] == "blob":
+                        files.append((str(e["name"]), int(e["size"])))
+            dirs.sort()
+            files.sort(key=lambda x: x[0])
+
+            enc_oid = encode_uri_segment(resolved_oid)
+            dir_enc = "/".join(encode_uri_segment(s) for s in dir_subpath)
+            title = (
+                f"Index of /{route_proj}.git/{resolved_oid}/"
+                if not dir_subpath
+                else f"Index of /{route_proj}.git/{resolved_oid}/{parent_dir}/"
+            )
+            lines: List[str] = []
+            if dir_subpath:
+                parent_target = (
+                    enc_oid
+                    if len(dir_subpath) == 1
+                    else f"{enc_oid}/{'/'.join(encode_uri_segment(s) for s in dir_subpath[:-1])}"
+                )
+                p_rel, p_href = make_urls(parent_target)
+                lines.append(fmt_link(p_rel, p_href, "../"))
+
+            for d_name in dirs:
+                disp = (
+                    f"{resolved_oid}/{d_name}/"
+                    if not dir_subpath
+                    else f"{resolved_oid}/{parent_dir}/{d_name}/"
+                )
+                t_path = (
+                    f"{enc_oid}/{encode_uri_segment(d_name)}"
+                    if not dir_subpath
+                    else f"{enc_oid}/{dir_enc}/{encode_uri_segment(d_name)}"
+                )
+                d_rel, d_href = make_urls(t_path)
+                lines.append(fmt_link(d_rel, d_href, disp, "-"))
+
+            for f_name, f_size in files:
+                disp = (
+                    f"{resolved_oid}/{f_name}"
+                    if not dir_subpath
+                    else f"{resolved_oid}/{parent_dir}/{f_name}"
+                )
+                t_path = (
+                    f"{enc_oid}/{encode_uri_segment(f_name)}"
+                    if not dir_subpath
+                    else f"{enc_oid}/{dir_enc}/{encode_uri_segment(f_name)}"
+                )
+                f_rel, f_href = make_urls(t_path)
+                lines.append(fmt_link(f_rel, f_href, disp, str(f_size)))
+
+            return (200, "text/html; charset=utf-8", wrap_html(title, lines), None, None)
+
+        if not subpath:
+            return render_dir([])
+
+        full_req_display = f"/{route_proj}.git/{resolved_oid}/{'/'.join(subpath)}"
+        for seg in subpath:
+            if not seg or seg in (".", "..") or "/" in seg or "\x00" in seg:
+                return render_404(
+                    full_req_display,
+                    f"Invalid path segment '{seg}'",
+                    encode_uri_segment(resolved_oid),
+                    f"{resolved_oid}/",
+                )
+
+        for idx in range(1, len(subpath)):
+            inter_path = "/".join(subpath[:idx])
+            inter_entry = entries_by_path.get(inter_path)
+            if not inter_entry or inter_entry["kind"] != "tree":
+                return render_404(
+                    full_req_display,
+                    f"'{inter_path}' is not a directory",
+                    encode_uri_segment(resolved_oid),
+                    f"{resolved_oid}/",
+                )
+
+        full_rel_path = "/".join(subpath)
+        target_entry = entries_by_path.get(full_rel_path)
+        if not target_entry:
+            return render_404(
+                full_req_display,
+                f"File or directory '{full_rel_path}' does not exist in commit {resolved_oid}",
+                encode_uri_segment(resolved_oid),
+                f"{resolved_oid}/",
+            )
+
+        if target_entry["kind"] == "tree":
+            return render_dir(subpath)
+
+        if trailing_slash:
+            return render_404(
+                f"{full_req_display}/",
+                f"'{full_rel_path}' is a regular file, not a directory",
+                encode_uri_segment(resolved_oid),
+                f"{resolved_oid}/",
+            )
+
+        blob_oid = str(target_entry["oid"])
+        raw_obj = store.read_raw_object(blob_oid)
+        raw_bytes = raw_obj[1] if raw_obj else b""
+        is_binary = b"\x00" in raw_bytes[:4096]
+        if is_binary:
+            return (
+                200,
+                "application/octet-stream",
+                raw_bytes,
+                None,
+                subpath[-1],
+            )
+        return (200, "text/plain; charset=utf-8", raw_bytes, None, None)
+
     def build_ui_state(
         self,
         base_url: str,
@@ -913,7 +1351,20 @@ class GasWebAppMockServer:
                 try:
                     route, proj_name = parse_git_path(git_path)
                 except ValueError as e:
-                    self._redirect_to_echo(f"ERR {e}")
+                    if service is not None:
+                        self._redirect_to_echo(f"ERR {e}")
+                    else:
+                        err_doc = parent.render_not_found_error_doc(
+                            "404 Not Found - Invalid URL Path (Not a Raw File)",
+                            git_path,
+                            str(e),
+                            None,
+                        )
+                        self.send_response(404)
+                        self.send_header("Content-Type", "text/html; charset=utf-8")
+                        self.send_header("Content-Length", str(len(err_doc)))
+                        self.end_headers()
+                        self.wfile.write(err_doc)
                     return
 
                 if route == "info_refs" and proj_name:
@@ -924,6 +1375,52 @@ class GasWebAppMockServer:
                         self._redirect_to_echo(b64_text)
                     except Exception as e:
                         self._redirect_to_echo(f"ERR {e}")
+                    return
+
+                if route == "commit_browser":
+                    r_proj, commit_ref, subpath, trailing_slash = (
+                        parse_commit_browser_route(git_path)
+                    )
+                    raw_per_page = qs.get("per_page", [None])[0]
+                    custom_pp = (
+                        int(raw_per_page)
+                        if (raw_per_page and raw_per_page.isdigit())
+                        else None
+                    )
+                    per_page = custom_pp if custom_pp is not None else 20
+                    page_param = qs.get("page", [None])[0]
+                    status, ctype, body_bytes, redir_loc, dl_filename = (
+                        parent.resolve_commit_browser(
+                            r_proj,
+                            commit_ref,
+                            subpath,
+                            trailing_slash,
+                            page_param=page_param,
+                            page_size=per_page,
+                            custom_per_page=custom_pp,
+                        )
+                    )
+                    if status == 302 and redir_loc:
+                        abs_target = urllib.parse.urljoin(
+                            f"http://{host}{parsed.path}", redir_loc
+                        )
+                        self.send_response(302)
+                        self.send_header("Location", abs_target)
+                        self.send_header("Content-Type", ctype)
+                        self.send_header("Content-Length", str(len(body_bytes)))
+                        self.end_headers()
+                        self.wfile.write(body_bytes)
+                        return
+                    self.send_response(status)
+                    self.send_header("Content-Type", ctype)
+                    if dl_filename is not None:
+                        self.send_header(
+                            "Content-Disposition",
+                            f'attachment; filename="{dl_filename}"',
+                        )
+                    self.send_header("Content-Length", str(len(body_bytes)))
+                    self.end_headers()
+                    self.wfile.write(body_bytes)
                     return
 
                 state = parent.build_ui_state(base_url, selected_project=proj_name)
@@ -1239,12 +1736,19 @@ def run_e2e_tests() -> None:
                 assert any("feature" in r for r in top["refs"])
             print("[OK] 9. Pushed 2nd commit on new branch and verified multi-commit parent chain and branch decorations.")
 
-            # 10. Push nested directory files & modified file, then verify `get_commit_detail` (changes diff + directory tree state)
+            # 10. Push nested directory files, binary asset, & directory named `1`, then verify `get_commit_detail`
             (local_alpha / "src").mkdir(exist_ok=True)
             (local_alpha / "src" / "main.rs").write_text("fn main() {\n    println!(\"Hello GAS Git!\");\n}\n", encoding="utf-8")
+            (local_alpha / "1").mkdir(exist_ok=True)
+            (local_alpha / "1" / "inside_one.txt").write_text("File inside directory 1\n", encoding="utf-8")
+            binary_payload = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x01\x02\x03"
+            (local_alpha / "logo.bin").write_bytes(binary_payload)
             (local_alpha / "README.md").write_text("# Project Alpha on GAS Drive\nUpdated documentation line.\n", encoding="utf-8")
-            subprocess.check_call(["git", "-C", str(local_alpha), "add", "src/main.rs", "README.md"], env=env_auth)
-            subprocess.check_call(["git", "-C", str(local_alpha), "commit", "-m", "Add src/main.rs and update README"], env=env_auth, stdout=subprocess.DEVNULL)
+            subprocess.check_call(
+                ["git", "-C", str(local_alpha), "add", "src/main.rs", "1/inside_one.txt", "logo.bin", "README.md"],
+                env=env_auth,
+            )
+            subprocess.check_call(["git", "-C", str(local_alpha), "commit", "-m", "Add src/main.rs, dir 1, binary logo, and update README"], env=env_auth, stdout=subprocess.DEVNULL)
             subprocess.check_call(["git", "-C", str(local_alpha), "push", "origin", "feature"], env=env_auth, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
             head_commit_oid = subprocess.check_output(["git", "-C", str(local_alpha), "rev-parse", "HEAD"], env=env_auth, text=True).strip()
 
@@ -1256,7 +1760,7 @@ def run_e2e_tests() -> None:
                 detail = json.loads(d_resp.read().decode("utf-8"))
                 assert detail["ok"] is True
                 assert detail["oid"] == head_commit_oid
-                assert detail["summary"] == "Add src/main.rs and update README"
+                assert detail["summary"] == "Add src/main.rs, dir 1, binary logo, and update README"
                 changes_by_path = {c["path"]: c for c in detail["changes"]}
                 assert "README.md" in changes_by_path
                 assert changes_by_path["README.md"]["status"] == "modified"
@@ -1270,6 +1774,161 @@ def run_e2e_tests() -> None:
                 assert entries_by_path["src/main.rs"]["parent_dir"] == "src"
                 assert "Hello GAS Git!" in entries_by_path["src/main.rs"]["content"]
             print("[OK] 10. `get_commit_detail` API returned unified diffs (`changes`) and full directory/file tree (`tree_entries`) at target commit.")
+
+            # 11. Verify `exec/<commit hash>` WITHOUT `/<project_name>.git` is rejected as invalid
+            req_direct_commit = urllib.request.Request(
+                f"{exec_base_url}/{head_commit_oid}",
+                headers={"Authorization": "Bearer secret-gas-oauth-token-123"},
+            )
+            try:
+                urllib.request.urlopen(req_direct_commit, timeout=5)
+                assert False, "Expected direct /exec/<commit_hash> without /<project_name>.git to be rejected"
+            except urllib.error.HTTPError as he:
+                assert he.code == 404
+                err_body = he.read().decode("utf-8")
+                assert "[ERROR 404 / NOT A RAW FILE]" in err_body
+                assert "must start with /&lt;project_name&gt;.git" in err_body
+            print("[OK] 11. Direct `exec/<commit hash>` without `/<project_name>.git` is rejected with an explicit non-raw-file HTML error page.")
+
+            # 12. Verify `exec/<project_name>.git/<commit hash>` (full & short prefix) renders nginx-autoindex root directory with full 40-char hash
+            req_root_full = urllib.request.Request(
+                f"{exec_base_url}/project-alpha.git/{head_commit_oid}",
+                headers={"Authorization": "Bearer secret-gas-oauth-token-123"},
+            )
+            with urllib.request.urlopen(req_root_full, timeout=5) as r_full:
+                root_html = r_full.read().decode("utf-8")
+                assert f"Index of /project-alpha.git/{head_commit_oid}/" in root_html
+                assert f"{head_commit_oid}/src/" in root_html
+                assert f"{head_commit_oid}/1/" in root_html
+                assert f"{head_commit_oid}/README.md" in root_html
+                assert f"{head_commit_oid}/logo.bin" in root_html
+                assert '<div id="app"></div>' not in root_html
+
+            short_prefix = head_commit_oid[:8]
+            req_root_short = urllib.request.Request(
+                f"{exec_base_url}/project-alpha.git/{short_prefix}",
+                headers={"Authorization": "Bearer secret-gas-oauth-token-123"},
+            )
+            with urllib.request.urlopen(req_root_short, timeout=5) as r_short:
+                short_html = r_short.read().decode("utf-8")
+                assert f"Index of /project-alpha.git/{head_commit_oid}/" in short_html
+                assert f"{head_commit_oid}/src/" in short_html
+            print("[OK] 12. `exec/<project_name>.git/<commit hash>` (full and unique prefix) rendered root directory using resolved 40-char commit hash.")
+
+            # 13. Verify `exec/<project_name>.git/<commit hash>/<dir path>` (including directory named `1`) renders subdirectory contents
+            for d_path, expected_child in [("src", "main.rs"), ("1", "inside_one.txt")]:
+                req_subdir = urllib.request.Request(
+                    f"{exec_base_url}/project-alpha.git/{head_commit_oid}/{d_path}",
+                    headers={"Authorization": "Bearer secret-gas-oauth-token-123"},
+                )
+                with urllib.request.urlopen(req_subdir, timeout=5) as r_sub:
+                    sub_html = r_sub.read().decode("utf-8")
+                    assert f"Index of /project-alpha.git/{head_commit_oid}/{d_path}/" in sub_html
+                    assert "../" in sub_html
+                    assert f"{head_commit_oid}/{d_path}/{expected_child}" in sub_html
+            print("[OK] 13. `exec/<project_name>.git/<commit hash>/<dir path>` (including `/1` directory) rendered subdirectory entries without collision.")
+
+            # 14. Verify `exec/<project_name>.git/<commit hash>/<file path>` returns raw text for text files and download attachment for binary files
+            req_raw_file = urllib.request.Request(
+                f"{exec_base_url}/project-alpha.git/{head_commit_oid}/src/main.rs",
+                headers={"Authorization": "Bearer secret-gas-oauth-token-123"},
+            )
+            with urllib.request.urlopen(req_raw_file, timeout=5) as r_file:
+                raw_content = r_file.read().decode("utf-8")
+                ctype_header = r_file.headers.get("Content-Type", "")
+                cdisp_header = r_file.headers.get("Content-Disposition")
+                assert "text/plain" in ctype_header
+                assert cdisp_header is None
+                assert raw_content == 'fn main() {\n    println!("Hello GAS Git!");\n}\n'
+
+            req_bin_file = urllib.request.Request(
+                f"{exec_base_url}/project-alpha.git/{head_commit_oid}/logo.bin",
+                headers={"Authorization": "Bearer secret-gas-oauth-token-123"},
+            )
+            with urllib.request.urlopen(req_bin_file, timeout=5) as r_bin:
+                bin_bytes = r_bin.read()
+                cdisp = r_bin.headers.get("Content-Disposition", "")
+                assert 'attachment; filename="logo.bin"' in cdisp
+                assert bin_bytes == binary_payload
+            print("[OK] 14. `exec/<project_name>.git/<commit hash>/<file path>` returned raw text for text files and attachment download for binary files.")
+
+            # 15. Verify invalid paths return an unmistakable non-raw-file HTML error page
+            for bad_subpath in ["nonexistent_dir/file.txt", "README.md/not_a_dir", "README.md/"]:
+                req_bad = urllib.request.Request(
+                    f"{exec_base_url}/project-alpha.git/{head_commit_oid}/{bad_subpath}",
+                    headers={"Authorization": "Bearer secret-gas-oauth-token-123"},
+                )
+                try:
+                    urllib.request.urlopen(req_bad, timeout=5)
+                    assert False, f"Expected 404 for {bad_subpath}"
+                except urllib.error.HTTPError as he:
+                    assert he.code == 404
+                    err_html = he.read().decode("utf-8")
+                    assert "[ERROR 404 / NOT A RAW FILE]" in err_html
+                    assert "このレスポンスはエラー通知用の HTML ページであり、リポジトリ内の生のファイルではありません" in err_html
+            print("[OK] 15. Invalid paths under `exec/<project_name>.git/<commit hash>/...` returned unmistakable non-raw-file HTML error pages.")
+
+            # 16. Verify invalid `<commit hash>` redirects to `exec/<project_name>.git/<commit hash>?page=1` and links to `?page=2, ?page=3, ...`
+            req_inv_paginated = urllib.request.Request(
+                f"{exec_base_url}/project-alpha.git/invalid_commit_hash_xyz?per_page=1",
+                headers={"Authorization": "Bearer secret-gas-oauth-token-123"},
+            )
+            with urllib.request.urlopen(req_inv_paginated, timeout=5) as r_inv:
+                final_url = r_inv.geturl()
+                inv_html = r_inv.read().decode("utf-8")
+                assert "/exec/project-alpha.git/invalid_commit_hash_xyz?page=1" in final_url
+                assert "invalid_commit_hash_xyz?page=2" in inv_html
+                assert "invalid_commit_hash_xyz?page=3" in inv_html
+                assert head_commit_oid in inv_html
+
+            req_inv_page2 = urllib.request.Request(
+                f"{exec_base_url}/project-alpha.git/invalid_commit_hash_xyz?page=2&per_page=1",
+                headers={"Authorization": "Bearer secret-gas-oauth-token-123"},
+            )
+            with urllib.request.urlopen(req_inv_page2, timeout=5) as r_p2:
+                p2_html = r_p2.read().decode("utf-8")
+                assert "Page 2/3" in p2_html
+                assert "invalid_commit_hash_xyz?page=1" in p2_html
+                assert "invalid_commit_hash_xyz?page=3" in p2_html
+            print("[OK] 16. Invalid `<commit hash>` redirected to `?page=1` and rendered paginated commit list with `?page=2, ?page=3` links.")
+
+            # 17. Verify ambiguous `<commit hash>` prefix (`exec/<project_name>.git/<prefix>`) lists candidates and paginates with `?page=1, ?page=2`
+            beta_store = SimulatedDriveGitStore(drive_root, "project-beta")
+            empty_tree_oid = beta_store.write_raw_object("tree", b"")
+            seen_by_prefix2: Dict[str, List[str]] = {}
+            ambig_prefix = ""
+            ambig_pair: List[str] = []
+            for idx in range(300):
+                commit_body = (
+                    f"tree {empty_tree_oid}\n"
+                    f"author Tester <test@example.com> {1700001000 + idx} +0000\n"
+                    f"committer Tester <test@example.com> {1700001000 + idx} +0000\n\n"
+                    f"Synthetic commit #{idx}\n"
+                ).encode("utf-8")
+                c_oid = beta_store.write_raw_object("commit", commit_body)
+                p2 = c_oid[:2]
+                seen_by_prefix2.setdefault(p2, []).append(c_oid)
+                if len(seen_by_prefix2[p2]) >= 2:
+                    ambig_prefix = p2
+                    ambig_pair = seen_by_prefix2[p2]
+                    beta_store.write_refs({
+                        "refs/heads/main": ambig_pair[0],
+                        "refs/heads/second": ambig_pair[1],
+                    })
+                    break
+
+            assert ambig_prefix and len(ambig_pair) >= 2
+            req_ambig = urllib.request.Request(
+                f"{exec_base_url}/project-beta.git/{ambig_prefix}?per_page=1",
+                headers={"Authorization": "Bearer secret-gas-oauth-token-123"},
+            )
+            with urllib.request.urlopen(req_ambig, timeout=5) as r_amb:
+                amb_final_url = r_amb.geturl()
+                amb_html = r_amb.read().decode("utf-8")
+                assert f"/exec/project-beta.git/{ambig_prefix}?page=1" in amb_final_url
+                assert f"Index of candidate commits in /project-beta.git for prefix {ambig_prefix}" in amb_html
+                assert f"{ambig_prefix}?page=2" in amb_html
+            print(f"[OK] 17. Ambiguous commit prefix `exec/project-beta.git/{ambig_prefix}` redirected to `?page=1` and listed candidate commits with `?page=2` link.")
 
         finally:
             httpd.shutdown()

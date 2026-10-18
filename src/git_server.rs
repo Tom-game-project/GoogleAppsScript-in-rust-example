@@ -47,11 +47,95 @@ use crate::bindings::gas::property::properties_service;
 
 pub const ENV_GIT_DRIVE_FOLDER_ID: &str = "GIT_DRIVE_FOLDER_ID";
 pub const ENV_GAS_WEB_APP_URL: &str = "GAS_WEB_APP_URL";
+pub const ENV_GIT_COMMIT_PAGE_SIZE: &str = "GIT_COMMIT_PAGE_SIZE";
+pub const DEFAULT_COMMIT_PAGE_SIZE: usize = 20;
 const DEFAULT_BRANCH: &str = "refs/heads/main";
 const MAX_SIDEBAND_CHUNK: usize = 65500;
 const HEAD_FILE_NAME: &str = "HEAD";
 const REFS_FILE_NAME: &str = "refs.json";
 const OBJECTS_FOLDER_NAME: &str = "objects";
+
+/// Escape a string for safe inclusion in HTML text or double/single-quoted attribute contexts.
+pub fn escape_html(input: &str) -> String {
+    let mut out = String::with_capacity(input.len() + 8);
+    for ch in input.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// RFC 3986 percent-encode a single URL path segment so special characters (`?`, `#`, `%`, `/`, spaces, UTF-8)
+/// never break link navigation.
+pub fn encode_uri_segment(segment: &str) -> String {
+    let mut out = String::with_capacity(segment.len());
+    for &b in segment.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char);
+            }
+            _ => {
+                out.push_str(&format!("%{:02X}", b));
+            }
+        }
+    }
+    out
+}
+
+/// Percent-decode a URL path segment (`%XX` -> byte).
+pub fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(h), Some(l)) = (hi, lo) {
+                out.push(((h << 4) | l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Format a Unix timestamp (seconds) as `YYYY-MM-DD HH:MM:SS UTC` for nginx autoindex listings.
+pub fn format_utc_timestamp(ts: i64) -> String {
+    if ts < 0 {
+        return "1970-01-01 00:00:00 UTC".to_string();
+    }
+    let days = ts.div_euclid(86_400);
+    let secs_of_day = ts.rem_euclid(86_400);
+    let hour = secs_of_day / 3600;
+    let minute = (secs_of_day % 3600) / 60;
+    let second = secs_of_day % 60;
+
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if m <= 2 { y + 1 } else { y };
+
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
+        year, m, d, hour, minute, second
+    )
+}
 
 /// Parsed route from the incoming URL path (`/<project_name>.git/...`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +151,16 @@ pub enum GitRoute {
     UploadPack { project_name: String },
     /// `POST /<project_name>.git/git-receive-pack`
     ReceivePack { project_name: String },
+    /// Direct nginx-autoindex-style Commit / Directory / Raw-File Browser under `/<project_name>.git`:
+    /// - `GET /<project_name>.git/<commit_hash>`
+    /// - `GET /<project_name>.git/<commit_hash>/<dir_path>`
+    /// - `GET /<project_name>.git/<commit_hash>/<file_path>`
+    CommitBrowser {
+        project_name: String,
+        commit_ref: String,
+        subpath: Vec<String>,
+        trailing_slash: bool,
+    },
 }
 
 /// Validate and normalize a repository path segment (e.g. `"my-project.git"` -> `"my-project"`).
@@ -92,8 +186,10 @@ pub fn parse_project_segment(segment: &str) -> Result<String, String> {
 }
 
 /// Parse a URL path (from `e.pathInfo` or `git_path`) into a `GitRoute`.
+/// Enforces `/<project_name>.git` as the base segment after `/exec/`; direct `/exec/<commit_hash>` is rejected.
 pub fn parse_git_path(raw_path: &str) -> Result<GitRoute, String> {
     let without_query = raw_path.split('?').next().unwrap_or("");
+    let trailing_slash = without_query.len() > 1 && without_query.ends_with('/');
     let segments: Vec<&str> = without_query
         .split('/')
         .filter(|s| !s.is_empty())
@@ -113,6 +209,14 @@ pub fn parse_git_path(raw_path: &str) -> Result<GitRoute, String> {
 
     match slice {
         [] => Ok(GitRoute::WebUiRoot),
+        ["info", "refs"] | ["git-upload-pack"] | ["git-receive-pack"] => Err(
+            "Missing repository name in URL path. Expected /<project_name>.git/info/refs, /<project_name>.git/git-upload-pack, or /<project_name>.git/git-receive-pack"
+                .to_string(),
+        ),
+        [repo_seg, ..] if !repo_seg.ends_with(".git") => Err(format!(
+            "Invalid URL path '/{}': path after /exec/ must start with /<project_name>.git (direct /exec/<commit_hash> is disabled)",
+            slice.join("/")
+        )),
         [repo_seg, "info", "refs"] => {
             let project_name = parse_project_segment(repo_seg)?;
             Ok(GitRoute::InfoRefs { project_name })
@@ -125,18 +229,19 @@ pub fn parse_git_path(raw_path: &str) -> Result<GitRoute, String> {
             let project_name = parse_project_segment(repo_seg)?;
             Ok(GitRoute::ReceivePack { project_name })
         }
-        ["info", "refs"] | ["git-upload-pack"] | ["git-receive-pack"] => Err(
-            "Missing repository name in URL path. Expected /<project_name>.git/info/refs, /<project_name>.git/git-upload-pack, or /<project_name>.git/git-receive-pack"
-                .to_string(),
-        ),
         [repo_seg] => {
             let project_name = parse_project_segment(repo_seg)?;
             Ok(GitRoute::WebUiRepo { project_name })
         }
-        other => Err(format!(
-            "Unsupported Git URL path '/{}': expected /<project_name>.git/...",
-            other.join("/")
-        )),
+        [repo_seg, commit_seg, rest @ ..] => {
+            let project_name = parse_project_segment(repo_seg)?;
+            Ok(GitRoute::CommitBrowser {
+                project_name,
+                commit_ref: percent_decode(commit_seg),
+                subpath: rest.iter().map(|s| percent_decode(s)).collect(),
+                trailing_slash,
+            })
+        }
     }
 }
 
@@ -151,13 +256,18 @@ pub fn extract_request_path(event: &GasDoGetEvent, envelope_git_path: Option<&st
                 .map(|s| s.as_str())
                 .filter(|s| !s.trim().is_empty())
         });
+    let raw_pi = event.path_info.as_deref().unwrap_or("");
+    let raw_gp = git_path_param.unwrap_or("");
+    let had_trailing_slash = (raw_gp.len() > 1 && raw_gp.ends_with('/'))
+        || (raw_gp.is_empty() && !raw_pi.is_empty() && raw_pi.ends_with('/'));
+
     let path_info = event
         .path_info
         .as_deref()
         .map(|s| s.trim_matches('/'))
         .filter(|s| !s.is_empty());
 
-    match (path_info, git_path_param) {
+    let mut combined = match (path_info, git_path_param) {
         (Some(pi), Some(gp)) => {
             let gp_trimmed = gp.trim_matches('/');
             if gp_trimmed.starts_with(pi) {
@@ -169,7 +279,11 @@ pub fn extract_request_path(event: &GasDoGetEvent, envelope_git_path: Option<&st
         (None, Some(gp)) => format!("/{}", gp.trim_matches('/')),
         (Some(pi), None) => format!("/{}", pi),
         (None, None) => "/".to_string(),
+    };
+    if had_trailing_slash && combined != "/" && !combined.ends_with('/') {
+        combined.push('/');
     }
+    combined
 }
 
 /// JSON request payload sent by `git-remote-gas` or the Web UI to `doPost(e)`.
@@ -585,38 +699,179 @@ impl GasGitStore {
 
         // 2. If not found as loose file, scan bundles from objects folder once
         if !*self.bundles_loaded.borrow() {
-            *self.bundles_loaded.borrow_mut() = true;
-            let iter = self.objects_folder.get_files();
-            while iter.has_next() {
-                let file = iter.next();
-                if file.is_trashed() {
-                    continue;
-                }
-                let name = file.get_name();
-                if name.starts_with("bundle_") && name.ends_with(".json") {
-                    let json_str = file.get_blob().get_data_as_string(None);
-                    if let Ok(bundle) =
-                        serde_json::from_str::<BTreeMap<String, String>>(&json_str)
-                    {
-                        for (hex_key, b64_val) in bundle {
-                            if let Ok(b_oid) = ObjectId::from_hex(hex_key.as_bytes()) {
-                                if let Ok(decoded) =
-                                    BASE64_STANDARD.decode(b64_val.trim().as_bytes())
-                                {
-                                    self.known_existing_objects.borrow_mut().insert(b_oid);
-                                    self.object_cache.borrow_mut().insert(b_oid, decoded);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            self.ensure_bundles_loaded();
             if let Some(cached) = self.object_cache.borrow().get(oid) {
                 return Some(cached.clone());
             }
         }
 
         None
+    }
+
+    /// Ensure all batched object bundle files (`bundle_*.json`) in `objects/` are loaded into `object_cache`.
+    pub fn ensure_bundles_loaded(&self) {
+        if *self.bundles_loaded.borrow() {
+            return;
+        }
+        *self.bundles_loaded.borrow_mut() = true;
+        let iter = self.objects_folder.get_files();
+        while iter.has_next() {
+            let file = iter.next();
+            if file.is_trashed() {
+                continue;
+            }
+            let name = file.get_name();
+            if name.starts_with("bundle_") && name.ends_with(".json") {
+                let json_str = file.get_blob().get_data_as_string(None);
+                if let Ok(bundle) = serde_json::from_str::<BTreeMap<String, String>>(&json_str) {
+                    for (hex_key, b64_val) in bundle {
+                        if let Ok(b_oid) = ObjectId::from_hex(hex_key.as_bytes()) {
+                            if let Ok(decoded) = BASE64_STANDARD.decode(b64_val.trim().as_bytes()) {
+                                self.known_existing_objects.borrow_mut().insert(b_oid);
+                                self.object_cache.borrow_mut().insert(b_oid, decoded);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Load all commits reachable from `HEAD` and `refs` (plus any commit objects in `object_cache`).
+    pub fn load_all_commits(&self) -> Vec<CommitItem> {
+        let head_sym = self
+            .head_symref()
+            .unwrap_or_else(|| DEFAULT_BRANCH.to_string());
+        let head_oid = self.resolve_ref("HEAD");
+        let refs_map = self.list_refs();
+
+        let mut decoration_map: BTreeMap<ObjectId, Vec<String>> = BTreeMap::new();
+        for (rname, roid) in &refs_map {
+            let mut labels = Vec::new();
+            if Some(*roid) == head_oid && rname == &head_sym {
+                let short = rname.strip_prefix("refs/heads/").unwrap_or(rname);
+                labels.push(format!("HEAD -> {}", short));
+            } else if let Some(branch) = rname.strip_prefix("refs/heads/") {
+                labels.push(branch.to_string());
+            } else if let Some(tag) = rname.strip_prefix("refs/tags/") {
+                labels.push(format!("tag: {}", tag));
+            } else {
+                labels.push(rname.clone());
+            }
+            decoration_map.entry(*roid).or_default().extend(labels);
+        }
+
+        if let Some(h_oid) = head_oid {
+            let entry = decoration_map.entry(h_oid).or_default();
+            if !entry.iter().any(|s| s.starts_with("HEAD")) {
+                entry.insert(0, "HEAD".to_string());
+            }
+        }
+
+        let mut commits = Vec::new();
+        let mut visited: BTreeSet<ObjectId> = BTreeSet::new();
+        let mut queue: VecDeque<ObjectId> = VecDeque::new();
+
+        if let Some(h) = head_oid {
+            queue.push_back(h);
+        }
+        for roid in refs_map.values() {
+            if !queue.contains(roid) {
+                queue.push_back(*roid);
+            }
+        }
+
+        while let Some(oid) = queue.pop_front() {
+            if !visited.insert(oid) {
+                continue;
+            }
+            let Some(loose) = self.read_loose_object(&oid) else {
+                continue;
+            };
+            if let Ok(ObjectRef::Commit(c)) = ObjectRef::from_loose(&loose) {
+                let parents: Vec<String> = c.parents().map(|p| p.to_hex().to_string()).collect();
+                for p in c.parents() {
+                    queue.push_back(p);
+                }
+                let (author_name, author_email) = match c.author().or_else(|_| c.committer()) {
+                    Ok(sig) => (
+                        sig.name.to_str_lossy().into_owned(),
+                        sig.email.to_str_lossy().into_owned(),
+                    ),
+                    Err(_) => ("Unknown".to_string(), String::new()),
+                };
+                let timestamp = match c.time() {
+                    Ok(t) => t.seconds,
+                    Err(_) => 0,
+                };
+                let full_msg = c.message.to_str_lossy();
+                let summary = full_msg.lines().next().unwrap_or("").to_string();
+                let body = full_msg.to_string();
+                let refs = decoration_map.get(&oid).cloned().unwrap_or_default();
+
+                let hex = oid.to_hex().to_string();
+                let short_oid = hex[..7.min(hex.len())].to_string();
+
+                commits.push(CommitItem {
+                    oid: hex,
+                    short_oid,
+                    parents,
+                    author_name,
+                    author_email,
+                    timestamp,
+                    summary,
+                    body,
+                    refs,
+                });
+            }
+        }
+
+        self.ensure_bundles_loaded();
+        let cached_oids: Vec<ObjectId> = self.object_cache.borrow().keys().copied().collect();
+        for oid in cached_oids {
+            if visited.contains(&oid) {
+                continue;
+            }
+            let Some(loose) = self.read_loose_object(&oid) else {
+                continue;
+            };
+            if let Ok(ObjectRef::Commit(c)) = ObjectRef::from_loose(&loose) {
+                visited.insert(oid);
+                let parents: Vec<String> = c.parents().map(|p| p.to_hex().to_string()).collect();
+                let (author_name, author_email) = match c.author().or_else(|_| c.committer()) {
+                    Ok(sig) => (
+                        sig.name.to_str_lossy().into_owned(),
+                        sig.email.to_str_lossy().into_owned(),
+                    ),
+                    Err(_) => ("Unknown".to_string(), String::new()),
+                };
+                let timestamp = match c.time() {
+                    Ok(t) => t.seconds,
+                    Err(_) => 0,
+                };
+                let full_msg = c.message.to_str_lossy();
+                let summary = full_msg.lines().next().unwrap_or("").to_string();
+                let body = full_msg.to_string();
+                let refs = decoration_map.get(&oid).cloned().unwrap_or_default();
+                let hex = oid.to_hex().to_string();
+                let short_oid = hex[..7.min(hex.len())].to_string();
+
+                commits.push(CommitItem {
+                    oid: hex,
+                    short_oid,
+                    parents,
+                    author_name,
+                    author_email,
+                    timestamp,
+                    summary,
+                    body,
+                    refs,
+                });
+            }
+        }
+
+        commits.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| a.oid.cmp(&b.oid)));
+        commits
     }
 
     /// Read and decode `(ObjectKind, Vec<u8>)` (body without loose header) for `oid`.
@@ -2386,6 +2641,20 @@ pub fn handle_do_get(event: &GasDoGetEvent) -> WebResponse {
                 WebResponse::Html(render_web_ui_html(Some(project_name)))
             }
         }
+        Ok(GitRoute::CommitBrowser {
+            project_name,
+            commit_ref,
+            subpath,
+            trailing_slash,
+        }) => handle_commit_browser_get(
+            event,
+            &project_name,
+            &commit_ref,
+            &subpath,
+            trailing_slash,
+            encoding,
+            format,
+        ),
         Ok(GitRoute::WebUiRoot) => {
             if let Some(service) = explicit_service {
                 let msg = format!(
@@ -2406,7 +2675,19 @@ pub fn handle_do_get(event: &GasDoGetEvent) -> WebResponse {
                         .set_mime_type(MimeType::Text),
                 )
             } else {
-                WebResponse::Html(render_web_ui_html(None))
+                let title = "404 Not Found - Invalid URL Path (Not a Raw File)";
+                let html = render_not_found_error_document(
+                    title,
+                    &req_path,
+                    &err,
+                    None,
+                );
+                WebResponse::Html(
+                    gas_html_service::create_html_output(Some(HtmlSource::Html(html)))
+                        .set_title(title)
+                        .set_sandbox_mode(SandboxMode::Iframe)
+                        .set_x_frame_options_mode(XFrameOptionsMode::Allowall),
+                )
             }
         }
     }
@@ -2531,7 +2812,9 @@ pub fn handle_do_post(event: &GasDoPostEvent) -> GasTextOutput {
         } else {
             let trimmed = raw_contents.trim();
             if !trimmed.is_empty() && !trimmed.starts_with("00") {
-                BASE64_STANDARD.decode(trimmed.as_bytes()).unwrap_or_else(|_| raw_contents.as_bytes().to_vec())
+                BASE64_STANDARD
+                    .decode(trimmed.as_bytes())
+                    .unwrap_or_else(|_| raw_contents.as_bytes().to_vec())
             } else {
                 raw_contents.as_bytes().to_vec()
             }
@@ -2555,6 +2838,10 @@ pub fn handle_do_post(event: &GasDoPostEvent) -> GasTextOutput {
             };
             (svc, res)
         }
+        Ok(GitRoute::CommitBrowser { .. }) => (
+            explicit_service.unwrap_or("git-upload-pack"),
+            Err("Unsupported Git POST path".to_string()),
+        ),
         Ok(GitRoute::WebUiRoot) => (
             explicit_service.unwrap_or("git-upload-pack"),
             Err(
@@ -2607,9 +2894,976 @@ pub fn handle_do_post(event: &GasDoPostEvent) -> GasTextOutput {
     }
 }
 
+/// Abstract reader over a Git repository so `resolve_commit_browser_request`
+/// works identically across Google Drive (`GasGitStore`) and in-memory unit tests.
+pub trait GitObjectReader {
+    fn read_loose(&self, oid: &ObjectId) -> Option<Vec<u8>>;
+    fn list_commits(&self) -> Vec<CommitItem>;
+}
+
+impl GitObjectReader for GasGitStore {
+    fn read_loose(&self, oid: &ObjectId) -> Option<Vec<u8>> {
+        self.read_loose_object(oid)
+    }
+
+    fn list_commits(&self) -> Vec<CommitItem> {
+        self.load_all_commits()
+    }
+}
+
+/// Output produced by the nginx-autoindex-style commit/directory/file browser.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommitBrowserOutput {
+    /// Standalone HTML page (directory listing, commit hash list, ambiguous candidate list, or 404 error page).
+    Html {
+        status: u16,
+        title: String,
+        html: String,
+        redirect_to: Option<String>,
+    },
+    /// Raw file content (`exec/<project_name>.git/<commit hash>/<file path>`).
+    /// When `is_binary` is true, GAS `ContentService.TextOutput.downloadAsFile(filename)` is used.
+    RawFile {
+        status: u16,
+        filename: String,
+        content: Vec<u8>,
+        is_binary: bool,
+    },
+}
+
+fn format_autoindex_link(
+    exec_rel: &str,
+    href: &str,
+    display_text: &str,
+    right_column: Option<&str>,
+) -> String {
+    let link_html = format!(
+        r#"<a target="_top" data-exec-rel="{}" href="{}">{}</a>"#,
+        escape_html(exec_rel),
+        escape_html(href),
+        escape_html(display_text),
+    );
+    match right_column {
+        Some(col) => {
+            let char_len = display_text.chars().count();
+            let pad = if char_len < 62 { 64 - char_len } else { 2 };
+            format!("{}{}{}", link_html, " ".repeat(pad), escape_html(col))
+        }
+        None => link_html,
+    }
+}
+
+fn render_autoindex_html_document(
+    title: &str,
+    heading: &str,
+    pre_lines: &[String],
+    redirect_target: Option<(&str, &str)>,
+) -> String {
+    let mut head_extra = String::new();
+    if let Some((redirect_href, redirect_rel)) = redirect_target {
+        let json_href = serde_json::to_string(redirect_href)
+            .unwrap_or_else(|_| "\"\"".to_string())
+            .replace("</", "<\\/");
+        let json_rel = serde_json::to_string(redirect_rel)
+            .unwrap_or_else(|_| "\"\"".to_string())
+            .replace("</", "<\\/");
+        head_extra.push_str(&format!(
+            r#"<meta http-equiv="refresh" content="0; url={}">
+<script>
+(function() {{
+  var targetHref = {};
+  var targetRel = {};
+  try {{
+    if (window.location.hostname.indexOf("googleusercontent.com") !== -1) {{
+      var ref = document.referrer || "";
+      var m = ref.match(/^(https:\/\/script\.google\.com\/macros\/s\/[^\/?#]+\/(?:exec|dev))/);
+      if (m && window.top) {{ window.top.location.replace(m[1] + "/" + targetRel); }}
+    }} else {{
+      window.location.replace(targetHref);
+    }}
+  }} catch (e) {{}}
+}})();
+</script>
+"#,
+            escape_html(redirect_href),
+            json_href,
+            json_rel
+        ));
+    }
+
+    head_extra.push_str(
+        r#"<script>
+document.addEventListener("DOMContentLoaded", function() {
+  if (window.location.hostname.indexOf("googleusercontent.com") === -1) return;
+  var ref = document.referrer || "";
+  var m = ref.match(/^(https:\/\/script\.google\.com\/macros\/s\/[^\/?#]+\/(?:exec|dev))/);
+  if (!m) return;
+  var base = m[1];
+  var links = document.querySelectorAll("a[data-exec-rel]");
+  for (var i = 0; i < links.length; i++) {
+    var rel = links[i].getAttribute("data-exec-rel");
+    if (rel !== null) links[i].setAttribute("href", base + "/" + rel);
+  }
+});
+</script>
+"#,
+    );
+
+    let body_pre = pre_lines.join("\n");
+    format!(
+        r#"<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<base target="_top">
+<title>{}</title>
+{}</head>
+<body>
+<h1>{}</h1>
+<hr>
+<pre>
+{}
+</pre>
+<hr>
+</body>
+</html>
+"#,
+        escape_html(title),
+        head_extra,
+        escape_html(heading),
+        body_pre
+    )
+}
+
+/// Render an unmistakable 404 / Invalid Path HTML error document so that even when Google Apps Script
+/// cannot return an HTTP 404 status code, the user or client can clearly see that:
+/// 1) The requested file or directory does NOT exist (or the URL path is invalid), and
+/// 2) This response is an HTML error page and NOT the raw contents of a repository file.
+pub fn render_not_found_error_document(
+    title: &str,
+    requested_path: &str,
+    reason: &str,
+    back_link: Option<(&str, &str, &str)>,
+) -> String {
+    let mut lines = vec![
+        "================================================================================".to_string(),
+        "[ERROR 404 / NOT A RAW FILE] 指定されたファイルまたはディレクトリは存在しません。".to_string(),
+        "※ このレスポンスはエラー通知用の HTML ページであり、リポジトリ内の生のファイルではありません。".to_string(),
+        "   (This response is an HTML error page, NOT a raw repository file.)".to_string(),
+        "================================================================================".to_string(),
+        String::new(),
+        format!("Requested Path : {}", escape_html(requested_path)),
+        format!("Error Detail   : {}", escape_html(reason)),
+    ];
+    if let Some((back_rel, back_href, back_label)) = back_link {
+        lines.push(String::new());
+        lines.push(format_autoindex_link(back_rel, back_href, back_label, None));
+    }
+    render_autoindex_html_document(title, "404 Not Found (File or Directory Does Not Exist)", &lines, None)
+}
+
+/// Core resolver for:
+/// - `exec/<project_name>.git/<commit hash>`
+/// - `exec/<project_name>.git/<commit hash>/<dir path>`
+/// - `exec/<project_name>.git/<commit hash>/<file path>`
+/// Uses `?page=1`, `?page=2`, ... query parameters for commit list pagination so page numbers never
+/// collide with directory or file names in the repository.
+pub fn resolve_commit_browser_request(
+    reader: &dyn GitObjectReader,
+    project_name: &str,
+    commit_ref: &str,
+    subpath: &[String],
+    trailing_slash: bool,
+    page_param: Option<&str>,
+    configured_base_url: Option<&str>,
+    page_size: usize,
+    custom_per_page: Option<usize>,
+) -> CommitBrowserOutput {
+    let effective_page_size = page_size.max(1);
+    let repo_prefix = format!("{}.git/", encode_uri_segment(project_name));
+
+    // Path after `/exec/` has `1 (project_name.git) + 1 (commit_ref) + subpath.len()` segments
+    let seg_count = 2 + subpath.len();
+    let up_levels = if trailing_slash {
+        seg_count
+    } else {
+        seg_count.saturating_sub(1)
+    };
+    let rel_prefix = if up_levels == 0 {
+        "./".to_string()
+    } else {
+        "../".repeat(up_levels)
+    };
+
+    let base_clean = configured_base_url
+        .map(|s| s.trim().trim_end_matches('/'))
+        .filter(|s| !s.is_empty() && !s.contains("<DEPLOYMENT_ID>"));
+
+    let make_urls = |target_after_repo: &str| -> (String, String) {
+        let exec_rel = format!("{}{}", repo_prefix, target_after_repo);
+        let href = match base_clean {
+            Some(b) => format!("{}/{}", b, exec_rel),
+            None => format!("{}{}", rel_prefix, exec_rel),
+        };
+        (exec_rel, href)
+    };
+
+    let make_page_query = |p: usize| -> String {
+        match custom_per_page {
+            Some(pp) => format!("?page={}&per_page={}", p, pp),
+            None => format!("?page={}", p),
+        }
+    };
+
+    let mut all_commits = reader.list_commits();
+    let q = commit_ref.trim().to_ascii_lowercase();
+    let is_hex = !q.is_empty() && q.len() <= 40 && q.chars().all(|c| c.is_ascii_hexdigit());
+
+    if is_hex && q.len() == 40 && !all_commits.iter().any(|c| c.oid.eq_ignore_ascii_case(&q)) {
+        if let Ok(oid) = ObjectId::from_hex(q.as_bytes()) {
+            if let Some(loose) = reader.read_loose(&oid) {
+                if let Ok(ObjectRef::Commit(c)) = ObjectRef::from_loose(&loose) {
+                    let parents: Vec<String> = c.parents().map(|p| p.to_hex().to_string()).collect();
+                    let (author_name, author_email) = match c.author().or_else(|_| c.committer()) {
+                        Ok(sig) => (
+                            sig.name.to_str_lossy().into_owned(),
+                            sig.email.to_str_lossy().into_owned(),
+                        ),
+                        Err(_) => ("Unknown".to_string(), String::new()),
+                    };
+                    let timestamp = match c.time() {
+                        Ok(t) => t.seconds,
+                        Err(_) => 0,
+                    };
+                    let full_msg = c.message.to_str_lossy();
+                    let summary = full_msg.lines().next().unwrap_or("").to_string();
+                    let body = full_msg.to_string();
+                    let hex = oid.to_hex().to_string();
+                    let short_oid = hex[..7.min(hex.len())].to_string();
+                    all_commits.push(CommitItem {
+                        oid: hex,
+                        short_oid,
+                        parents,
+                        author_name,
+                        author_email,
+                        timestamp,
+                        summary,
+                        body,
+                        refs: Vec::new(),
+                    });
+                }
+            }
+        }
+    }
+
+    let matched_commits: Vec<CommitItem> = if is_hex {
+        all_commits
+            .iter()
+            .filter(|c| c.oid.to_ascii_lowercase().starts_with(&q))
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let render_404 = |req_display: &str,
+                      reason: &str,
+                      back_target: &str,
+                      back_label: &str|
+     -> CommitBrowserOutput {
+        let title = "404 Not Found - Path Does Not Exist (Not a Raw File)".to_string();
+        let (back_rel, back_href) = make_urls(back_target);
+        let html = render_not_found_error_document(
+            &title,
+            req_display,
+            reason,
+            Some((&back_rel, &back_href, back_label)),
+        );
+        CommitBrowserOutput::Html {
+            status: 404,
+            title,
+            html,
+            redirect_to: None,
+        }
+    };
+
+    let render_commit_list = |list: &[CommitItem],
+                              heading_prefix: &str,
+                              page: usize,
+                              is_redirect: bool|
+     -> CommitBrowserOutput {
+        let total = list.len();
+        let total_pages = (total.max(1) + effective_page_size - 1) / effective_page_size;
+        let enc_ref = encode_uri_segment(commit_ref);
+
+        let title = if total_pages > 1 {
+            format!("{} (Page {}/{})", heading_prefix, page, total_pages)
+        } else {
+            heading_prefix.to_string()
+        };
+
+        let mut lines: Vec<String> = Vec::new();
+        let redirect_pair = if is_redirect {
+            let q1 = make_page_query(1);
+            let (r_rel, r_href) = make_urls(&format!("{}{}", enc_ref, q1));
+            lines.push(format!(
+                "Redirecting to {} ...",
+                format_autoindex_link(&r_rel, &r_href, &format!("{}{}", commit_ref, q1), None)
+            ));
+            lines.push(String::new());
+            Some((r_href, r_rel))
+        } else {
+            None
+        };
+
+        if list.is_empty() {
+            lines.push("(no commits found)".to_string());
+        } else {
+            let start = (page - 1) * effective_page_size;
+            let end = (start + effective_page_size).min(total);
+            for c in &list[start..end] {
+                let (c_rel, c_href) = make_urls(&encode_uri_segment(&c.oid));
+                let ts_str = format_utc_timestamp(c.timestamp);
+                let refs_suffix = if c.refs.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", c.refs.join(", "))
+                };
+                let meta = format!("{}  {}{}", ts_str, c.summary, refs_suffix);
+                lines.push(format_autoindex_link(&c_rel, &c_href, &c.oid, Some(&meta)));
+            }
+        }
+
+        if total_pages > 1 {
+            lines.push(String::new());
+            let mut page_links: Vec<String> = Vec::with_capacity(total_pages);
+            for p in 1..=total_pages {
+                let qp = make_page_query(p);
+                let (p_rel, p_href) = make_urls(&format!("{}{}", enc_ref, qp));
+                let link = format_autoindex_link(&p_rel, &p_href, &p.to_string(), None);
+                if p == page {
+                    page_links.push(format!("[{}]", link));
+                } else {
+                    page_links.push(link);
+                }
+            }
+            lines.push(format!("Pages: {}", page_links.join(" ")));
+            for p in 1..=total_pages {
+                let qp = make_page_query(p);
+                let (p_rel, p_href) = make_urls(&format!("{}{}", enc_ref, qp));
+                let path_label = format!("{}?page={}", commit_ref, p);
+                let status_col = if p == page {
+                    format!("page {} (current)", p)
+                } else {
+                    format!("page {}", p)
+                };
+                lines.push(format_autoindex_link(
+                    &p_rel,
+                    &p_href,
+                    &path_label,
+                    Some(&status_col),
+                ));
+            }
+        }
+
+        let html = match &redirect_pair {
+            Some((r_href, r_rel)) => {
+                render_autoindex_html_document(&title, &title, &lines, Some((r_href, r_rel)))
+            }
+            None => render_autoindex_html_document(&title, &title, &lines, None),
+        };
+
+        CommitBrowserOutput::Html {
+            status: if is_redirect { 302 } else { 200 },
+            title,
+            html,
+            redirect_to: redirect_pair.map(|(r_href, _)| r_href),
+        }
+    };
+
+    // Case 1: Invalid commit hash (0 matches)
+    if matched_commits.is_empty() {
+        let total = all_commits.len();
+        let total_pages = (total.max(1) + effective_page_size - 1) / effective_page_size;
+        let heading = format!(
+            "Index of /{}.git commits (invalid commit hash: {})",
+            project_name, commit_ref
+        );
+
+        if subpath.is_empty() {
+            if let Some(raw_p) = page_param {
+                if let Ok(p) = raw_p.trim().parse::<usize>() {
+                    if p >= 1 && p <= total_pages {
+                        return render_commit_list(&all_commits, &heading, p, false);
+                    }
+                }
+                return render_404(
+                    &format!("/{}.git/{}?page={}", project_name, commit_ref, raw_p),
+                    &format!(
+                        "Invalid page number '{}' (valid pages: 1..={})",
+                        raw_p, total_pages
+                    ),
+                    &format!("{}{}", encode_uri_segment(commit_ref), make_page_query(1)),
+                    &format!("{}?page=1", commit_ref),
+                );
+            }
+            if total > effective_page_size {
+                return render_commit_list(&all_commits, &heading, 1, true);
+            } else {
+                return render_commit_list(&all_commits, &heading, 1, false);
+            }
+        }
+
+        let requested_full = format!("/{}.git/{}/{}", project_name, commit_ref, subpath.join("/"));
+        return render_404(
+            &requested_full,
+            &format!(
+                "Commit hash '{}' is invalid and path '{}' cannot be resolved.",
+                commit_ref, requested_full
+            ),
+            &encode_uri_segment(commit_ref),
+            &format!("View commit list ({})", commit_ref),
+        );
+    }
+
+    // Case 2: Ambiguous commit hash prefix (> 1 matches)
+    if matched_commits.len() > 1 {
+        let total = matched_commits.len();
+        let total_pages = (total.max(1) + effective_page_size - 1) / effective_page_size;
+        let heading = format!(
+            "Index of candidate commits in /{}.git for prefix {} ({} matches)",
+            project_name, commit_ref, total
+        );
+
+        if subpath.is_empty() {
+            if let Some(raw_p) = page_param {
+                if let Ok(p) = raw_p.trim().parse::<usize>() {
+                    if p >= 1 && p <= total_pages {
+                        return render_commit_list(&matched_commits, &heading, p, false);
+                    }
+                }
+                return render_404(
+                    &format!("/{}.git/{}?page={}", project_name, commit_ref, raw_p),
+                    &format!(
+                        "Invalid page number '{}' for candidate commits (valid pages: 1..={})",
+                        raw_p, total_pages
+                    ),
+                    &format!("{}{}", encode_uri_segment(commit_ref), make_page_query(1)),
+                    &format!("{}?page=1", commit_ref),
+                );
+            }
+            if total > effective_page_size {
+                return render_commit_list(&matched_commits, &heading, 1, true);
+            } else {
+                return render_commit_list(&matched_commits, &heading, 1, false);
+            }
+        }
+
+        let requested_full = format!("/{}.git/{}/{}", project_name, commit_ref, subpath.join("/"));
+        return render_404(
+            &requested_full,
+            &format!(
+                "Commit prefix '{}' is ambiguous ({} candidate commits) for path '{}'",
+                commit_ref, total, requested_full
+            ),
+            &encode_uri_segment(commit_ref),
+            &format!("View candidate commits for {}", commit_ref),
+        );
+    }
+
+    // Case 3: Uniquely resolved commit (`matched_commits.len() == 1`)
+    // Always uses the resolved full 40-character commit hash (`resolved_oid_str`).
+    let resolved_commit = &matched_commits[0];
+    let resolved_oid_str = &resolved_commit.oid;
+    let Ok(commit_oid) = ObjectId::from_hex(resolved_oid_str.as_bytes()) else {
+        return render_404(
+            &format!("/{}.git/{}", project_name, resolved_oid_str),
+            &format!("Corrupt commit OID '{}'", resolved_oid_str),
+            "",
+            "../",
+        );
+    };
+    let Some(commit_loose) = reader.read_loose(&commit_oid) else {
+        return render_404(
+            &format!("/{}.git/{}", project_name, resolved_oid_str),
+            &format!("Commit object '{}' missing", resolved_oid_str),
+            "",
+            "../",
+        );
+    };
+    let Ok(ObjectRef::Commit(commit_obj)) = ObjectRef::from_loose(&commit_loose) else {
+        return render_404(
+            &format!("/{}.git/{}", project_name, resolved_oid_str),
+            &format!("Object '{}' is not a commit", resolved_oid_str),
+            "",
+            "../",
+        );
+    };
+    let root_tree_oid = commit_obj.tree();
+
+    let render_directory = |tree_oid: ObjectId, dir_subpath: &[String]| -> CommitBrowserOutput {
+        let Some(tree_loose) = reader.read_loose(&tree_oid) else {
+            return render_404(
+                &format!("/{}.git/{}", project_name, resolved_oid_str),
+                &format!("Tree object '{}' missing", tree_oid.to_hex()),
+                &encode_uri_segment(resolved_oid_str),
+                resolved_oid_str,
+            );
+        };
+        let Ok(ObjectRef::Tree(tree_ref)) = ObjectRef::from_loose(&tree_loose) else {
+            return render_404(
+                &format!("/{}.git/{}", project_name, resolved_oid_str),
+                &format!("Object '{}' is not a directory tree", tree_oid.to_hex()),
+                &encode_uri_segment(resolved_oid_str),
+                resolved_oid_str,
+            );
+        };
+
+        let mut dirs: Vec<String> = Vec::new();
+        let mut files: Vec<(String, usize)> = Vec::new();
+
+        for entry in &tree_ref.entries {
+            let name = entry.filename.to_str_lossy().into_owned();
+            let child_oid = entry.oid.to_owned();
+            let Some(child_loose) = reader.read_loose(&child_oid) else {
+                continue;
+            };
+            let Ok((kind, size, _offset)) = gix_object::decode::loose_header(&child_loose) else {
+                continue;
+            };
+            match kind {
+                ObjectKind::Tree => dirs.push(name),
+                ObjectKind::Blob => files.push((name, size as usize)),
+                _ => {}
+            }
+        }
+
+        dirs.sort();
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let enc_oid = encode_uri_segment(resolved_oid_str);
+        let dir_rel_display = dir_subpath.join("/");
+        let dir_rel_encoded = dir_subpath
+            .iter()
+            .map(|s| encode_uri_segment(s))
+            .collect::<Vec<_>>()
+            .join("/");
+
+        let title = if dir_subpath.is_empty() {
+            format!("Index of /{}.git/{}/", project_name, resolved_oid_str)
+        } else {
+            format!(
+                "Index of /{}.git/{}/{}/",
+                project_name, resolved_oid_str, dir_rel_display
+            )
+        };
+
+        let mut lines: Vec<String> = Vec::new();
+
+        if !dir_subpath.is_empty() {
+            let parent_target = if dir_subpath.len() == 1 {
+                enc_oid.clone()
+            } else {
+                let parent_enc = dir_subpath[..dir_subpath.len() - 1]
+                    .iter()
+                    .map(|s| encode_uri_segment(s))
+                    .collect::<Vec<_>>()
+                    .join("/");
+                format!("{}/{}", enc_oid, parent_enc)
+            };
+            let (p_rel, p_href) = make_urls(&parent_target);
+            lines.push(format_autoindex_link(&p_rel, &p_href, "../", None));
+        }
+
+        for d_name in dirs {
+            let display_path = if dir_subpath.is_empty() {
+                format!("{}/{}/", resolved_oid_str, d_name)
+            } else {
+                format!("{}/{}/{}/", resolved_oid_str, dir_rel_display, d_name)
+            };
+            let target_path = if dir_subpath.is_empty() {
+                format!("{}/{}", enc_oid, encode_uri_segment(&d_name))
+            } else {
+                format!(
+                    "{}/{}/{}",
+                    enc_oid,
+                    dir_rel_encoded,
+                    encode_uri_segment(&d_name)
+                )
+            };
+            let (d_rel, d_href) = make_urls(&target_path);
+            lines.push(format_autoindex_link(
+                &d_rel,
+                &d_href,
+                &display_path,
+                Some("-"),
+            ));
+        }
+
+        for (f_name, f_size) in files {
+            let display_path = if dir_subpath.is_empty() {
+                format!("{}/{}", resolved_oid_str, f_name)
+            } else {
+                format!("{}/{}/{}", resolved_oid_str, dir_rel_display, f_name)
+            };
+            let target_path = if dir_subpath.is_empty() {
+                format!("{}/{}", enc_oid, encode_uri_segment(&f_name))
+            } else {
+                format!(
+                    "{}/{}/{}",
+                    enc_oid,
+                    dir_rel_encoded,
+                    encode_uri_segment(&f_name)
+                )
+            };
+            let (f_rel, f_href) = make_urls(&target_path);
+            lines.push(format_autoindex_link(
+                &f_rel,
+                &f_href,
+                &display_path,
+                Some(&f_size.to_string()),
+            ));
+        }
+
+        let html = render_autoindex_html_document(&title, &title, &lines, None);
+        CommitBrowserOutput::Html {
+            status: 200,
+            title,
+            html,
+            redirect_to: None,
+        }
+    };
+
+    if subpath.is_empty() {
+        return render_directory(root_tree_oid, &[]);
+    }
+
+    let full_req_display = format!(
+        "/{}.git/{}/{}",
+        project_name,
+        resolved_oid_str,
+        subpath.join("/")
+    );
+
+    for seg in subpath {
+        if seg.is_empty() || seg == "." || seg == ".." || seg.contains('/') || seg.contains('\0') {
+            return render_404(
+                &full_req_display,
+                &format!("Invalid path segment '{}' in '{}'", seg, full_req_display),
+                &encode_uri_segment(resolved_oid_str),
+                &format!("{}/", resolved_oid_str),
+            );
+        }
+    }
+
+    let mut current_tree_oid = root_tree_oid;
+    for seg in &subpath[..subpath.len() - 1] {
+        let Some(tree_loose) = reader.read_loose(&current_tree_oid) else {
+            return render_404(
+                &full_req_display,
+                &format!("Directory tree does not exist along '{}'", full_req_display),
+                &encode_uri_segment(resolved_oid_str),
+                &format!("{}/", resolved_oid_str),
+            );
+        };
+        let Ok(ObjectRef::Tree(tree_ref)) = ObjectRef::from_loose(&tree_loose) else {
+            return render_404(
+                &full_req_display,
+                &format!("Intermediate object is not a directory along '{}'", full_req_display),
+                &encode_uri_segment(resolved_oid_str),
+                &format!("{}/", resolved_oid_str),
+            );
+        };
+        let Some(found_entry) = tree_ref
+            .entries
+            .iter()
+            .find(|e| e.filename.to_str_lossy() == seg.as_str())
+        else {
+            return render_404(
+                &full_req_display,
+                &format!(
+                    "Directory '{}' does not exist in commit {}",
+                    seg, resolved_oid_str
+                ),
+                &encode_uri_segment(resolved_oid_str),
+                &format!("{}/", resolved_oid_str),
+            );
+        };
+        let child_oid = found_entry.oid.to_owned();
+        let Some(child_loose) = reader.read_loose(&child_oid) else {
+            return render_404(
+                &full_req_display,
+                &format!("Git object for '{}' not found", seg),
+                &encode_uri_segment(resolved_oid_str),
+                &format!("{}/", resolved_oid_str),
+            );
+        };
+        let Ok((child_kind, _, _)) = gix_object::decode::loose_header(&child_loose) else {
+            return render_404(
+                &full_req_display,
+                &format!("Corrupt Git object for '{}'", seg),
+                &encode_uri_segment(resolved_oid_str),
+                &format!("{}/", resolved_oid_str),
+            );
+        };
+        if child_kind != ObjectKind::Tree {
+            return render_404(
+                &full_req_display,
+                &format!(
+                    "'{}' is a file, not a directory (cannot traverse '{}')",
+                    seg, full_req_display
+                ),
+                &encode_uri_segment(resolved_oid_str),
+                &format!("{}/", resolved_oid_str),
+            );
+        }
+        current_tree_oid = child_oid;
+    }
+
+    let last_seg = &subpath[subpath.len() - 1];
+    let Some(parent_tree_loose) = reader.read_loose(&current_tree_oid) else {
+        return render_404(
+            &full_req_display,
+            &format!("Parent directory does not exist for '{}'", full_req_display),
+            &encode_uri_segment(resolved_oid_str),
+            &format!("{}/", resolved_oid_str),
+        );
+    };
+    let Ok(ObjectRef::Tree(parent_tree_ref)) = ObjectRef::from_loose(&parent_tree_loose) else {
+        return render_404(
+            &full_req_display,
+            &format!("Parent object is not a directory for '{}'", full_req_display),
+            &encode_uri_segment(resolved_oid_str),
+            &format!("{}/", resolved_oid_str),
+        );
+    };
+    let Some(target_entry) = parent_tree_ref
+        .entries
+        .iter()
+        .find(|e| e.filename.to_str_lossy() == last_seg.as_str())
+    else {
+        return render_404(
+            &full_req_display,
+            &format!(
+                "File or directory '{}' does not exist in commit {}",
+                subpath.join("/"),
+                resolved_oid_str
+            ),
+            &encode_uri_segment(resolved_oid_str),
+            &format!("{}/", resolved_oid_str),
+        );
+    };
+
+    let target_oid = target_entry.oid.to_owned();
+    let Some(target_loose) = reader.read_loose(&target_oid) else {
+        return render_404(
+            &full_req_display,
+            &format!("Git object '{}' is missing", target_oid.to_hex()),
+            &encode_uri_segment(resolved_oid_str),
+            &format!("{}/", resolved_oid_str),
+        );
+    };
+    let Ok((target_kind, target_size, target_offset)) =
+        gix_object::decode::loose_header(&target_loose)
+    else {
+        return render_404(
+            &full_req_display,
+            &format!("Corrupt Git object for '{}'", full_req_display),
+            &encode_uri_segment(resolved_oid_str),
+            &format!("{}/", resolved_oid_str),
+        );
+    };
+
+    match target_kind {
+        ObjectKind::Tree => render_directory(target_oid, subpath),
+        ObjectKind::Blob => {
+            if trailing_slash {
+                return render_404(
+                    &format!("{}/", full_req_display),
+                    &format!(
+                        "'{}' is a regular file, not a directory (trailing '/' is invalid)",
+                        subpath.join("/")
+                    ),
+                    &encode_uri_segment(resolved_oid_str),
+                    &format!("{}/", resolved_oid_str),
+                );
+            }
+            let end = (target_offset + (target_size as usize)).min(target_loose.len());
+            let body = target_loose[target_offset..end].to_vec();
+            let is_binary = body.iter().take(4096).any(|&b| b == 0);
+            CommitBrowserOutput::RawFile {
+                status: 200,
+                filename: last_seg.clone(),
+                content: body,
+                is_binary,
+            }
+        }
+        _ => render_404(
+            &full_req_display,
+            &format!("Unsupported Git object kind at '{}'", full_req_display),
+            &encode_uri_segment(resolved_oid_str),
+            &format!("{}/", resolved_oid_str),
+        ),
+    }
+}
+
+fn handle_commit_browser_get(
+    event: &GasDoGetEvent,
+    project_name: &str,
+    commit_ref: &str,
+    subpath: &[String],
+    trailing_slash: bool,
+    encoding: &str,
+    format: &str,
+) -> WebResponse {
+    let custom_per_page = event
+        .parameter
+        .get("per_page")
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n >= 1);
+
+    let page_size = custom_per_page
+        .or_else(|| {
+            get_env_or_script_property(ENV_GIT_COMMIT_PAGE_SIZE)
+                .and_then(|s| s.parse::<usize>().ok())
+        })
+        .unwrap_or(DEFAULT_COMMIT_PAGE_SIZE)
+        .max(1);
+
+    let page_param = event.parameter.get("page").map(|s| s.as_str());
+    let configured_base = get_env_or_script_property(ENV_GAS_WEB_APP_URL);
+
+    let store = match GasGitStore::open(project_name) {
+        Ok(s) => s,
+        Err(err) => {
+            let title = "404 Not Found - Repository Does Not Exist (Not a Raw File)";
+            let req_display = format!("/{}.git/{}", project_name, commit_ref);
+            let html = render_not_found_error_document(title, &req_display, &err, None);
+            if format == "json" {
+                let env = GasGitResponseEnvelope {
+                    ok: false,
+                    status: 404,
+                    content_type: "text/html; charset=utf-8".to_string(),
+                    body_base64: BASE64_STANDARD.encode(html.as_bytes()),
+                    error: Some(err),
+                };
+                let json = serde_json::to_string(&env).unwrap_or_default();
+                return WebResponse::Text(
+                    gas_content_service::create_text_output(&json).set_mime_type(MimeType::Json),
+                );
+            }
+            return WebResponse::Html(
+                gas_html_service::create_html_output(Some(HtmlSource::Html(html)))
+                    .set_title(title)
+                    .set_sandbox_mode(SandboxMode::Iframe)
+                    .set_x_frame_options_mode(XFrameOptionsMode::Allowall),
+            );
+        }
+    };
+
+    let output = resolve_commit_browser_request(
+        &store,
+        project_name,
+        commit_ref,
+        subpath,
+        trailing_slash,
+        page_param,
+        configured_base.as_deref(),
+        page_size,
+        custom_per_page,
+    );
+
+    match output {
+        CommitBrowserOutput::Html {
+            status,
+            title,
+            html,
+            ..
+        } => {
+            if format == "json" {
+                let env = GasGitResponseEnvelope {
+                    ok: status < 400,
+                    status,
+                    content_type: "text/html; charset=utf-8".to_string(),
+                    body_base64: BASE64_STANDARD.encode(html.as_bytes()),
+                    error: if status >= 400 {
+                        Some(title.clone())
+                    } else {
+                        None
+                    },
+                };
+                let json = serde_json::to_string(&env).unwrap_or_default();
+                WebResponse::Text(
+                    gas_content_service::create_text_output(&json).set_mime_type(MimeType::Json),
+                )
+            } else {
+                WebResponse::Html(
+                    gas_html_service::create_html_output(Some(HtmlSource::Html(html)))
+                        .set_title(&title)
+                        .set_sandbox_mode(SandboxMode::Iframe)
+                        .set_x_frame_options_mode(XFrameOptionsMode::Allowall),
+                )
+            }
+        }
+        CommitBrowserOutput::RawFile {
+            status,
+            filename,
+            content,
+            is_binary,
+        } => {
+            if format == "json" {
+                let ctype = if is_binary {
+                    "application/octet-stream"
+                } else {
+                    "text/plain; charset=utf-8"
+                };
+                let env = GasGitResponseEnvelope {
+                    ok: true,
+                    status,
+                    content_type: ctype.to_string(),
+                    body_base64: BASE64_STANDARD.encode(&content),
+                    error: None,
+                };
+                let json = serde_json::to_string(&env).unwrap_or_default();
+                WebResponse::Text(
+                    gas_content_service::create_text_output(&json).set_mime_type(MimeType::Json),
+                )
+            } else if encoding == "base64" {
+                let b64 = BASE64_STANDARD.encode(&content);
+                let out =
+                    gas_content_service::create_text_output(&b64).set_mime_type(MimeType::Text);
+                if is_binary {
+                    WebResponse::Text(out.download_as_file(&filename))
+                } else {
+                    WebResponse::Text(out)
+                }
+            } else if is_binary {
+                // Binary file: use GAS ContentService download feature (`downloadAsFile`)
+                let text = String::from_utf8_lossy(&content);
+                WebResponse::Text(
+                    gas_content_service::create_text_output(&text)
+                        .set_mime_type(MimeType::Text)
+                        .download_as_file(&filename),
+                )
+            } else {
+                let text = String::from_utf8_lossy(&content);
+                WebResponse::Text(
+                    gas_content_service::create_text_output(&text).set_mime_type(MimeType::Text),
+                )
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{GitRoute, parse_git_path, parse_project_segment};
+    use super::{
+        CommitBrowserOutput, CommitItem, GitObjectReader, GitRoute, encode_uri_segment,
+        escape_html, parse_git_path, parse_project_segment, percent_decode,
+        resolve_commit_browser_request,
+    };
+    use gix_hash::ObjectId;
+    use std::collections::BTreeMap;
 
     #[test]
     fn test_parse_project_segment() {
@@ -2621,6 +3875,19 @@ mod tests {
         assert!(parse_project_segment("").is_err());
         assert!(parse_project_segment(".git").is_err());
         assert!(parse_project_segment("../secret").is_err());
+    }
+
+    #[test]
+    fn test_escape_and_percent_encoding() {
+        assert_eq!(
+            escape_html(r#"<script>alert("x" & 'y')</script>"#),
+            "&lt;script&gt;alert(&quot;x&quot; &amp; &#39;y&#39;)&lt;/script&gt;"
+        );
+        let original = "hello world?#%&<>.txt";
+        let encoded = encode_uri_segment(original);
+        assert!(!encoded.contains('?'));
+        assert!(!encoded.contains('#'));
+        assert_eq!(percent_decode(&encoded), original);
     }
 
     #[test]
@@ -2651,7 +3918,130 @@ mod tests {
                 project_name: "my_project".to_string()
             }
         );
+        assert_eq!(
+            parse_git_path("/macros/s/AKfycb123/exec/my_project.git/a1b2c3d4").unwrap(),
+            GitRoute::CommitBrowser {
+                project_name: "my_project".to_string(),
+                commit_ref: "a1b2c3d4".to_string(),
+                subpath: vec![],
+                trailing_slash: false,
+            }
+        );
+        assert_eq!(
+            parse_git_path("/macros/s/AKfycb123/exec/my_project.git/a1b2c3d4/src/main.rs").unwrap(),
+            GitRoute::CommitBrowser {
+                project_name: "my_project".to_string(),
+                commit_ref: "a1b2c3d4".to_string(),
+                subpath: vec!["src".to_string(), "main.rs".to_string()],
+                trailing_slash: false,
+            }
+        );
+        // Direct `/exec/<commit_hash>` without `/<project_name>.git` is invalid
+        assert!(parse_git_path("/macros/s/AKfycb123/exec/a1b2c3d4").is_err());
+        assert!(parse_git_path("/a1b2c3d4").is_err());
         assert!(parse_git_path("/info/refs").is_err());
         assert!(parse_git_path("/git-upload-pack").is_err());
+    }
+
+    struct DummyReader {
+        commits: Vec<CommitItem>,
+        objects: BTreeMap<ObjectId, Vec<u8>>,
+    }
+
+    impl GitObjectReader for DummyReader {
+        fn read_loose(&self, oid: &ObjectId) -> Option<Vec<u8>> {
+            self.objects.get(oid).cloned()
+        }
+
+        fn list_commits(&self) -> Vec<CommitItem> {
+            self.commits.clone()
+        }
+    }
+
+    #[test]
+    fn test_commit_browser_invalid_and_ambiguous_commits_with_page_param() {
+        let commits = vec![
+            CommitItem {
+                oid: "a1b2c3d400000000000000000000000000000001".to_string(),
+                short_oid: "a1b2c3d".to_string(),
+                parents: vec![],
+                author_name: "Alice".to_string(),
+                author_email: "alice@example.com".to_string(),
+                timestamp: 1700000002,
+                summary: "Second commit".to_string(),
+                body: "Second commit".to_string(),
+                refs: vec!["HEAD -> main".to_string()],
+            },
+            CommitItem {
+                oid: "a1b2f99900000000000000000000000000000002".to_string(),
+                short_oid: "a1b2f99".to_string(),
+                parents: vec![],
+                author_name: "Bob".to_string(),
+                author_email: "bob@example.com".to_string(),
+                timestamp: 1700000001,
+                summary: "First commit".to_string(),
+                body: "First commit".to_string(),
+                refs: vec![],
+            },
+        ];
+        let reader = DummyReader {
+            commits,
+            objects: BTreeMap::new(),
+        };
+
+        // Ambiguous prefix `a1b2` matches both commits (and redirects to `?page=1` when page_size=1)
+        let ambig_redir = resolve_commit_browser_request(
+            &reader,
+            "my-repo",
+            "a1b2",
+            &[],
+            false,
+            None,
+            None,
+            1,
+            Some(1),
+        );
+        match ambig_redir {
+            CommitBrowserOutput::Html {
+                status,
+                html,
+                redirect_to,
+                ..
+            } => {
+                assert_eq!(status, 302);
+                assert_eq!(
+                    redirect_to.as_deref(),
+                    Some("../my-repo.git/a1b2?page=1&per_page=1")
+                );
+                assert!(html.contains("a1b2?page=2"));
+            }
+            _ => panic!("Expected redirect Html output for ambiguous prefix with page_size=1"),
+        }
+
+        // Invalid commit hash with page_size=1 redirects to `?page=1` and links to `?page=2`
+        let inv_redir = resolve_commit_browser_request(
+            &reader,
+            "my-repo",
+            "badhash",
+            &[],
+            false,
+            None,
+            None,
+            1,
+            None,
+        );
+        match inv_redir {
+            CommitBrowserOutput::Html {
+                status,
+                html,
+                redirect_to,
+                ..
+            } => {
+                assert_eq!(status, 302);
+                assert_eq!(redirect_to.as_deref(), Some("../my-repo.git/badhash?page=1"));
+                assert!(html.contains("badhash?page=2"));
+            }
+            _ => panic!("Expected redirect Html output for invalid hash"),
+        }
     }
 }
