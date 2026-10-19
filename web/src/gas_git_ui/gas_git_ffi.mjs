@@ -20,10 +20,10 @@ import { toList } from "../gleam.mjs";
 import { Commit, CommitDetail, CommitFileChange, CommitTreeEntry, RepoCommits, RepoSummary, ServerState } from "./types.mjs";
 
 const IDB_NAME = "GasGitServerCacheDB";
-const IDB_VERSION = 2;
-const STORE_REPO_COMMITS = "repo_commits_v2";
+const IDB_VERSION = 3;
+const STORE_REPO_COMMITS = "repo_commits_v3";
 const STORE_COMMIT_DETAILS = "commit_details";
-const CACHE_STORAGE_NAME = "gas-git-cache-v2";
+const CACHE_STORAGE_NAME = "gas-git-cache-v3";
 
 function isCommitPayloadGraphComplete(data, cleanHead) {
   if (!data || !data.ok || !Array.isArray(data.commits)) {
@@ -187,7 +187,7 @@ function readRepoCommitsFromLocalStorage(projectName, cleanHead) {
     if (typeof window !== "undefined" && window.localStorage) {
       if (cleanHead) {
         const rawByHead = window.localStorage.getItem(
-          "gas_git_commits_v2_" + projectName + "_" + cleanHead,
+          "gas_git_commits_v3_" + projectName + "_" + cleanHead,
         );
         if (rawByHead) {
           const parsedByHead = JSON.parse(rawByHead);
@@ -197,7 +197,7 @@ function readRepoCommitsFromLocalStorage(projectName, cleanHead) {
         }
       }
       const rawLatest = window.localStorage.getItem(
-        "gas_git_commits_v2_latest_" + projectName,
+        "gas_git_commits_v3_latest_" + projectName,
       );
       if (rawLatest) {
         const parsed = JSON.parse(rawLatest);
@@ -236,7 +236,7 @@ function readRepoCommitsPersistent(projectName, cleanHead) {
       if (idbHit) return idbHit;
       // 2. Try window.caches (Cache Storage API)
       const urlKey =
-        "https://gas-git-cache.local/repo-commits-v2/" +
+        "https://gas-git-cache.local/repo-commits-v3/" +
         encodeURIComponent(projectName);
       return cacheApiGet(urlKey)
         .then(function (record) {
@@ -277,7 +277,7 @@ function writeRepoCommitsPersistent(projectName, requestedHead, data) {
   // Write to localStorage fallback synchronously (purging stale keys for this project)
   try {
     if (typeof window !== "undefined" && window.localStorage) {
-      const prefix = "gas_git_commits_v2_" + projectName + "_";
+      const prefix = "gas_git_commits_v3_" + projectName + "_";
       const legacyPrefix = "gas_git_commits_" + projectName + "_";
       const keysToRemove = [];
       for (let i = 0; i < window.localStorage.length; i++) {
@@ -295,14 +295,14 @@ function writeRepoCommitsPersistent(projectName, requestedHead, data) {
         window.localStorage.setItem(prefix + actualHead, serialized);
       }
       window.localStorage.setItem(
-        "gas_git_commits_v2_latest_" + projectName,
+        "gas_git_commits_v3_latest_" + projectName,
         serialized,
       );
     }
   } catch (err) {}
 
   const urlKey =
-    "https://gas-git-cache.local/repo-commits-v2/" +
+    "https://gas-git-cache.local/repo-commits-v3/" +
     encodeURIComponent(projectName);
 
   return idbPut(STORE_REPO_COMMITS, record)
@@ -452,9 +452,126 @@ function decodeServerState(rawPayload) {
   );
 }
 
+function topologicalSortRawCommits(rawCommits, headOid) {
+  if (!Array.isArray(rawCommits) || rawCommits.length <= 1) {
+    return rawCommits || [];
+  }
+  const byOid = new Map();
+  const inDegree = new Map();
+  for (let i = 0; i < rawCommits.length; i++) {
+    const c = rawCommits[i];
+    const oid = String((c && c.oid) || "");
+    if (oid) {
+      byOid.set(oid, c);
+      inDegree.set(oid, 0);
+    }
+  }
+  byOid.forEach(function (c) {
+    const parents = Array.isArray(c && c.parents) ? c.parents : [];
+    const seen = new Set();
+    for (let i = 0; i < parents.length; i++) {
+      const p = String(parents[i] || "");
+      if (p && !seen.has(p) && inDegree.has(p)) {
+        seen.add(p);
+        inDegree.set(p, inDegree.get(p) + 1);
+      }
+    }
+  });
+
+  function compareCommitPriority(aOid, bOid) {
+    const aHead = headOid && aOid === headOid ? 1 : 0;
+    const bHead = headOid && bOid === headOid ? 1 : 0;
+    if (aHead !== bHead) return bHead - aHead;
+    const ac = byOid.get(aOid);
+    const bc = byOid.get(bOid);
+    const ats = Number((ac && ac.timestamp) || 0);
+    const bts = Number((bc && bc.timestamp) || 0);
+    if (ats !== bts) return bts - ats;
+    return aOid < bOid ? 1 : aOid > bOid ? -1 : 0;
+  }
+
+  const ready = [];
+  inDegree.forEach(function (deg, oid) {
+    if (deg === 0) ready.push(oid);
+  });
+  ready.sort(compareCommitPriority);
+
+  const result = [];
+  const emitted = new Set();
+  let preferredNext = null;
+
+  while (result.length < byOid.size) {
+    let nextOid = null;
+    if (preferredNext && !emitted.has(preferredNext) && inDegree.get(preferredNext) === 0) {
+      nextOid = preferredNext;
+    }
+    preferredNext = null;
+
+    if (!nextOid) {
+      while (ready.length > 0) {
+        const cand = ready.shift();
+        if (!emitted.has(cand)) {
+          nextOid = cand;
+          break;
+        }
+      }
+    }
+
+    if (!nextOid) {
+      let bestFallback = null;
+      byOid.forEach(function (_c, oid) {
+        if (!emitted.has(oid)) {
+          if (!bestFallback || compareCommitPriority(oid, bestFallback) < 0) {
+            bestFallback = oid;
+          }
+        }
+      });
+      nextOid = bestFallback;
+    }
+
+    if (!nextOid) break;
+    emitted.add(nextOid);
+    const commit = byOid.get(nextOid);
+    if (!commit) continue;
+
+    const parents = Array.isArray(commit.parents) ? commit.parents : [];
+    const newlyReady = [];
+    const seen = new Set();
+    for (let i = 0; i < parents.length; i++) {
+      const p = String(parents[i] || "");
+      if (p && !seen.has(p) && inDegree.has(p)) {
+        seen.add(p);
+        const deg = inDegree.get(p) - 1;
+        inDegree.set(p, deg);
+        if (deg === 0) newlyReady.push(p);
+      }
+    }
+
+    if (parents.length > 0) {
+      const firstParent = String(parents[0] || "");
+      if (newlyReady.indexOf(firstParent) !== -1) {
+        preferredNext = firstParent;
+      }
+    }
+
+    if (newlyReady.length > 0) {
+      for (let i = 0; i < newlyReady.length; i++) {
+        ready.push(newlyReady[i]);
+      }
+      ready.sort(compareCommitPriority);
+    }
+
+    result.push(commit);
+  }
+
+  return result;
+}
+
 function decodeRepoCommits(rawPayload, fromCache, cacheBackend) {
   const data = typeof rawPayload === "string" ? JSON.parse(rawPayload) : rawPayload;
-  const rawCommits = Array.isArray(data && data.commits) ? data.commits : [];
+  const unsortedCommits = Array.isArray(data && data.commits) ? data.commits : [];
+  const headOid = String((data && data.head_oid) || "").trim();
+  const rawCommits = topologicalSortRawCommits(unsortedCommits, headOid);
   const commitItems = rawCommits.map(function (c) {
     const oid = String((c && c.oid) || "");
     return new Commit(

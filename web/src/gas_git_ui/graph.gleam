@@ -83,6 +83,11 @@ pub fn lane_color(lane: Int) -> String {
 }
 
 pub fn compute_layout(commits: List(Commit)) -> GraphLayout {
+  let page_row_map: Dict(String, Int) =
+    list.index_fold(commits, dict.new(), fn(d, c, idx) {
+      dict.insert(d, c.oid, idx)
+    })
+
   let #(nodes_rev, _) =
     list.index_fold(
       commits,
@@ -104,8 +109,19 @@ pub fn compute_layout(commits: List(Commit)) -> GraphLayout {
             color: color,
           )
 
+        // Only reserve active lanes for parent commits that appear BELOW `row_idx`
+        // on the current page. Off-page parents (which draw a short downward stub edge)
+        // or out-of-order parents must not hold a zombie lane open for the rest of the page.
+        let visible_below_parents =
+          list.filter(commit.parents, fn(parent_oid) {
+            case dict.get(page_row_map, parent_oid) {
+              Ok(p_row) -> p_row > row_idx
+              Error(Nil) -> False
+            }
+          })
+
         let next_lanes =
-          update_lanes_for_commit(active_lanes, lane, commit.parents)
+          update_lanes_for_commit(active_lanes, lane, visible_below_parents)
 
         #([node, ..nodes_acc], next_lanes)
       },

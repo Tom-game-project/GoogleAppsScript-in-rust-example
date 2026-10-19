@@ -12,7 +12,7 @@
 //! - `GET  ?action=list_repos`                                     (JSON list of repositories in `GIT_DRIVE_FOLDER_ID`)
 //! - `POST ?action=create_repo`                                    (Create a new empty `<project_name>.git` repository in Drive)
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
 use std::io::{Cursor, Write as IoWrite};
 
 use base64::Engine as _;
@@ -200,11 +200,134 @@ fn repo_meta_cache_key(repo: &str) -> String {
 }
 
 fn repo_commits_cache_key(repo: &str) -> String {
-    format!("gcommits_v2:{}", repo)
+    format!("gcommits_v3:{}", repo)
 }
 
 fn repo_commits_chunk_key(repo: &str, idx: usize) -> String {
-    format!("gcommits_v2:{}:{}", repo, idx)
+    format!("gcommits_v3:{}:{}", repo, idx)
+}
+
+/// Sort commits in topological order (`git log --topo-order`):
+/// - Guarantees every child commit appears BEFORE all of its parent commits whenever the graph is acyclic,
+///   even when multiple commits in a rebased series share the exact same timestamp or have non-monotonic timestamps.
+/// - Prefers continuing along the current branch (`first-parent`) when its in-degree reaches 0, keeping linear
+///   rebased histories in a single straight lane (`lane 0`) instead of interleaving branches.
+/// - Tie-breaks ready commits by `(is_head, timestamp, oid)` descending.
+fn topological_sort_commits(
+    commits: Vec<CommitItem>,
+    head_oid: Option<&str>,
+) -> Vec<CommitItem> {
+    if commits.len() <= 1 {
+        return commits;
+    }
+
+    let mut by_oid: BTreeMap<String, CommitItem> = BTreeMap::new();
+    for c in commits {
+        by_oid.insert(c.oid.clone(), c);
+    }
+
+    let mut in_degree: BTreeMap<String, usize> = BTreeMap::new();
+    for oid in by_oid.keys() {
+        in_degree.insert(oid.clone(), 0);
+    }
+    for c in by_oid.values() {
+        let mut seen_parents: BTreeSet<&str> = BTreeSet::new();
+        for p in &c.parents {
+            if seen_parents.insert(p.as_str()) {
+                if let Some(deg) = in_degree.get_mut(p) {
+                    *deg += 1;
+                }
+            }
+        }
+    }
+
+    let mut ready: BinaryHeap<(u8, i64, String)> = BinaryHeap::new();
+    for (oid, &deg) in &in_degree {
+        if deg == 0 {
+            if let Some(c) = by_oid.get(oid) {
+                let is_head = if head_oid == Some(oid.as_str()) { 1u8 } else { 0u8 };
+                ready.push((is_head, c.timestamp, oid.clone()));
+            }
+        }
+    }
+
+    let mut result: Vec<CommitItem> = Vec::with_capacity(by_oid.len());
+    let mut emitted: BTreeSet<String> = BTreeSet::new();
+    let mut preferred_next: Option<String> = None;
+
+    while result.len() < by_oid.len() {
+        let mut next_oid: Option<String> = None;
+        if let Some(pref) = preferred_next.take() {
+            if !emitted.contains(&pref) && in_degree.get(&pref).copied() == Some(0) {
+                next_oid = Some(pref);
+            }
+        }
+
+        if next_oid.is_none() {
+            while let Some((_, _, candidate)) = ready.pop() {
+                if !emitted.contains(&candidate) {
+                    next_oid = Some(candidate);
+                    break;
+                }
+            }
+        }
+
+        if next_oid.is_none() {
+            let fallback = by_oid
+                .values()
+                .filter(|c| !emitted.contains(&c.oid))
+                .max_by(|a, b| {
+                    a.timestamp
+                        .cmp(&b.timestamp)
+                        .then_with(|| a.oid.cmp(&b.oid))
+                })
+                .map(|c| c.oid.clone());
+            next_oid = fallback;
+        }
+
+        let Some(oid) = next_oid else {
+            break;
+        };
+        if !emitted.insert(oid.clone()) {
+            continue;
+        }
+
+        let Some(commit) = by_oid.get(&oid).cloned() else {
+            continue;
+        };
+
+        let mut newly_ready: Vec<String> = Vec::new();
+        let mut seen_parents: BTreeSet<&str> = BTreeSet::new();
+        for p in &commit.parents {
+            if seen_parents.insert(p.as_str()) {
+                if let Some(deg) = in_degree.get_mut(p) {
+                    if *deg > 0 {
+                        *deg -= 1;
+                        if *deg == 0 {
+                            newly_ready.push(p.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(first_parent) = commit.parents.first() {
+            if newly_ready.iter().any(|r| r == first_parent) {
+                preferred_next = Some(first_parent.clone());
+            }
+        }
+
+        for r_oid in newly_ready {
+            if let Some(rc) = by_oid.get(&r_oid) {
+                let is_head = if head_oid == Some(r_oid.as_str()) { 1u8 } else { 0u8 };
+                ready.push((is_head, rc.timestamp, r_oid));
+            }
+        }
+
+        result.push(commit);
+    }
+
+    result
 }
 
 fn repos_list_cache_key(root_folder_id: &str) -> String {
@@ -1174,8 +1297,8 @@ impl GasGitStore {
             all_parents_present
         };
 
-        let mut list: Vec<CommitItem> = commits_by_oid.into_values().collect();
-        list.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| a.oid.cmp(&b.oid)));
+        let list: Vec<CommitItem> = commits_by_oid.into_values().collect();
+        let list = topological_sort_commits(list, None);
 
         if let Ok(commits_bytes) = serde_json::to_vec(&list) {
             let compressed = encode_stored_loose_object(&commits_bytes);
@@ -1839,14 +1962,16 @@ impl GasGitStore {
                             && stored.refs == refs_str_map
                             && is_graph_complete(&commits_by_oid)
                         {
+                            let mut sorted_list =
+                                topological_sort_commits(cached_list, head_hex.as_deref());
                             Self::apply_commit_decorations(
-                                &mut cached_list,
+                                &mut sorted_list,
                                 &head_sym,
                                 head_oid,
                                 &refs_map,
                             );
-                            cache_put_sharded_commits(&self.repo, &cached_list);
-                            return cached_list;
+                            cache_put_sharded_commits(&self.repo, &sorted_list);
+                            return sorted_list;
                         }
                     }
                 }
@@ -1953,8 +2078,8 @@ impl GasGitStore {
             }
         }
 
+        let mut reachable = topological_sort_commits(reachable, head_hex.as_deref());
         Self::apply_commit_decorations(&mut reachable, &head_sym, head_oid, &refs_map);
-        reachable.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| a.oid.cmp(&b.oid)));
 
         // Persist `commits_cache.json` to `repo_folder` so subsequent requests (or progressive continuation)
         // never re-download already-indexed bundles!

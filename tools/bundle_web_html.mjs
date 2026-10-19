@@ -318,8 +318,100 @@ function getFallbackBundleCode() {
       );
     }
 
+    function topologicalSortRawCommits(rawCommits, headOid) {
+      if (!Array.isArray(rawCommits) || rawCommits.length <= 1) return rawCommits || [];
+      const byOid = new Map();
+      const inDegree = new Map();
+      for (const c of rawCommits) {
+        const oid = String(c?.oid ?? "");
+        if (oid) {
+          byOid.set(oid, c);
+          inDegree.set(oid, 0);
+        }
+      }
+      for (const c of byOid.values()) {
+        const parents = Array.isArray(c?.parents) ? c.parents : [];
+        const seen = new Set();
+        for (const rawP of parents) {
+          const p = String(rawP ?? "");
+          if (p && !seen.has(p) && inDegree.has(p)) {
+            seen.add(p);
+            inDegree.set(p, inDegree.get(p) + 1);
+          }
+        }
+      }
+      const comparePriority = (aOid, bOid) => {
+        const aHead = headOid && aOid === headOid ? 1 : 0;
+        const bHead = headOid && bOid === headOid ? 1 : 0;
+        if (aHead !== bHead) return bHead - aHead;
+        const ats = Number(byOid.get(aOid)?.timestamp ?? 0);
+        const bts = Number(byOid.get(bOid)?.timestamp ?? 0);
+        if (ats !== bts) return bts - ats;
+        return aOid < bOid ? 1 : aOid > bOid ? -1 : 0;
+      };
+      const ready = [];
+      for (const [oid, deg] of inDegree.entries()) {
+        if (deg === 0) ready.push(oid);
+      }
+      ready.sort(comparePriority);
+      const result = [];
+      const emitted = new Set();
+      let preferredNext = null;
+      while (result.length < byOid.size) {
+        let nextOid = null;
+        if (preferredNext && !emitted.has(preferredNext) && inDegree.get(preferredNext) === 0) {
+          nextOid = preferredNext;
+        }
+        preferredNext = null;
+        if (!nextOid) {
+          while (ready.length > 0) {
+            const cand = ready.shift();
+            if (!emitted.has(cand)) {
+              nextOid = cand;
+              break;
+            }
+          }
+        }
+        if (!nextOid) {
+          for (const oid of byOid.keys()) {
+            if (!emitted.has(oid) && (!nextOid || comparePriority(oid, nextOid) < 0)) {
+              nextOid = oid;
+            }
+          }
+        }
+        if (!nextOid) break;
+        emitted.add(nextOid);
+        const commit = byOid.get(nextOid);
+        if (!commit) continue;
+        const parents = Array.isArray(commit.parents) ? commit.parents : [];
+        const newlyReady = [];
+        const seen = new Set();
+        for (const rawP of parents) {
+          const p = String(rawP ?? "");
+          if (p && !seen.has(p) && inDegree.has(p)) {
+            seen.add(p);
+            const deg = inDegree.get(p) - 1;
+            inDegree.set(p, deg);
+            if (deg === 0) newlyReady.push(p);
+          }
+        }
+        if (parents.length > 0) {
+          const firstParent = String(parents[0] ?? "");
+          if (newlyReady.includes(firstParent)) preferredNext = firstParent;
+        }
+        if (newlyReady.length > 0) {
+          ready.push(...newlyReady);
+          ready.sort(comparePriority);
+        }
+        result.push(commit);
+      }
+      return result;
+    }
+
     function decodeRepoCommits(data, fromCache) {
-      const rawCommits = Array.isArray(data?.commits) ? data.commits : [];
+      const unsortedCommits = Array.isArray(data?.commits) ? data.commits : [];
+      const headOid = String(data?.head_oid ?? "").trim();
+      const rawCommits = topologicalSortRawCommits(unsortedCommits, headOid);
       const commits = rawCommits.map((c) => new Commit(
         String(c?.oid ?? ""),
         String(c?.short_oid ?? (c?.oid ?? "").slice(0, 7)),
@@ -453,6 +545,9 @@ function getFallbackBundleCode() {
       const marginY = 18;
       const colors = ["#0969da", "#1a7f37", "#8250df", "#cf222e", "#bc4c00", "#bf3989", "#0550ae"];
 
+      const pageRowMap = new Map();
+      commits.forEach((c, idx) => pageRowMap.set(c.oid, idx));
+
       const activeLanes = [];
       const nodeMap = new Map();
       const nodes = [];
@@ -473,13 +568,21 @@ function getFallbackBundleCode() {
         nodes.push(node);
         nodeMap.set(c.oid, node);
 
-        const parents = c.parents.toArray();
-        if (parents.length === 0) {
+        const visibleBelowParents = c.parents
+          .toArray()
+          .filter((p) => {
+            const pRow = pageRowMap.get(p);
+            return pRow !== undefined && pRow > row;
+          });
+
+        if (visibleBelowParents.length === 0) {
           activeLanes[lane] = "";
         } else {
-          activeLanes[lane] = parents[0];
-          for (let pIdx = 1; pIdx < parents.length; pIdx++) {
-            const p = parents[pIdx];
+          const p0 = visibleBelowParents[0];
+          const otherIdx = activeLanes.findIndex((oid, idx) => idx !== lane && oid === p0);
+          activeLanes[lane] = otherIdx !== -1 ? "" : p0;
+          for (let pIdx = 1; pIdx < visibleBelowParents.length; pIdx++) {
+            const p = visibleBelowParents[pIdx];
             if (!activeLanes.includes(p)) {
               const free = activeLanes.indexOf("");
               if (free === -1) activeLanes.push(p);
@@ -616,7 +719,7 @@ function getFallbackBundleCode() {
     function saveCommitsToLocalCache(projectName, requestedHead, data) {
       if (!isCommitPayloadComplete(data, requestedHead) || typeof window === "undefined" || !window.localStorage) return;
       try {
-        const prefix = \`gas_git_commits_v2_\${projectName}_\`;
+        const prefix = \`gas_git_commits_v3_\${projectName}_\`;
         const legacyPrefix = \`gas_git_commits_\${projectName}_\`;
         const keysToRemove = [];
         for (let i = 0; i < window.localStorage.length; i++) {
@@ -628,7 +731,7 @@ function getFallbackBundleCode() {
         const actualHead = String(data?.head_oid ?? requestedHead ?? "").trim();
         const serialized = JSON.stringify(data);
         if (actualHead) window.localStorage.setItem(\`\${prefix}\${actualHead}\`, serialized);
-        window.localStorage.setItem(\`gas_git_commits_v2_latest_\${projectName}\`, serialized);
+        window.localStorage.setItem(\`gas_git_commits_v3_latest_\${projectName}\`, serialized);
       } catch (_) {}
     }
 
@@ -636,13 +739,13 @@ function getFallbackBundleCode() {
       if (typeof window === "undefined" || !window.localStorage) return null;
       try {
         if (cleanHead) {
-          const byHead = window.localStorage.getItem(\`gas_git_commits_v2_\${projectName}_\${cleanHead}\`);
+          const byHead = window.localStorage.getItem(\`gas_git_commits_v3_\${projectName}_\${cleanHead}\`);
           if (byHead) {
             const parsed = JSON.parse(byHead);
             if (isCommitPayloadComplete(parsed, cleanHead)) return parsed;
           }
         }
-        const latestRaw = window.localStorage.getItem(\`gas_git_commits_v2_latest_\${projectName}\`);
+        const latestRaw = window.localStorage.getItem(\`gas_git_commits_v3_latest_\${projectName}\`);
         if (latestRaw) {
           const parsed = JSON.parse(latestRaw);
           const cachedHead = String(parsed?.head_oid ?? "").trim();
