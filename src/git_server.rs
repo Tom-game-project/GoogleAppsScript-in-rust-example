@@ -50,6 +50,44 @@ pub const ENV_GIT_DRIVE_FOLDER_ID: &str = "GIT_DRIVE_FOLDER_ID";
 const CACHE_TTL_IMMUTABLE_SECS: i32 = 21_600; // 6 hours (maximum GAS CacheService TTL)
 const CACHE_TTL_META_SECS: i32 = 1_800; // 30 minutes for mutable metadata (invalidated on write)
 const MAX_CACHE_VALUE_BYTES: usize = 95_000; // GAS CacheService limit is 100KB per key
+const MAX_SUB_BUNDLE_JSON_BYTES: usize = 4 * 1024 * 1024; // 4 MB max per Drive bundle file to avoid DriveApp/V8 memory spikes
+const MAX_OBJECT_CACHE_BYTES: usize = 12 * 1024 * 1024; // 12 MB cap on in-memory object_cache per request
+const BLOB_SIZE_PREFIX: &str = "__sz__:";
+
+/// Encode loose object bytes (`<kind> <size>\0<body>`) for compact storage in Drive bundles and `CacheService`.
+/// Objects >= 128 bytes are zlib-compressed (`z:<uncompressed_len>:<base64>`) when compression reduces size,
+/// shrinking text/source bundles by 5x-10x while remaining 100% compatible with plain Base64 entries.
+fn encode_stored_loose_object(loose_bytes: &[u8]) -> String {
+    if loose_bytes.len() >= 128 {
+        let mut deflater = deflate::Write::new(Vec::new(), Compression::DEFAULT);
+        if deflater.write_all(loose_bytes).is_ok() && deflater.flush().is_ok() {
+            let compressed = deflater.into_inner();
+            if compressed.len() + 16 < loose_bytes.len() {
+                return format!(
+                    "z:{}:{}",
+                    loose_bytes.len(),
+                    BASE64_STANDARD.encode(&compressed)
+                );
+            }
+        }
+    }
+    BASE64_STANDARD.encode(loose_bytes)
+}
+
+/// Decode a stored loose object string (either `z:<uncompressed_len>:<base64>` or raw `<base64>`).
+fn decode_stored_loose_object(encoded: &str) -> Option<Vec<u8>> {
+    let trimmed = encoded.trim();
+    if let Some(rest) = trimmed.strip_prefix("z:") {
+        let (len_str, b64_part) = rest.split_once(':')?;
+        let expected_size = len_str.parse::<usize>().ok()?;
+        let compressed = BASE64_STANDARD.decode(b64_part.trim().as_bytes()).ok()?;
+        let mut inflate = Inflate::default();
+        let (decompressed, _) = inflate_pack_entry(&mut inflate, &compressed, expected_size).ok()?;
+        Some(decompressed)
+    } else {
+        BASE64_STANDARD.decode(trimmed.as_bytes()).ok()
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct CachedRepoMeta {
@@ -518,8 +556,11 @@ pub struct GasGitStore {
     head_cache: RefCell<Option<String>>,
     refs_cache: RefCell<Option<BTreeMap<String, ObjectId>>>,
     object_cache: RefCell<BTreeMap<ObjectId, Vec<u8>>>,
+    object_cache_bytes: RefCell<usize>,
+    blob_size_cache: RefCell<BTreeMap<ObjectId, usize>>,
     known_existing_objects: RefCell<BTreeSet<ObjectId>>,
     bundles_loaded: RefCell<bool>,
+    unloaded_blob_bundles: RefCell<Vec<GasFile>>,
 }
 
 impl GasGitStore {
@@ -541,8 +582,11 @@ impl GasGitStore {
                 head_cache: RefCell::new(None),
                 refs_cache: RefCell::new(None),
                 object_cache: RefCell::new(BTreeMap::new()),
+                object_cache_bytes: RefCell::new(0),
+                blob_size_cache: RefCell::new(BTreeMap::new()),
                 known_existing_objects: RefCell::new(BTreeSet::new()),
                 bundles_loaded: RefCell::new(false),
+                unloaded_blob_bundles: RefCell::new(Vec::new()),
             });
         }
 
@@ -567,8 +611,11 @@ impl GasGitStore {
             head_cache: RefCell::new(None),
             refs_cache: RefCell::new(None),
             object_cache: RefCell::new(BTreeMap::new()),
+            object_cache_bytes: RefCell::new(0),
+            blob_size_cache: RefCell::new(BTreeMap::new()),
             known_existing_objects: RefCell::new(BTreeSet::new()),
             bundles_loaded: RefCell::new(false),
+            unloaded_blob_bundles: RefCell::new(Vec::new()),
         })
     }
 
@@ -829,15 +876,54 @@ impl GasGitStore {
         self.write_raw_object(object.kind(), &body)
     }
 
+    fn cache_loose_in_memory(&self, oid: ObjectId, loose_bytes: Vec<u8>) {
+        self.known_existing_objects.borrow_mut().insert(oid);
+        if let Ok((kind, size, _)) = gix_object::decode::loose_header(&loose_bytes) {
+            if kind == ObjectKind::Blob {
+                self.blob_size_cache.borrow_mut().insert(oid, size as usize);
+                // Do not retain single giant blobs (> 2 MB) in the in-memory cache
+                if loose_bytes.len() > 2 * 1024 * 1024 {
+                    return;
+                }
+            }
+        }
+        let mut cache = self.object_cache.borrow_mut();
+        if cache.contains_key(&oid) {
+            return;
+        }
+        let mut used = self.object_cache_bytes.borrow_mut();
+        if *used + loose_bytes.len() > MAX_OBJECT_CACHE_BYTES {
+            // Evict cached Blob entries while preserving compact Commit/Tree objects
+            let blob_keys: Vec<ObjectId> = cache
+                .iter()
+                .filter_map(|(k, v)| {
+                    if let Ok((ObjectKind::Blob, _, _)) = gix_object::decode::loose_header(v) {
+                        Some(*k)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            for bk in blob_keys {
+                if let Some(removed) = cache.remove(&bk) {
+                    *used = used.saturating_sub(removed.len());
+                }
+                if *used + loose_bytes.len() <= MAX_OBJECT_CACHE_BYTES {
+                    break;
+                }
+            }
+            if *used + loose_bytes.len() > MAX_OBJECT_CACHE_BYTES {
+                return;
+            }
+        }
+        *used += loose_bytes.len();
+        cache.insert(oid, loose_bytes);
+    }
+
     /// Compute SHA-1 `ObjectId` for `(kind, body)` and store the loose object inside `<repo>.git/objects/<oid>` on Google Drive.
     pub fn write_raw_object(&self, kind: ObjectKind, body: &[u8]) -> Result<ObjectId, String> {
         let oid = gix_object::compute_hash(HashKind::Sha1, kind, body)
             .map_err(|e| format!("Failed to compute SHA-1 hash: {}", e))?;
-
-        let header = gix_object::encode::loose_header(kind, body.len() as u64);
-        let mut loose_bytes = Vec::with_capacity(header.len() + body.len());
-        loose_bytes.extend_from_slice(&header);
-        loose_bytes.extend_from_slice(body);
 
         if self.object_cache.borrow().contains_key(&oid)
             || self.known_existing_objects.borrow().contains(&oid)
@@ -845,66 +931,158 @@ impl GasGitStore {
             return Ok(oid);
         }
 
+        let header = gix_object::encode::loose_header(kind, body.len() as u64);
+        let mut loose_bytes = Vec::with_capacity(header.len() + body.len());
+        loose_bytes.extend_from_slice(&header);
+        loose_bytes.extend_from_slice(body);
+
         let oid_hex = oid.to_hex().to_string();
-        let b64 = BASE64_STANDARD.encode(&loose_bytes);
+        let encoded = encode_stored_loose_object(&loose_bytes);
         self.with_objects_folder(|objects_folder| {
             if find_child_file_by_name(objects_folder, &oid_hex).is_none() {
                 objects_folder.create_file(CreateFileInput::FromText(TextFileSpec {
                     name: oid_hex.clone(),
-                    content: b64.clone(),
+                    content: encoded.clone(),
                     mime_type: Some("text/plain".to_string()),
                 }));
             }
         })?;
 
-        cache_put(&git_obj_cache_key(&oid_hex), &b64, CACHE_TTL_IMMUTABLE_SECS);
-        self.known_existing_objects.borrow_mut().insert(oid);
-        self.object_cache.borrow_mut().insert(oid, loose_bytes);
+        cache_put(&git_obj_cache_key(&oid_hex), &encoded, CACHE_TTL_IMMUTABLE_SECS);
+        self.cache_loose_in_memory(oid, loose_bytes);
         Ok(oid)
     }
 
-    /// Persist a batch of unpacked Git objects into Google Drive in a single batched bundle file (`objects/bundle_<trailer>.json`).
-    /// This reduces N separate DriveApp.createFile API calls down to 1 single call, speeding up git push by orders of magnitude on GAS.
+    fn flush_bundle_file(
+        &self,
+        filename: String,
+        bundle_map: &mut BTreeMap<String, String>,
+    ) -> Result<(), String> {
+        if bundle_map.is_empty() {
+            return Ok(());
+        }
+        let bundle_json = serde_json::to_string(bundle_map)
+            .map_err(|e| format!("Failed to serialize object bundle {}: {}", filename, e))?;
+        bundle_map.clear();
+        self.with_objects_folder(|objects_folder| {
+            objects_folder.create_file(CreateFileInput::FromText(TextFileSpec {
+                name: filename,
+                content: bundle_json,
+                mime_type: Some("application/json".to_string()),
+            }));
+        })
+    }
+
+    /// Persist a batch of unpacked Git objects into Google Drive using zlib-compressed, memory-bounded sub-bundles:
+    /// - Structural metadata objects (`Commit`, `Tree`, `Tag`) + blob byte-size entries (`__sz__:<oid>`)
+    ///   are stored in `bundle_meta_<batch_id>.json` (fast commit-list & directory browsing without loading blobs!).
+    /// - File content objects (`Blob`) are stored in `bundle_blob_<batch_id>_<part>.json`, flushed every 4 MB
+    ///   while draining `objects` via `pop_first()` so raw object `Vec<u8>` buffers are freed as they are compressed.
     pub fn write_objects_batch(
         &self,
         batch_id: &str,
-        objects: &BTreeMap<ObjectId, (ObjectKind, Vec<u8>)>,
+        mut objects: BTreeMap<ObjectId, (ObjectKind, Vec<u8>)>,
     ) -> Result<(), String> {
         if objects.is_empty() {
             return Ok(());
         }
 
-        let mut bundle_map: BTreeMap<String, String> = BTreeMap::new();
-        let mut cache_entries: Vec<(String, String)> = Vec::with_capacity(objects.len());
+        let mut meta_map: BTreeMap<String, String> = BTreeMap::new();
+        let mut meta_bytes: usize = 0;
+        let mut meta_part: usize = 0;
 
-        for (oid, (kind, body)) in objects {
-            let header = gix_object::encode::loose_header(*kind, body.len() as u64);
+        let mut blob_map: BTreeMap<String, String> = BTreeMap::new();
+        let mut blob_bytes: usize = 0;
+        let mut blob_part: usize = 0;
+
+        let mut cache_entries: Vec<(String, String)> = Vec::new();
+        let mut cache_batch_bytes: usize = 0;
+
+        while let Some((oid, (kind, body))) = objects.pop_first() {
+            self.known_existing_objects.borrow_mut().insert(oid);
+            if kind == ObjectKind::Blob {
+                self.blob_size_cache.borrow_mut().insert(oid, body.len());
+            }
+
+            let header = gix_object::encode::loose_header(kind, body.len() as u64);
             let mut loose_bytes = Vec::with_capacity(header.len() + body.len());
             loose_bytes.extend_from_slice(&header);
-            loose_bytes.extend_from_slice(body);
+            loose_bytes.extend_from_slice(&body);
+            let body_len = body.len();
+            drop(body);
 
             let hex = oid.to_hex().to_string();
-            let b64 = BASE64_STANDARD.encode(&loose_bytes);
-            bundle_map.insert(hex.clone(), b64.clone());
-            cache_entries.push((git_obj_cache_key(&hex), b64));
+            let encoded = encode_stored_loose_object(&loose_bytes);
 
-            self.known_existing_objects.borrow_mut().insert(*oid);
-            self.object_cache.borrow_mut().insert(*oid, loose_bytes);
+            // Cache Commit/Tree objects (and small Blobs if batch cache budget allows) in CacheService & memory
+            if kind != ObjectKind::Blob || loose_bytes.len() <= 16_384 {
+                self.cache_loose_in_memory(oid, loose_bytes);
+                if encoded.len() <= 32_768 && cache_batch_bytes + encoded.len() <= 300_000 && cache_entries.len() < 40 {
+                    cache_batch_bytes += encoded.len();
+                    cache_entries.push((git_obj_cache_key(&hex), encoded.clone()));
+                }
+            } else {
+                drop(loose_bytes);
+            }
+
+            if kind == ObjectKind::Blob {
+                // Record lightweight blob byte-size in meta bundle so directory listings never need to load blob bundles
+                let sz_key = format!("{}{}", BLOB_SIZE_PREFIX, hex);
+                let sz_val = body_len.to_string();
+                meta_bytes += sz_key.len() + sz_val.len() + 8;
+                meta_map.insert(sz_key, sz_val);
+
+                blob_bytes += hex.len() + encoded.len() + 8;
+                blob_map.insert(hex, encoded);
+
+                if blob_bytes >= MAX_SUB_BUNDLE_JSON_BYTES {
+                    let fname = if blob_part == 0 {
+                        format!("bundle_blob_{}.json", batch_id)
+                    } else {
+                        format!("bundle_blob_{}_{}.json", batch_id, blob_part)
+                    };
+                    blob_part += 1;
+                    blob_bytes = 0;
+                    self.flush_bundle_file(fname, &mut blob_map)?;
+                }
+            } else {
+                meta_bytes += hex.len() + encoded.len() + 8;
+                meta_map.insert(hex, encoded);
+            }
+
+            if meta_bytes >= MAX_SUB_BUNDLE_JSON_BYTES {
+                let fname = if meta_part == 0 {
+                    format!("bundle_meta_{}.json", batch_id)
+                } else {
+                    format!("bundle_meta_{}_{}.json", batch_id, meta_part)
+                };
+                meta_part += 1;
+                meta_bytes = 0;
+                self.flush_bundle_file(fname, &mut meta_map)?;
+            }
         }
 
-        let bundle_json = serde_json::to_string(&bundle_map)
-            .map_err(|e| format!("Failed to serialize object bundle: {}", e))?;
+        if !blob_map.is_empty() {
+            let fname = if blob_part == 0 {
+                format!("bundle_blob_{}.json", batch_id)
+            } else {
+                format!("bundle_blob_{}_{}.json", batch_id, blob_part)
+            };
+            self.flush_bundle_file(fname, &mut blob_map)?;
+        }
 
-        let bundle_filename = format!("bundle_{}.json", batch_id);
-        self.with_objects_folder(|objects_folder| {
-            objects_folder.create_file(CreateFileInput::FromText(TextFileSpec {
-                name: bundle_filename,
-                content: bundle_json,
-                mime_type: Some("application/json".to_string()),
-            }));
-        })?;
+        if !meta_map.is_empty() {
+            let fname = if meta_part == 0 {
+                format!("bundle_meta_{}.json", batch_id)
+            } else {
+                format!("bundle_meta_{}_{}.json", batch_id, meta_part)
+            };
+            self.flush_bundle_file(fname, &mut meta_map)?;
+        }
 
-        cache_put_all(&cache_entries, CACHE_TTL_IMMUTABLE_SECS);
+        if !cache_entries.is_empty() {
+            cache_put_all(&cache_entries, CACHE_TTL_IMMUTABLE_SECS);
+        }
         Ok(())
     }
 
@@ -913,8 +1091,10 @@ impl GasGitStore {
     pub fn prefetch_objects(&self, oids: &[ObjectId]) {
         let missing: Vec<(ObjectId, String)> = {
             let cache = self.object_cache.borrow();
+            let blob_sizes = self.blob_size_cache.borrow();
             oids.iter()
-                .filter(|&oid| !cache.contains_key(oid))
+                .filter(|&oid| !cache.contains_key(oid) && !blob_sizes.contains_key(oid))
+                .take(100)
                 .map(|oid| (*oid, git_obj_cache_key(&oid.to_hex().to_string())))
                 .collect()
         };
@@ -928,22 +1108,50 @@ impl GasGitStore {
         }
         let key_to_oid: BTreeMap<String, ObjectId> =
             missing.into_iter().map(|(oid, k)| (k, oid)).collect();
-        let mut obj_cache = self.object_cache.borrow_mut();
-        let mut known = self.known_existing_objects.borrow_mut();
-        for (k, b64) in found {
+        for (k, encoded) in found {
             if let Some(&oid) = key_to_oid.get(&k) {
-                if let Ok(decoded) = BASE64_STANDARD.decode(b64.trim().as_bytes()) {
-                    known.insert(oid);
-                    obj_cache.insert(oid, decoded);
+                if let Some(decoded) = decode_stored_loose_object(&encoded) {
+                    self.cache_loose_in_memory(oid, decoded);
                 }
             }
         }
     }
 
-    /// Read loose object bytes (`<kind> <size>\0<body>`) by `ObjectId` using a 3-tier hierarchy:
+    pub fn read_blob_size(&self, oid: &ObjectId) -> Option<usize> {
+        if let Some(&sz) = self.blob_size_cache.borrow().get(oid) {
+            return Some(sz);
+        }
+        if let Some(loose) = self.object_cache.borrow().get(oid) {
+            if let Ok((ObjectKind::Blob, size, _)) = gix_object::decode::loose_header(loose) {
+                return Some(size as usize);
+            }
+        }
+        if !*self.bundles_loaded.borrow() {
+            self.ensure_bundles_loaded();
+            if let Some(&sz) = self.blob_size_cache.borrow().get(oid) {
+                return Some(sz);
+            }
+            if let Some(loose) = self.object_cache.borrow().get(oid) {
+                if let Ok((ObjectKind::Blob, size, _)) = gix_object::decode::loose_header(loose) {
+                    return Some(size as usize);
+                }
+            }
+        }
+        let loose = self.read_loose_object(oid)?;
+        let (kind, size, _) = gix_object::decode::loose_header(&loose).ok()?;
+        if kind == ObjectKind::Blob {
+            self.blob_size_cache.borrow_mut().insert(*oid, size as usize);
+            Some(size as usize)
+        } else {
+            None
+        }
+    }
+
+    /// Read loose object bytes (`<kind> <size>\0<body>`) by `ObjectId` using a 4-tier hierarchy:
     /// 1. In-memory `object_cache` (0ms)
     /// 2. GAS `CacheService.getScriptCache()` (~1-2ms, 0 `DriveApp` calls)
-    /// 3. Single-pass `ensure_bundles_loaded()` scan over `objects/` (loads all `bundle_*.json` and loose files at once and populates `CacheService`)
+    /// 3. Metadata & legacy bundle scan (`ensure_bundles_loaded()` loads `bundle_meta_*.json` and legacy `bundle_*.json`)
+    /// 4. On-demand streaming scan of `unloaded_blob_bundles` (`bundle_blob_*.json`), stopping as soon as `oid` is found
     pub fn read_loose_object(&self, oid: &ObjectId) -> Option<Vec<u8>> {
         if let Some(cached) = self.object_cache.borrow().get(oid) {
             return Some(cached.clone());
@@ -953,15 +1161,14 @@ impl GasGitStore {
         let cache_key = git_obj_cache_key(&oid_hex);
 
         // 1. Check GAS CacheService (content-addressed Git objects are immutable!)
-        if let Some(b64) = cache_get(&cache_key) {
-            if let Ok(decoded) = BASE64_STANDARD.decode(b64.trim().as_bytes()) {
-                self.known_existing_objects.borrow_mut().insert(*oid);
-                self.object_cache.borrow_mut().insert(*oid, decoded.clone());
+        if let Some(encoded) = cache_get(&cache_key) {
+            if let Some(decoded) = decode_stored_loose_object(&encoded) {
+                self.cache_loose_in_memory(*oid, decoded.clone());
                 return Some(decoded);
             }
         }
 
-        // 2. Scan `objects/` folder once (reads both `bundle_*.json` and any loose `<oid>` files in a single `getFiles()` pass)
+        // 2. Ensure `bundle_meta_*.json` and legacy bundles in `objects/` are loaded
         if !*self.bundles_loaded.borrow() {
             self.ensure_bundles_loaded();
             if let Some(cached) = self.object_cache.borrow().get(oid) {
@@ -969,13 +1176,46 @@ impl GasGitStore {
             }
         }
 
-        // 3. Fallback: check if a legacy loose file exists directly in `repo_folder`
+        // 3. On-demand scan of `bundle_blob_*.json` files (stops immediately once `oid` is found!)
+        loop {
+            let next_blob_file = self.unloaded_blob_bundles.borrow_mut().pop();
+            let Some(file) = next_blob_file else {
+                break;
+            };
+            let json_str = file.get_blob().get_data_as_string(None);
+            let mut found_target: Option<Vec<u8>> = None;
+            if let Ok(bundle) = serde_json::from_str::<BTreeMap<String, String>>(&json_str) {
+                drop(json_str);
+                for (hex_key, encoded_val) in bundle {
+                    let Ok(b_oid) = ObjectId::from_hex(hex_key.as_bytes()) else {
+                        continue;
+                    };
+                    if b_oid == *oid {
+                        if let Some(decoded) = decode_stored_loose_object(&encoded_val) {
+                            cache_put(&cache_key, &encoded_val, CACHE_TTL_IMMUTABLE_SECS);
+                            self.cache_loose_in_memory(b_oid, decoded.clone());
+                            found_target = Some(decoded);
+                        }
+                    } else if *self.object_cache_bytes.borrow() + encoded_val.len() <= MAX_OBJECT_CACHE_BYTES {
+                        if let Some(decoded) = decode_stored_loose_object(&encoded_val) {
+                            self.cache_loose_in_memory(b_oid, decoded);
+                        }
+                    } else {
+                        self.known_existing_objects.borrow_mut().insert(b_oid);
+                    }
+                }
+            }
+            if let Some(target_bytes) = found_target {
+                return Some(target_bytes);
+            }
+        }
+
+        // 4. Fallback: check if a legacy loose file exists directly in `repo_folder`
         if let Ok(Some(file)) = self.with_repo_folder(|rf| find_child_file_by_name(rf, &oid_hex)) {
-            let b64 = file.get_blob().get_data_as_string(None);
-            if let Ok(decoded) = BASE64_STANDARD.decode(b64.trim().as_bytes()) {
-                cache_put(&cache_key, b64.trim(), CACHE_TTL_IMMUTABLE_SECS);
-                self.known_existing_objects.borrow_mut().insert(*oid);
-                self.object_cache.borrow_mut().insert(*oid, decoded.clone());
+            let encoded = file.get_blob().get_data_as_string(None);
+            if let Some(decoded) = decode_stored_loose_object(&encoded) {
+                cache_put(&cache_key, encoded.trim(), CACHE_TTL_IMMUTABLE_SECS);
+                self.cache_loose_in_memory(*oid, decoded.clone());
                 return Some(decoded);
             }
         }
@@ -983,8 +1223,11 @@ impl GasGitStore {
         None
     }
 
-    /// Ensure all batched object bundle files (`bundle_*.json`) and loose object files in `objects/`
-    /// are loaded into `object_cache` and warmed into `CacheService` in a single `get_files()` pass.
+    /// Scan `objects/` in a single `get_files()` pass:
+    /// - Eagerly loads compact `bundle_meta_*.json` (Commits, Trees, Tags, and `__sz__:<oid>` blob sizes)
+    ///   and legacy `bundle_*.json` files.
+    /// - Queues large `bundle_blob_*.json` files in `unloaded_blob_bundles` for lazy on-demand loading,
+    ///   preventing OOM when browsing or pushing to large repositories.
     pub fn ensure_bundles_loaded(&self) {
         if *self.bundles_loaded.borrow() {
             return;
@@ -992,6 +1235,8 @@ impl GasGitStore {
         *self.bundles_loaded.borrow_mut() = true;
 
         let mut cache_entries: Vec<(String, String)> = Vec::new();
+        let mut cache_bytes: usize = 0;
+
         let _ = self.with_objects_folder(|objects_folder| {
             let iter = objects_folder.get_files();
             while iter.has_next() {
@@ -1000,20 +1245,38 @@ impl GasGitStore {
                     continue;
                 }
                 let name = file.get_name();
-                if name.starts_with("bundle_") && name.ends_with(".json") {
+                if name.starts_with("bundle_blob_") && name.ends_with(".json") {
+                    self.unloaded_blob_bundles.borrow_mut().push(file);
+                } else if name.starts_with("bundle_") && name.ends_with(".json") {
                     let json_str = file.get_blob().get_data_as_string(None);
                     if let Ok(bundle) = serde_json::from_str::<BTreeMap<String, String>>(&json_str)
                     {
-                        for (hex_key, b64_val) in bundle {
-                            if let Ok(b_oid) = ObjectId::from_hex(hex_key.as_bytes()) {
-                                let trimmed = b64_val.trim();
-                                if let Ok(decoded) = BASE64_STANDARD.decode(trimmed.as_bytes()) {
-                                    cache_entries.push((
-                                        git_obj_cache_key(&b_oid.to_hex().to_string()),
-                                        trimmed.to_string(),
-                                    ));
+                        drop(json_str);
+                        for (hex_key, encoded_val) in bundle {
+                            if let Some(oid_hex) = hex_key.strip_prefix(BLOB_SIZE_PREFIX) {
+                                if let (Ok(b_oid), Ok(sz)) = (
+                                    ObjectId::from_hex(oid_hex.as_bytes()),
+                                    encoded_val.trim().parse::<usize>(),
+                                ) {
                                     self.known_existing_objects.borrow_mut().insert(b_oid);
-                                    self.object_cache.borrow_mut().insert(b_oid, decoded);
+                                    self.blob_size_cache.borrow_mut().insert(b_oid, sz);
+                                }
+                                continue;
+                            }
+                            if let Ok(b_oid) = ObjectId::from_hex(hex_key.as_bytes()) {
+                                let trimmed = encoded_val.trim();
+                                if let Some(decoded) = decode_stored_loose_object(trimmed) {
+                                    if trimmed.len() <= 32_768
+                                        && cache_bytes + trimmed.len() <= 300_000
+                                        && cache_entries.len() < 40
+                                    {
+                                        cache_bytes += trimmed.len();
+                                        cache_entries.push((
+                                            git_obj_cache_key(&b_oid.to_hex().to_string()),
+                                            trimmed.to_string(),
+                                        ));
+                                    }
+                                    self.cache_loose_in_memory(b_oid, decoded);
                                 }
                             }
                         }
@@ -1021,15 +1284,20 @@ impl GasGitStore {
                 } else if name.len() == 40 && name.chars().all(|c| c.is_ascii_hexdigit()) {
                     if let Ok(l_oid) = ObjectId::from_hex(name.as_bytes()) {
                         if !self.object_cache.borrow().contains_key(&l_oid) {
-                            let b64_val = file.get_blob().get_data_as_string(None);
-                            let trimmed = b64_val.trim();
-                            if let Ok(decoded) = BASE64_STANDARD.decode(trimmed.as_bytes()) {
-                                cache_entries.push((
-                                    git_obj_cache_key(&l_oid.to_hex().to_string()),
-                                    trimmed.to_string(),
-                                ));
-                                self.known_existing_objects.borrow_mut().insert(l_oid);
-                                self.object_cache.borrow_mut().insert(l_oid, decoded);
+                            let encoded_val = file.get_blob().get_data_as_string(None);
+                            let trimmed = encoded_val.trim();
+                            if let Some(decoded) = decode_stored_loose_object(trimmed) {
+                                if trimmed.len() <= 32_768
+                                    && cache_bytes + trimmed.len() <= 300_000
+                                    && cache_entries.len() < 40
+                                {
+                                    cache_bytes += trimmed.len();
+                                    cache_entries.push((
+                                        git_obj_cache_key(&l_oid.to_hex().to_string()),
+                                        trimmed.to_string(),
+                                    ));
+                                }
+                                self.cache_loose_in_memory(l_oid, decoded);
                             }
                         }
                     }
@@ -1469,9 +1737,16 @@ pub fn handle_upload_pack(req_body: &[u8], project_name: &str) -> Result<Vec<u8>
         }
     }
 
-    let mut objects_to_send: Vec<(ObjectId, ObjectKind, Vec<u8>)> = Vec::new();
     let mut visited: BTreeSet<ObjectId> = excluded_oids;
     let mut queue: VecDeque<ObjectId> = wants.iter().copied().collect();
+
+    // Stream deflated objects directly into `pack_bytes` without holding all uncompressed
+    // object bodies in memory at the same time.
+    let mut pack_bytes = Vec::with_capacity(4096);
+    pack_bytes.extend_from_slice(b"PACK");
+    pack_bytes.extend_from_slice(&2u32.to_be_bytes());
+    pack_bytes.extend_from_slice(&0u32.to_be_bytes()); // placeholder for object count
+    let mut sent_objects_count: u32 = 0;
 
     while let Some(oid) = queue.pop_front() {
         if !visited.insert(oid) {
@@ -1482,7 +1757,7 @@ pub fn handle_upload_pack(req_body: &[u8], project_name: &str) -> Result<Vec<u8>
         };
         let (kind, size, offset) = gix_object::decode::loose_header(&loose_bytes)
             .map_err(|e| format!("Failed to decode loose header for {}: {}", oid.to_hex(), e))?;
-        let body = loose_bytes[offset..offset + (size as usize)].to_vec();
+        let end = (offset + (size as usize)).min(loose_bytes.len());
 
         let obj_ref = ObjectRef::from_loose(&loose_bytes)
             .map_err(|e| format!("Failed to parse object {}: {}", oid.to_hex(), e))?;
@@ -1504,10 +1779,17 @@ pub fn handle_upload_pack(req_body: &[u8], project_name: &str) -> Result<Vec<u8>
             ObjectRef::Blob(_) => {}
         }
 
-        objects_to_send.push((oid, kind, body));
+        append_pack_v2_object(kind, &loose_bytes[offset..end], &mut pack_bytes)?;
+        sent_objects_count += 1;
     }
 
-    let pack_bytes = build_pack_v2(&objects_to_send)?;
+    pack_bytes[8..12].copy_from_slice(&sent_objects_count.to_be_bytes());
+    let mut pack_hasher = gix_hash::hasher(HashKind::Sha1);
+    pack_hasher.update(&pack_bytes);
+    let pack_checksum = pack_hasher
+        .try_finalize()
+        .map_err(|e| format!("pack SHA-1 finalize error: {}", e))?;
+    pack_bytes.extend_from_slice(pack_checksum.as_bytes());
 
     let mut out = Vec::with_capacity(pack_bytes.len() + 128);
     if let Some(common_oid) = first_common_have {
@@ -1527,7 +1809,7 @@ pub fn handle_upload_pack(req_body: &[u8], project_name: &str) -> Result<Vec<u8>
         if !no_progress {
             let msg = format!(
                 "gitoxide-gas: Counting objects: {}, done.\n",
-                objects_to_send.len()
+                sent_objects_count
             );
             pkt_encode::band_to_write(Channel::Progress, msg.as_bytes(), &mut out)
                 .map_err(|e| format!("sideband progress error: {}", e))?;
@@ -1573,7 +1855,13 @@ fn collect_reachable_objects(
                 }
                 ObjectRef::Tree(t) => {
                     for e in &t.entries {
-                        queue.push_back(e.oid.to_owned());
+                        let child_oid = e.oid.to_owned();
+                        if e.mode.is_tree() {
+                            queue.push_back(child_oid);
+                        } else {
+                            // Blobs and submodules have no child objects; mark visited without loading the blob!
+                            visited.insert(child_oid);
+                        }
                     }
                 }
                 ObjectRef::Tag(t) => {
@@ -1586,6 +1874,28 @@ fn collect_reachable_objects(
     Ok(())
 }
 
+fn append_pack_v2_object(kind: ObjectKind, body: &[u8], pack: &mut Vec<u8>) -> Result<(), String> {
+    let type_id: u8 = match kind {
+        ObjectKind::Commit => 1,
+        ObjectKind::Tree => 2,
+        ObjectKind::Blob => 3,
+        ObjectKind::Tag => 4,
+    };
+    encode_pack_obj_header(type_id, body.len(), pack);
+
+    let mut deflater = deflate::Write::new(Vec::new(), Compression::DEFAULT);
+    deflater
+        .write_all(body)
+        .map_err(|e| format!("zlib deflate write error: {}", e))?;
+    deflater
+        .flush()
+        .map_err(|e| format!("zlib deflate flush error: {}", e))?;
+    let compressed = deflater.into_inner();
+    pack.extend_from_slice(&compressed);
+    Ok(())
+}
+
+#[allow(dead_code)]
 fn build_pack_v2(objects: &[(ObjectId, ObjectKind, Vec<u8>)]) -> Result<Vec<u8>, String> {
     let mut pack = Vec::with_capacity(12 + objects.len() * 128 + 20);
     pack.extend_from_slice(b"PACK");
@@ -1809,7 +2119,8 @@ fn unpack_pack_v2(pack: &[u8], store: &GasGitStore) -> Result<usize, String> {
 
     let mut pos = 12usize;
     let mut inflate = Inflate::default();
-    let mut by_offset: BTreeMap<usize, (ObjectKind, Vec<u8>, ObjectId)> = BTreeMap::new();
+    // Map pack entry byte offset -> ObjectId (avoids duplicating every object's Vec<u8> in memory!)
+    let mut by_offset: BTreeMap<usize, ObjectId> = BTreeMap::new();
     let mut by_oid: BTreeMap<ObjectId, (ObjectKind, Vec<u8>)> = BTreeMap::new();
 
     for idx in 0..num_objects {
@@ -1854,7 +2165,7 @@ fn unpack_pack_v2(pack: &[u8], store: &GasGitStore) -> Result<usize, String> {
                     .map_err(|e| format!("invalid {} object in pack: {}", kind, e))?;
                 let oid = gix_object::compute_hash(HashKind::Sha1, kind, &decompressed)
                     .map_err(|e| format!("Failed to compute SHA-1 hash: {}", e))?;
-                by_offset.insert(entry_start, (kind, decompressed.clone(), oid));
+                by_offset.insert(entry_start, oid);
                 by_oid.insert(oid, (kind, decompressed));
             }
             6 => {
@@ -1875,21 +2186,28 @@ fn unpack_pack_v2(pack: &[u8], store: &GasGitStore) -> Result<usize, String> {
                 let base_offset = entry_start
                     .checked_sub(neg_offset)
                     .ok_or_else(|| "OFS_DELTA offset underflow".to_string())?;
-                let (base_kind, base_data, _) = by_offset
+                let base_oid = by_offset
                     .get(&base_offset)
-                    .ok_or_else(|| format!("OFS_DELTA base at offset {} not found", base_offset))?
-                    .clone();
+                    .copied()
+                    .ok_or_else(|| format!("OFS_DELTA base at offset {} not found", base_offset))?;
 
                 let (delta_bytes, consumed) =
                     inflate_pack_entry(&mut inflate, &pack[pos..data_end], uncompressed_size)?;
                 pos += consumed;
 
-                let target_data = apply_git_delta(&base_data, &delta_bytes)?;
+                let (base_kind, target_data) = {
+                    let (bk, base_data) = by_oid.get(&base_oid).ok_or_else(|| {
+                        format!("OFS_DELTA base object {} missing", base_oid.to_hex())
+                    })?;
+                    (*bk, apply_git_delta(base_data, &delta_bytes)?)
+                };
+                drop(delta_bytes);
+
                 ObjectRef::from_bytes(base_kind, &target_data)
                     .map_err(|e| format!("invalid delta-reconstructed {} object: {}", base_kind, e))?;
                 let oid = gix_object::compute_hash(HashKind::Sha1, base_kind, &target_data)
                     .map_err(|e| format!("Failed to compute SHA-1 hash: {}", e))?;
-                by_offset.insert(entry_start, (base_kind, target_data.clone(), oid));
+                by_offset.insert(entry_start, oid);
                 by_oid.insert(oid, (base_kind, target_data));
             }
             7 => {
@@ -1899,27 +2217,27 @@ fn unpack_pack_v2(pack: &[u8], store: &GasGitStore) -> Result<usize, String> {
                 let base_oid = ObjectId::from_bytes_or_panic(&pack[pos..pos + 20]);
                 pos += 20;
 
-                let (base_kind, base_data) = if let Some(found) = by_oid.get(&base_oid) {
-                    found.clone()
-                } else if let Some(stored) = store.read_raw_object(&base_oid)? {
-                    stored
+                let (delta_bytes, consumed) =
+                    inflate_pack_entry(&mut inflate, &pack[pos..data_end], uncompressed_size)?;
+                pos += consumed;
+
+                let (base_kind, target_data) = if let Some((bk, base_data)) = by_oid.get(&base_oid) {
+                    (*bk, apply_git_delta(base_data, &delta_bytes)?)
+                } else if let Some((bk, base_data)) = store.read_raw_object(&base_oid)? {
+                    (bk, apply_git_delta(&base_data, &delta_bytes)?)
                 } else {
                     return Err(format!(
                         "REF_DELTA base object {} not found",
                         base_oid.to_hex()
                     ));
                 };
+                drop(delta_bytes);
 
-                let (delta_bytes, consumed) =
-                    inflate_pack_entry(&mut inflate, &pack[pos..data_end], uncompressed_size)?;
-                pos += consumed;
-
-                let target_data = apply_git_delta(&base_data, &delta_bytes)?;
                 ObjectRef::from_bytes(base_kind, &target_data)
                     .map_err(|e| format!("invalid REF_DELTA {} object: {}", base_kind, e))?;
                 let oid = gix_object::compute_hash(HashKind::Sha1, base_kind, &target_data)
                     .map_err(|e| format!("Failed to compute SHA-1 hash: {}", e))?;
-                by_offset.insert(entry_start, (base_kind, target_data.clone(), oid));
+                by_offset.insert(entry_start, oid);
                 by_oid.insert(oid, (base_kind, target_data));
             }
             other => {
@@ -1928,8 +2246,9 @@ fn unpack_pack_v2(pack: &[u8], store: &GasGitStore) -> Result<usize, String> {
         }
     }
 
-    // Persist all unpacked objects into Google Drive in a single batched bundle
-    store.write_objects_batch(&actual_trailer.to_hex().to_string(), &by_oid)?;
+    drop(by_offset);
+    // Persist all unpacked objects into Google Drive using streaming sub-bundles (draining `by_oid` to free memory)
+    store.write_objects_batch(&actual_trailer.to_hex().to_string(), by_oid)?;
 
     Ok(num_objects)
 }
@@ -3060,14 +3379,26 @@ pub fn handle_do_get(event: &GasDoGetEvent) -> WebResponse {
 }
 
 /// Handle a GAS `doPost(e)` event for Web UI APIs and Git Smart HTTP v1 (`git-upload-pack` / `git-receive-pack`).
-pub fn handle_do_post(event: &GasDoPostEvent) -> GasTextOutput {
+pub fn handle_do_post(event: &mut GasDoPostEvent) -> GasTextOutput {
     let raw_contents = event
         .post_data
-        .as_ref()
-        .map(|p| p.contents.as_str())
-        .unwrap_or("");
+        .take()
+        .map(|p| p.contents)
+        .unwrap_or_default();
 
-    let parsed_env: Option<GasGitPostEnvelope> = serde_json::from_str(raw_contents).ok();
+    let is_direct_req_encoding = event
+        .parameter
+        .get("req_encoding")
+        .map(|s| s == "base64" || s == "raw")
+        .unwrap_or(false);
+
+    let parsed_env: Option<GasGitPostEnvelope> = if !is_direct_req_encoding
+        && raw_contents.trim_start().starts_with('{')
+    {
+        serde_json::from_str(&raw_contents).ok()
+    } else {
+        None
+    };
 
     let action = parsed_env
         .as_ref()
@@ -3153,39 +3484,51 @@ pub fn handle_do_post(event: &GasDoPostEvent) -> GasTextOutput {
         event,
         parsed_env.as_ref().and_then(|e| e.git_path.as_deref()),
     );
-    let explicit_service = parsed_env
+    let explicit_service: Option<String> = parsed_env
         .as_ref()
-        .and_then(|e| e.service.as_deref())
-        .or_else(|| event.parameter.get("service").map(|s| s.as_str()));
+        .and_then(|e| e.service.clone())
+        .or_else(|| event.parameter.get("service").cloned());
 
-    let response_encoding = parsed_env
+    let response_encoding: String = parsed_env
         .as_ref()
-        .and_then(|e| e.encoding.as_deref())
-        .or_else(|| event.parameter.get("encoding").map(|s| s.as_str()))
-        .unwrap_or("base64");
+        .and_then(|e| e.encoding.clone())
+        .or_else(|| event.parameter.get("encoding").cloned())
+        .unwrap_or_else(|| "base64".to_string());
 
-    let format = event
+    let format: String = event
         .parameter
         .get("format")
-        .map(|s| s.as_str())
-        .unwrap_or("text");
+        .cloned()
+        .unwrap_or_else(|| "text".to_string());
 
     let req_bytes: Vec<u8> =
-        if let Some(b64) = parsed_env.as_ref().and_then(|e| e.body_base64.as_deref()) {
+        if let Some(mut env) = parsed_env {
+            let b64 = env.body_base64.take().unwrap_or_default();
+            drop(env);
+            drop(raw_contents);
             BASE64_STANDARD.decode(b64.trim().as_bytes()).unwrap_or_default()
         } else if event.parameter.get("req_encoding").map(|s| s.as_str()) == Some("raw") {
-            raw_contents.as_bytes().to_vec()
+            raw_contents.into_bytes()
+        } else if event.parameter.get("req_encoding").map(|s| s.as_str()) == Some("base64") {
+            let decoded = BASE64_STANDARD
+                .decode(raw_contents.trim().as_bytes())
+                .unwrap_or_default();
+            drop(raw_contents);
+            decoded
         } else {
             let trimmed = raw_contents.trim();
             if !trimmed.is_empty() && !trimmed.starts_with("00") {
-                BASE64_STANDARD
+                let decoded = BASE64_STANDARD
                     .decode(trimmed.as_bytes())
-                    .unwrap_or_else(|_| raw_contents.as_bytes().to_vec())
+                    .unwrap_or_else(|_| raw_contents.as_bytes().to_vec());
+                drop(raw_contents);
+                decoded
             } else {
-                raw_contents.as_bytes().to_vec()
+                raw_contents.into_bytes()
             }
         };
 
+    let explicit_svc_str = explicit_service.as_deref();
     let (service, result) = match parse_git_path(&req_path) {
         Ok(GitRoute::UploadPack { project_name }) => (
             "git-upload-pack",
@@ -3196,7 +3539,7 @@ pub fn handle_do_post(event: &GasDoPostEvent) -> GasTextOutput {
             handle_receive_pack(&req_bytes, &project_name),
         ),
         Ok(GitRoute::WebUiRepo { project_name }) | Ok(GitRoute::InfoRefs { project_name }) => {
-            let svc = explicit_service.unwrap_or("git-upload-pack");
+            let svc = explicit_svc_str.unwrap_or("git-upload-pack");
             let res = match svc {
                 "git-upload-pack" => handle_upload_pack(&req_bytes, &project_name),
                 "git-receive-pack" => handle_receive_pack(&req_bytes, &project_name),
@@ -3205,18 +3548,19 @@ pub fn handle_do_post(event: &GasDoPostEvent) -> GasTextOutput {
             (svc, res)
         }
         Ok(GitRoute::CommitBrowser { .. }) => (
-            explicit_service.unwrap_or("git-upload-pack"),
+            explicit_svc_str.unwrap_or("git-upload-pack"),
             Err("Unsupported Git POST path".to_string()),
         ),
         Ok(GitRoute::WebUiRoot) => (
-            explicit_service.unwrap_or("git-upload-pack"),
+            explicit_svc_str.unwrap_or("git-upload-pack"),
             Err(
                 "Missing repository name in URL path. Expected /<project_name>.git/git-upload-pack or /<project_name>.git/git-receive-pack"
                     .to_string(),
             ),
         ),
-        Err(err) => (explicit_service.unwrap_or("git-upload-pack"), Err(err)),
+        Err(err) => (explicit_svc_str.unwrap_or("git-upload-pack"), Err(err)),
     };
+    drop(req_bytes);
 
     let content_type = format!("application/x-{}-result", service);
     match result {
@@ -3266,6 +3610,15 @@ pub trait GitObjectReader {
     fn read_loose(&self, oid: &ObjectId) -> Option<Vec<u8>>;
     fn list_commits(&self) -> Vec<CommitItem>;
     fn prefetch_objects(&self, _oids: &[ObjectId]) {}
+    fn read_blob_size(&self, oid: &ObjectId) -> Option<usize> {
+        let loose = self.read_loose(oid)?;
+        let (kind, size, _) = gix_object::decode::loose_header(&loose).ok()?;
+        if kind == ObjectKind::Blob {
+            Some(size as usize)
+        } else {
+            None
+        }
+    }
 }
 
 impl GitObjectReader for GasGitStore {
@@ -3279,6 +3632,10 @@ impl GitObjectReader for GasGitStore {
 
     fn prefetch_objects(&self, oids: &[ObjectId]) {
         GasGitStore::prefetch_objects(self, oids);
+    }
+
+    fn read_blob_size(&self, oid: &ObjectId) -> Option<usize> {
+        GasGitStore::read_blob_size(self, oid)
     }
 }
 
@@ -3903,22 +4260,29 @@ pub fn resolve_commit_browser_request(
         let mut dirs: Vec<String> = Vec::new();
         let mut files: Vec<(String, usize)> = Vec::new();
 
-        let child_oids: Vec<ObjectId> = tree_ref.entries.iter().map(|e| e.oid.to_owned()).collect();
-        reader.prefetch_objects(&child_oids);
+        let blob_oids: Vec<ObjectId> = tree_ref
+            .entries
+            .iter()
+            .filter(|e| !e.mode.is_tree())
+            .map(|e| e.oid.to_owned())
+            .collect();
+        reader.prefetch_objects(&blob_oids);
 
         for entry in &tree_ref.entries {
             let name = entry.filename.to_str_lossy().into_owned();
             let child_oid = entry.oid.to_owned();
-            let Some(child_loose) = reader.read_loose(&child_oid) else {
-                continue;
-            };
-            let Ok((kind, size, _offset)) = gix_object::decode::loose_header(&child_loose) else {
-                continue;
-            };
-            match kind {
-                ObjectKind::Tree => dirs.push(name),
-                ObjectKind::Blob => files.push((name, size as usize)),
-                _ => {}
+            if entry.mode.is_tree() {
+                dirs.push(name);
+            } else if let Some(size) = reader.read_blob_size(&child_oid) {
+                files.push((name, size));
+            } else if let Some(child_loose) = reader.read_loose(&child_oid) {
+                if let Ok((kind, size, _offset)) = gix_object::decode::loose_header(&child_loose) {
+                    match kind {
+                        ObjectKind::Tree => dirs.push(name),
+                        ObjectKind::Blob => files.push((name, size as usize)),
+                        _ => {}
+                    }
+                }
             }
         }
 

@@ -223,10 +223,28 @@ class SimulatedDriveGitStore:
             obj_path.write_text(base64.b64encode(loose).decode("ascii"), encoding="utf-8")
         return oid
 
+    @staticmethod
+    def _decode_stored_loose(encoded: str) -> bytes:
+        trimmed = encoded.strip()
+        if trimmed.startswith("z:"):
+            rest = trimmed[2:]
+            _len_str, b64_part = rest.split(":", 1)
+            compressed = base64.b64decode(b64_part.strip())
+            return zlib.decompress(compressed)
+        return base64.b64decode(trimmed)
+
+    @staticmethod
+    def _encode_stored_loose(loose: bytes) -> str:
+        if len(loose) >= 128:
+            comp = zlib.compress(loose)
+            if len(comp) + 16 < len(loose):
+                return f"z:{len(loose)}:{base64.b64encode(comp).decode('ascii')}"
+        return base64.b64encode(loose).decode("ascii")
+
     def read_raw_object(self, oid: str) -> Optional[Tuple[str, bytes]]:
         obj_path = self.objects_dir / oid
         if obj_path.exists():
-            loose = base64.b64decode(obj_path.read_text(encoding="utf-8").strip())
+            loose = self._decode_stored_loose(obj_path.read_text(encoding="utf-8"))
             nul = loose.index(b"\x00")
             header = loose[:nul].decode("ascii")
             kind = header.split(" ", 1)[0]
@@ -234,7 +252,7 @@ class SimulatedDriveGitStore:
         for b_path in self.objects_dir.glob("bundle_*.json"):
             b_map = json.loads(b_path.read_text(encoding="utf-8"))
             if oid in b_map:
-                loose = base64.b64decode(b_map[oid].strip())
+                loose = self._decode_stored_loose(b_map[oid])
                 nul = loose.index(b"\x00")
                 header = loose[:nul].decode("ascii")
                 kind = header.split(" ", 1)[0]
@@ -759,13 +777,24 @@ class SimulatedDriveGitStore:
                 target_raw = self._apply_delta(base_raw, delta)
                 self.write_raw_object(base_kind, target_raw)
                 by_offset[entry_start] = (base_kind, target_raw)
-        # Store batch bundle in Google Drive
+        # Store separated meta and blob batch bundles in Google Drive (with zlib compression)
         trailer = pack[data_end:].hex()
-        b_map = {}
+        meta_map = {}
+        blob_map = {}
         for off, (k, b) in by_offset.items():
             header = f"{k} {len(b)}\x00".encode("utf-8")
-            b_map[hashlib.sha1(header + b).hexdigest()] = base64.b64encode(header + b).decode("ascii")
-        (self.objects_dir / f"bundle_{trailer}.json").write_text(json.dumps(b_map), encoding="utf-8")
+            loose = header + b
+            oid_hex = hashlib.sha1(loose).hexdigest()
+            encoded = self._encode_stored_loose(loose)
+            if k == "blob":
+                meta_map[f"__sz__:{oid_hex}"] = str(len(b))
+                blob_map[oid_hex] = encoded
+            else:
+                meta_map[oid_hex] = encoded
+        if meta_map:
+            (self.objects_dir / f"bundle_meta_{trailer}.json").write_text(json.dumps(meta_map), encoding="utf-8")
+        if blob_map:
+            (self.objects_dir / f"bundle_blob_{trailer}.json").write_text(json.dumps(blob_map), encoding="utf-8")
 
     @staticmethod
     def _apply_delta(base: bytes, delta: bytes) -> bytes:
@@ -1996,6 +2025,93 @@ def run_e2e_tests() -> None:
             opt_script = repo_root / "tools" / "optimize_jco_gas.mjs"
             assert opt_script.is_file(), "tools/optimize_jco_gas.mjs must exist" 
             print("[OK] 18. Verified GAS V8 Fast Base64/Wasm Loader (`Buffer.from` lookup table + `WebAssembly.Module` memoization) and `CacheService` 0-Drive-RPC optimizations.")
+
+            # 19. Verify Smart HTTP v1 Multi-Chunk Push & Clone for large repositories (`GAS_GIT_CHUNK_OBJECTS=4`, `GAS_GIT_CHUNK_COMMITS=2`)
+            assert "encode_stored_loose_object" in rs_src
+            assert "bundle_meta_" in rs_src
+            assert "bundle_blob_" in rs_src
+            assert "MAX_OBJECT_CACHE_BYTES" in rs_src
+
+            SimulatedDriveGitStore.create_repository(
+                drive_root, "project-chunked", "Multi-chunk large push test"
+            )
+            chunked_gas_url = f"gas::{exec_base_url}/project-chunked.git"
+            local_chunked = tmp_path / "local_chunked"
+            local_chunked.mkdir()
+            subprocess.check_call(
+                ["git", "-C", str(local_chunked), "init", "-b", "main"],
+                env=env_auth,
+                stdout=subprocess.DEVNULL,
+            )
+            subprocess.check_call(
+                ["git", "-C", str(local_chunked), "config", "user.name", "ChunkTester"],
+                env=env_auth,
+            )
+            subprocess.check_call(
+                ["git", "-C", str(local_chunked), "config", "user.email", "chunk@example.com"],
+                env=env_auth,
+            )
+            for c_idx in range(1, 7):
+                (local_chunked / f"module_{c_idx}.gleam").write_text(
+                    f"pub fn main_{c_idx}() {{\n  // Gleam module {c_idx}\n}}\n" * 20,
+                    encoding="utf-8",
+                )
+                subprocess.check_call(
+                    ["git", "-C", str(local_chunked), "add", "."],
+                    env=env_auth,
+                )
+                subprocess.check_call(
+                    ["git", "-C", str(local_chunked), "commit", "-m", f"Chunked commit #{c_idx}"],
+                    env=env_auth,
+                    stdout=subprocess.DEVNULL,
+                )
+
+            subprocess.check_call(
+                ["git", "-C", str(local_chunked), "remote", "add", "origin", chunked_gas_url],
+                env=env_auth,
+            )
+            env_chunked = dict(env_auth)
+            env_chunked["GAS_GIT_CHUNK_OBJECTS"] = "4"
+            env_chunked["GAS_GIT_CHUNK_COMMITS"] = "2"
+            push_proc = subprocess.run(
+                ["git", "-C", str(local_chunked), "push", "-u", "origin", "main"],
+                env=env_chunked,
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=30,
+            )
+            assert "Using Smart HTTP v1 chunked transfer" in push_proc.stderr
+            assert "Chunk 1/" in push_proc.stderr
+
+            # Verify multiple bundle_meta_*.json and bundle_blob_*.json files were created across chunks
+            chunked_obj_dir = drive_root / "project-chunked.git" / "objects"
+            meta_bundles = list(chunked_obj_dir.glob("bundle_meta_*.json"))
+            blob_bundles = list(chunked_obj_dir.glob("bundle_blob_*.json"))
+            assert len(meta_bundles) >= 3, f"Expected >= 3 meta bundles, got {len(meta_bundles)}"
+            assert len(blob_bundles) >= 3, f"Expected >= 3 blob bundles, got {len(blob_bundles)}"
+
+            # Clone the multi-chunk repository and verify all 6 commits and files match!
+            clone_chunked = tmp_path / "clone_chunked"
+            subprocess.check_call(
+                ["git", "clone", chunked_gas_url, str(clone_chunked)],
+                env=env_auth,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=20,
+            )
+            for c_idx in range(1, 7):
+                expected_content = f"pub fn main_{c_idx}() {{\n  // Gleam module {c_idx}\n}}\n" * 20
+                actual_content = (clone_chunked / f"module_{c_idx}.gleam").read_text(encoding="utf-8")
+                assert actual_content == expected_content
+            rev_count = int(
+                subprocess.check_output(
+                    ["git", "-C", str(clone_chunked), "rev-list", "--count", "HEAD"],
+                    text=True,
+                ).strip()
+            )
+            assert rev_count == 6, f"Expected 6 commits after chunked push+clone, got {rev_count}"
+            print("[OK] 19. Smart HTTP v1 multi-chunk push (`GAS_GIT_CHUNK_OBJECTS=4`, `GAS_GIT_CHUNK_COMMITS=2`) & clone verified with zlib-compressed `bundle_meta_*` / `bundle_blob_*` storage.")
 
         finally:
             httpd.shutdown()

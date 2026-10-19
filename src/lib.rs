@@ -36,22 +36,33 @@ struct Component;
 impl Guest for Component {
     // doGetはここから入る (Git Smart HTTP v1 の /<project_name>.git/info/refs リクエストおよび Gleam + Lustre Web UI を処理)
     fn rs_do_get(data: String) -> WebResponse {
-        match serde_json::from_str::<GasDoGetEvent>(&data) {
-            Ok(event) => git_server::handle_do_get(&event),
-            Err(e) => WebResponse::Text(
-                gas_content_service::create_text_output(&format!("failed to parse: {}", e))
-                    .set_mime_type(MimeType::Text),
-            ),
-        }
+        let event = match serde_json::from_str::<GasDoGetEvent>(&data) {
+            Ok(ev) => ev,
+            Err(e) => {
+                return WebResponse::Text(
+                    gas_content_service::create_text_output(&format!("failed to parse: {}", e))
+                        .set_mime_type(MimeType::Text),
+                );
+            }
+        };
+        drop(data);
+        git_server::handle_do_get(&event)
     }
 
     // doPostはここから入る (Git Smart HTTP v1 の /<project_name>.git/git-upload-pack / git-receive-pack および Web UI API を処理)
     fn rs_do_post(data: String) -> GasTextOutput {
-        match serde_json::from_str::<GasDoPostEvent>(&data) {
-            Ok(event) => git_server::handle_do_post(&event),
-            Err(e) => gas_content_service::create_text_output(&format!("failed to parse post: {}", e))
-                .set_mime_type(MimeType::Text),
-        }
+        let mut event = match serde_json::from_str::<GasDoPostEvent>(&data) {
+            Ok(ev) => ev,
+            Err(e) => {
+                return gas_content_service::create_text_output(&format!(
+                    "failed to parse post: {}",
+                    e
+                ))
+                .set_mime_type(MimeType::Text);
+            }
+        };
+        drop(data);
+        git_server::handle_do_post(&mut event)
     }
 
     // GAS エディタから手動で空の Git リポジトリを Google Drive フォルダ内に作成するヘルパー関数（初期コミットは自動生成しない）

@@ -1,30 +1,45 @@
 #!/usr/bin/env python3
 """
-git-remote-gas: Git remote helper for Google Apps Script (GAS) Web Apps.
+git-remote-gas: High-performance Git remote helper for Google Apps Script (GAS) Web Apps.
 
 Supports GitHub-style repository URLs (without username):
   git remote add origin gas::https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec/project_name.git
   git clone gas::https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec/project_name.git
 
-Handles:
+Key Features & Optimizations:
 1. URL path parsing: extracts the GAS `/exec` (or `/dev`) endpoint and the `/<project_name>.git`
    repository path, forwarding `/<project_name>.git/info/refs`, `/<project_name>.git/git-upload-pack`,
    and `/<project_name>.git/git-receive-pack` cleanly.
 2. Empty repository (0-commit) advertisement (`0000... capabilities^{}`) so newly created
    repositories can receive their initial `git push -u origin main` from the client.
-3. HTTP 302 redirects across `script.google.com` and `script.googleusercontent.com`
-   (including converting POST -> GET on 302 redirect to `/macros/echo`).
-4. Relaxed / configurable timeouts (`GAS_GIT_TIMEOUT` env var, default 300s / 5 minutes)
-   to accommodate Google Apps Script and Google Drive I/O.
+3. Persistent HTTP/1.1 Keep-Alive connection pool (`http.client.HTTPSConnection` / `HTTPConnection`
+   with `TCP_NODELAY`) across `script.google.com` and `script.googleusercontent.com` redirects,
+   eliminating repeated TLS handshake overhead.
+4. Smart HTTP v1-compliant Adaptive Multi-Chunk Push (`git-receive-pack`) for large repositories
+   (such as `gleam`):
+   - Partitions large pushes into self-contained `PACK` v2 chunks (`--delta-base-offset`, no external
+     `REF_DELTA` dependencies) bounded by uncompressed object size (`GAS_GIT_CHUNK_UNCOMPRESSED_MB`,
+     default 12 MB), object count (`GAS_GIT_CHUNK_OBJECTS`, default 2,500), and compressed pack size
+     (`GAS_GIT_CHUNK_PACK_MB`, default 5 MB).
+   - Advances the remote branch along first-parent commit checkpoints so interrupted pushes of
+     large repositories automatically resume from the last completed checkpoint.
+   - Pipelines `git pack-objects` + Base64 encoding of Chunk `i+1` in a background worker thread
+     while Chunk `i` is in flight over HTTP.
+   - Automatically splits a chunk in half and retries if GAS reports a memory or payload limit error.
 5. Step-by-step authentication fallback (env token/cookie, anonymous, cached credentials,
    `~/.clasprc.json` OAuth auto-refresh, and interactive login prompt).
 """
 
 import base64
+import concurrent.futures
+import http.client
 import http.cookiejar
 import json
 import os
 import re
+import socket
+import ssl
+import struct
 import subprocess
 import sys
 import time
@@ -33,13 +48,18 @@ import urllib.parse
 import urllib.request
 import webbrowser
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 
 AUTH_CACHE_PATH = Path.home() / ".config" / "git-remote-gas" / "auth.json"
 CLASPRC_PATH = Path.home() / ".clasprc.json"
 
 VALID_PROJECT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+DEFAULT_MAX_CHUNK_OBJECTS = 2500
+DEFAULT_MAX_CHUNK_UNCOMPRESSED_BYTES = 12 * 1024 * 1024  # 12 MB uncompressed per chunk
+DEFAULT_MAX_CHUNK_PACK_BYTES = 5 * 1024 * 1024           # 5 MB compressed pack per chunk
+DEFAULT_MAX_CHUNK_COMMITS = 400
 
 
 def log_err(msg: str) -> None:
@@ -61,6 +81,62 @@ def get_gas_git_timeout() -> Optional[float]:
         except ValueError:
             pass
     return 300.0
+
+
+def get_chunk_limits() -> Tuple[int, int, int, int]:
+    """
+    Returns `(max_objects, max_uncompressed_bytes, max_pack_bytes, max_commits)` per push chunk.
+    Configurable via environment variables:
+      - `GAS_GIT_CHUNK_OBJECTS` (default: 2500)
+      - `GAS_GIT_CHUNK_UNCOMPRESSED_BYTES` or `GAS_GIT_CHUNK_UNCOMPRESSED_MB` (default: 12 MB)
+      - `GAS_GIT_CHUNK_PACK_BYTES` or `GAS_GIT_CHUNK_PACK_MB` (default: 5 MB)
+      - `GAS_GIT_CHUNK_COMMITS` (default: 400)
+    """
+    max_objs = DEFAULT_MAX_CHUNK_OBJECTS
+    raw_objs = os.environ.get("GAS_GIT_CHUNK_OBJECTS", "").strip()
+    if raw_objs:
+        try:
+            max_objs = max(1, int(raw_objs))
+        except ValueError:
+            pass
+
+    max_uncomp = DEFAULT_MAX_CHUNK_UNCOMPRESSED_BYTES
+    raw_uncomp_b = os.environ.get("GAS_GIT_CHUNK_UNCOMPRESSED_BYTES", "").strip()
+    raw_uncomp_mb = os.environ.get("GAS_GIT_CHUNK_UNCOMPRESSED_MB", "").strip()
+    if raw_uncomp_b:
+        try:
+            max_uncomp = max(65536, int(raw_uncomp_b))
+        except ValueError:
+            pass
+    elif raw_uncomp_mb:
+        try:
+            max_uncomp = max(65536, int(float(raw_uncomp_mb) * 1024 * 1024))
+        except ValueError:
+            pass
+
+    max_pack = DEFAULT_MAX_CHUNK_PACK_BYTES
+    raw_pack_b = os.environ.get("GAS_GIT_CHUNK_PACK_BYTES", "").strip()
+    raw_pack_mb = os.environ.get("GAS_GIT_CHUNK_PACK_MB", "").strip()
+    if raw_pack_b:
+        try:
+            max_pack = max(32768, int(raw_pack_b))
+        except ValueError:
+            pass
+    elif raw_pack_mb:
+        try:
+            max_pack = max(32768, int(float(raw_pack_mb) * 1024 * 1024))
+        except ValueError:
+            pass
+
+    max_commits = DEFAULT_MAX_CHUNK_COMMITS
+    raw_commits = os.environ.get("GAS_GIT_CHUNK_COMMITS", "").strip()
+    if raw_commits:
+        try:
+            max_commits = max(1, int(raw_commits))
+        except ValueError:
+            pass
+
+    return max_objs, max_uncomp, max_pack, max_commits
 
 
 def parse_gas_remote_url(raw_url: str) -> Tuple[str, str, str]:
@@ -150,9 +226,96 @@ def normalize_gas_url(
     )
 
 
-class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
+class KeepAliveHttpPool:
+    """
+    Persistent HTTP/1.1 Keep-Alive connection pool with TCP_NODELAY.
+    Eliminates repeated TCP + TLS handshakes across multi-chunk pushes and 302 redirects.
+    """
+
+    def __init__(self) -> None:
+        self._conns: Dict[Tuple[str, str, int], http.client.HTTPConnection] = {}
+        self._ssl_ctx = ssl.create_default_context()
+
+    def _get_conn(
+        self, scheme: str, host: str, port: int, timeout: Optional[float]
+    ) -> http.client.HTTPConnection:
+        key = (scheme, host, port)
+        conn = self._conns.get(key)
+        if conn is not None:
+            conn.timeout = timeout
+            return conn
+        if scheme == "https":
+            conn = http.client.HTTPSConnection(
+                host, port, timeout=timeout, context=self._ssl_ctx
+            )
+        else:
+            conn = http.client.HTTPConnection(host, port, timeout=timeout)
+        self._conns[key] = conn
+        return conn
+
+    def _drop_conn(self, scheme: str, host: str, port: int) -> None:
+        key = (scheme, host, port)
+        conn = self._conns.pop(key, None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def request(
+        self,
+        url: str,
+        method: str,
+        headers: Dict[str, str],
+        body: Optional[bytes],
+        timeout: Optional[float],
+    ) -> Tuple[int, str, Dict[str, str], bytes]:
+        parsed = urllib.parse.urlparse(url)
+        scheme = parsed.scheme.lower()
+        host = parsed.hostname or ""
+        port = parsed.port or (443 if scheme == "https" else 80)
+        path_and_query = parsed.path or "/"
+        if parsed.query:
+            path_and_query = f"{path_and_query}?{parsed.query}"
+
+        req_headers = dict(headers)
+        req_headers["Connection"] = "keep-alive"
+        if body is not None:
+            req_headers["Content-Length"] = str(len(body))
+
+        for attempt in range(2):
+            conn = self._get_conn(scheme, host, port, timeout)
+            try:
+                conn.request(method, path_and_query, body=body, headers=req_headers)
+                if conn.sock is not None:
+                    try:
+                        conn.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    except OSError:
+                        pass
+                resp = conn.getresponse()
+                raw = resp.read()
+                resp_headers = {k: v for k, v in resp.getheaders()}
+                for k, v in resp.getheaders():
+                    if k.lower() == "location":
+                        resp_headers["Location"] = v
+                if resp.will_close:
+                    self._drop_conn(scheme, host, port)
+                return resp.status, resp.reason, resp_headers, raw
+            except (
+                http.client.RemoteDisconnected,
+                http.client.CannotSendRequest,
+                http.client.BadStatusLine,
+                BrokenPipeError,
+                ConnectionResetError,
+            ):
+                self._drop_conn(scheme, host, port)
+                if attempt == 1:
+                    raise
+            except Exception:
+                self._drop_conn(scheme, host, port)
+                raise
+
+        raise RuntimeError(f"Failed HTTP request to {url}")
 
 
 class GasAuthManager:
@@ -354,6 +517,8 @@ class GasHttpClient:
         self.project_name = project_name
         self.repo_path = repo_path
         self.auth = GasAuthManager(self.endpoint_url)
+        self.pool = KeepAliveHttpPool()
+        self._working_auth_headers: Optional[Dict[str, str]] = None
 
     def full_git_path(self, sub_path: str) -> str:
         clean_sub = sub_path.lstrip("/")
@@ -368,6 +533,15 @@ class GasHttpClient:
         content_type: Optional[str] = None,
     ) -> bytes:
         url = normalize_gas_url(self.endpoint_url, self.repo_path, sub_path, query_params)
+
+        # Fast path: reuse already-verified auth strategy across chunks without re-probing
+        if self._working_auth_headers is not None:
+            try:
+                return self._execute_with_redirects(
+                    url, method, body, content_type, self._working_auth_headers
+                )
+            except PermissionError:
+                self._working_auth_headers = None
 
         strategies: List[Tuple[str, Dict[str, str]]] = []
         env_headers = self.auth.get_env_auth_headers()
@@ -388,7 +562,9 @@ class GasHttpClient:
 
         for _label, auth_headers in strategies:
             try:
-                return self._execute_with_redirects(url, method, body, content_type, auth_headers)
+                res = self._execute_with_redirects(url, method, body, content_type, auth_headers)
+                self._working_auth_headers = auth_headers
+                return res
             except PermissionError as e:
                 last_error = e
                 continue
@@ -396,7 +572,9 @@ class GasHttpClient:
         interactive_headers = self.auth.prompt_browser_login(url)
         if interactive_headers is not None:
             try:
-                return self._execute_with_redirects(url, method, body, content_type, interactive_headers)
+                res = self._execute_with_redirects(url, method, body, content_type, interactive_headers)
+                self._working_auth_headers = interactive_headers
+                return res
             except Exception as e:
                 last_error = e
 
@@ -411,10 +589,6 @@ class GasHttpClient:
         auth_headers: Dict[str, str],
         max_redirects: int = 10,
     ) -> bytes:
-        opener = urllib.request.build_opener(
-            NoRedirectHandler(),
-            urllib.request.HTTPCookieProcessor(self.auth.cookie_jar),
-        )
         curr_url = url
         curr_method = method
         curr_body = body
@@ -422,7 +596,7 @@ class GasHttpClient:
 
         for _ in range(max_redirects):
             headers = {
-                "User-Agent": "git-remote-gas/0.4",
+                "User-Agent": "git-remote-gas/0.5",
                 "Accept": "*/*",
             }
             if content_type and curr_body is not None:
@@ -433,47 +607,50 @@ class GasHttpClient:
             elif "Cookie" in auth_headers:
                 headers["Cookie"] = auth_headers["Cookie"]
 
-            req = urllib.request.Request(curr_url, data=curr_body, headers=headers, method=curr_method)
             try:
-                with opener.open(req, timeout=timeout_val) as resp:
-                    raw = resp.read()
-            except urllib.error.HTTPError as e:
-                status = e.code
-                headers_map = e.headers
-                if status in (301, 302, 303, 307, 308):
-                    location = headers_map.get("Location")
-                    if not location:
-                        raise RuntimeError(f"HTTP {status} without Location header")
-                    next_url = urllib.parse.urljoin(curr_url, location)
-                    if "accounts.google.com" in next_url or "ServiceLogin" in next_url:
-                        raise PermissionError(
-                            f"Redirected to Google Login page ({next_url})"
-                        )
-                    if status in (301, 302, 303):
-                        curr_method = "GET"
-                        curr_body = None
-                    curr_url = next_url
-                    continue
-                if status in (401, 403, 404):
-                    raise PermissionError(f"HTTP {status}: {e.reason}")
-                raise RuntimeError(f"HTTP error {status} from GAS: {e.reason}")
-            except (TimeoutError, urllib.error.URLError) as e:
-                is_timeout = isinstance(e, TimeoutError) or (
-                    isinstance(e, urllib.error.URLError)
-                    and isinstance(getattr(e, "reason", None), (TimeoutError, TimeoutError))
+                status, reason, headers_map, raw = self.pool.request(
+                    curr_url, curr_method, headers, curr_body, timeout_val
                 )
-                if is_timeout or "timed out" in str(e).lower():
+            except (TimeoutError, socket.timeout, urllib.error.URLError) as e:
+                is_timeout = isinstance(e, (TimeoutError, socket.timeout)) or (
+                    "timed out" in str(e).lower()
+                )
+                if is_timeout:
                     sec_desc = f"{int(timeout_val)}s" if timeout_val else "specified limit"
                     raise RuntimeError(
                         f"Request to GAS Git Server timed out after {sec_desc} while waiting for Google Apps Script & Google Drive to process the operation.\n"
                         "To relax the timeout limit, set the GAS_GIT_TIMEOUT environment variable (e.g. `export GAS_GIT_TIMEOUT=600` for 10 minutes, or `export GAS_GIT_TIMEOUT=0` to disable timeout)."
                     )
                 raise RuntimeError(f"HTTP connection error from GAS ({curr_url}): {e}")
+            except Exception as e:
+                raise RuntimeError(f"HTTP connection error from GAS ({curr_url}): {e}")
+
+            if status in (301, 302, 303, 307, 308):
+                location = headers_map.get("Location") or headers_map.get("location")
+                if not location:
+                    raise RuntimeError(f"HTTP {status} without Location header")
+                next_url = urllib.parse.urljoin(curr_url, location)
+                if "accounts.google.com" in next_url or "ServiceLogin" in next_url:
+                    raise PermissionError(
+                        f"Redirected to Google Login page ({next_url})"
+                    )
+                if status in (301, 302, 303):
+                    curr_method = "GET"
+                    curr_body = None
+                curr_url = next_url
+                continue
+
+            if status in (401, 403, 404):
+                raise PermissionError(f"HTTP {status}: {reason}")
+            if status >= 400:
+                raise RuntimeError(f"HTTP error {status} from GAS: {reason}")
 
             if raw.lstrip().startswith((b"<!DOCTYPE html", b"<html", b"<HTML")):
-                text_preview = raw[:1024].decode("utf-8", errors="ignore")
+                text_preview = raw[:2048].decode("utf-8", errors="ignore")
                 if "accounts.google.com" in text_preview or "ServiceLogin" in text_preview or "Google Drive" in text_preview:
                     raise PermissionError("Received Google HTML login page instead of Git response")
+                if "メモリ不足" in text_preview or "Out of memory" in text_preview or "Exception" in text_preview:
+                    raise MemoryError("GAS server reported Out Of Memory / Exception in HTML response")
 
             return self._decode_gas_payload(raw)
 
@@ -550,6 +727,405 @@ def parse_refs_from_advertisement(data: bytes) -> Tuple[List[Tuple[str, str]], O
             refs.append((oid, refname))
 
     return refs, symref_head
+
+
+def build_receive_pack_commands(updates: List[Tuple[str, str, str]]) -> bytes:
+    """
+    Encode Smart HTTP v1 `git-receive-pack` command list (`old_oid new_oid dst`) + `0000` flush-pkt.
+    """
+    cmds = bytearray()
+    for idx, (old_oid, new_oid, dst) in enumerate(updates):
+        if idx == 0:
+            cmd_str = f"{old_oid} {new_oid} {dst}\x00report-status side-band-64k object-format=sha1 agent=git-remote-gas/0.5\n"
+        else:
+            cmd_str = f"{old_oid} {new_oid} {dst}\n"
+        pkt = cmd_str.encode("utf-8")
+        cmds.extend(f"{len(pkt) + 4:04x}".encode("ascii") + pkt)
+    cmds.extend(b"0000")
+    return bytes(cmds)
+
+
+def pack_object_list(obj_lines: List[str]) -> bytes:
+    """
+    Run `git pack-objects --stdout --delta-base-offset -q` on an explicit list of object lines
+    (`<oid>` or `<oid> <path_hint>`).
+    Produces a 100% self-contained Git `PACK` v2 stream using internal `OFS_DELTA` compression
+    with zero external `REF_DELTA` dependencies.
+    """
+    if not obj_lines:
+        # Valid empty 0-object PACK v2 header + SHA-1 checksum
+        header = b"PACK\x00\x00\x00\x02\x00\x00\x00\x00"
+        import hashlib
+        return header + hashlib.sha1(header).digest()
+
+    stdin_bytes = ("\n".join(obj_lines) + "\n").encode("utf-8")
+    proc = subprocess.run(
+        [
+            "git",
+            "pack-objects",
+            "--stdout",
+            "--delta-base-offset",
+            "--window=10",
+            "--depth=20",
+            "-q",
+        ],
+        input=stdin_bytes,
+        capture_output=True,
+        check=True,
+    )
+    return proc.stdout
+
+
+def scan_missing_objects_with_sizes(
+    include_oids: List[str], exclude_oids: Set[str]
+) -> List[Tuple[str, str, int, str]]:
+    """
+    Returns ordered list of `(oid, obj_type, uncompressed_size, rev_line_with_hint)`
+    for all objects reachable from `include_oids` and not reachable from `exclude_oids`.
+    """
+    if not include_oids:
+        return []
+    rev_cmd = ["git", "rev-list", "--objects", "--topo-order", "--reverse"]
+    rev_cmd.extend(include_oids)
+    for ex in exclude_oids:
+        if ex and ex != "0" * 40:
+            rev_cmd.append(f"^{ex}")
+
+    rev_out = subprocess.check_output(rev_cmd, text=True)
+    raw_lines = [l for l in rev_out.splitlines() if l.strip()]
+    if not raw_lines:
+        return []
+
+    oid_list: List[str] = []
+    hint_by_oid: Dict[str, str] = {}
+    for line in raw_lines:
+        parts = line.split(" ", 1)
+        oid = parts[0]
+        if oid not in hint_by_oid:
+            oid_list.append(oid)
+            hint_by_oid[oid] = line
+
+    cat_proc = subprocess.run(
+        ["git", "cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)"],
+        input="\n".join(oid_list) + "\n",
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    result: List[Tuple[str, str, int, str]] = []
+    for line in cat_proc.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 3:
+            oid, otype, osize_str = parts[0], parts[1], parts[2]
+            try:
+                osize = int(osize_str)
+            except ValueError:
+                osize = 0
+            result.append((oid, otype, osize, hint_by_oid.get(oid, oid)))
+    return result
+
+
+def partition_objects_into_chunks(
+    objects: List[Tuple[str, str, int, str]],
+    max_objs: int,
+    max_uncompressed_bytes: int,
+) -> List[Tuple[List[str], int]]:
+    """
+    Splits `objects` into chunks where each chunk has `<= max_objs` objects and
+    `<= max_uncompressed_bytes` total uncompressed bytes.
+    Returns list of `(rev_lines_with_hints, chunk_uncompressed_bytes)`.
+    """
+    chunks: List[Tuple[List[str], int]] = []
+    curr_lines: List[str] = []
+    curr_bytes = 0
+
+    for _oid, _otype, osize, rev_line in objects:
+        if curr_lines and (
+            len(curr_lines) >= max_objs or curr_bytes + osize > max_uncompressed_bytes
+        ):
+            chunks.append((curr_lines, curr_bytes))
+            curr_lines = []
+            curr_bytes = 0
+        curr_lines.append(rev_line)
+        curr_bytes += osize
+
+    if curr_lines:
+        chunks.append((curr_lines, curr_bytes))
+
+    return chunks
+
+
+def send_receive_pack_payload(
+    client: GasHttpClient,
+    updates: List[Tuple[str, str, str]],
+    pack_data: bytes,
+) -> str:
+    """
+    Sends a single Smart HTTP v1 `POST /<repo>.git/git-receive-pack` request.
+    """
+    full_payload = build_receive_pack_commands(updates) + pack_data
+    envelope = json.dumps(
+        {
+            "service": "git-receive-pack",
+            "git_path": client.full_git_path("/git-receive-pack"),
+            "encoding": "base64",
+            "body_base64": base64.b64encode(full_payload).decode("ascii"),
+        }
+    ).encode("utf-8")
+
+    resp = client.request(
+        "POST",
+        "/git-receive-pack",
+        {"service": "git-receive-pack", "encoding": "base64"},
+        body=envelope,
+        content_type="application/json",
+    )
+    text_resp = resp.decode("utf-8", errors="replace")
+    if "ERR " in text_resp:
+        raise RuntimeError(text_resp.strip())
+    if "unpack " in text_resp and "unpack ok" not in text_resp:
+        raise RuntimeError(f"Remote unpack failed: {text_resp.strip()}")
+    for _old_oid, _new_oid, dst in updates:
+        ng_marker = f"ng {dst} "
+        if ng_marker in text_resp:
+            reason = text_resp.split(ng_marker, 1)[1].splitlines()[0]
+            raise RuntimeError(f"ng {dst} {reason}")
+    return text_resp
+
+
+def send_object_chunk_with_adaptive_split(
+    client: GasHttpClient,
+    rev_lines: List[str],
+    updates: List[Tuple[str, str, str]],
+    noop_updates: List[Tuple[str, str, str]],
+    max_pack_bytes: int,
+    prebuilt_pack: Optional[bytes] = None,
+) -> str:
+    """
+    Sends `rev_lines` + `updates` in a Smart HTTP v1 `git-receive-pack` call.
+    If the packed size exceeds `max_pack_bytes` or GAS reports an OOM / HTTP 500 error,
+    automatically splits `rev_lines` in half, sends the first half with `noop_updates`,
+    and sends the second half with `updates`.
+    """
+    pack_data = prebuilt_pack if prebuilt_pack is not None else pack_object_list(rev_lines)
+
+    if len(pack_data) > max_pack_bytes and len(rev_lines) > 1:
+        mid = len(rev_lines) // 2
+        send_object_chunk_with_adaptive_split(
+            client, rev_lines[:mid], noop_updates, noop_updates, max_pack_bytes
+        )
+        return send_object_chunk_with_adaptive_split(
+            client, rev_lines[mid:], updates, noop_updates, max_pack_bytes
+        )
+
+    try:
+        return send_receive_pack_payload(client, updates, pack_data)
+    except (MemoryError, RuntimeError) as err:
+        err_str = str(err)
+        is_non_ff = "non-fast-forward" in err_str or "invalid refname" in err_str
+        if is_non_ff or len(rev_lines) <= 1:
+            raise
+        log_err(
+            f"Chunk of {len(rev_lines)} objects ({len(pack_data) / 1024:.1f} KB) hit server limit; splitting in half and retrying..."
+        )
+        mid = len(rev_lines) // 2
+        send_object_chunk_with_adaptive_split(
+            client, rev_lines[:mid], noop_updates, noop_updates, max_pack_bytes
+        )
+        return send_object_chunk_with_adaptive_split(
+            client, rev_lines[mid:], updates, noop_updates, max_pack_bytes
+        )
+
+
+def execute_push(
+    client: GasHttpClient,
+    specs: List[str],
+    remote_map: Dict[str, str],
+) -> List[Tuple[str, Optional[str]]]:
+    """
+    Executes a Smart HTTP v1 push for `specs`.
+    - Uses single-request fast path when objects and uncompressed size fit within 1 chunk.
+    - Automatically switches to pipelined multi-chunk commit-checkpoint push for large repositories.
+    Returns list of `(dst_ref, error_reason_or_none)`.
+    """
+    max_objs, max_uncomp, max_pack, max_commits = get_chunk_limits()
+    known_remote_oids: Set[str] = {
+        oid for oid in remote_map.values() if oid and oid != "0" * 40
+    }
+
+    parsed_specs: List[Tuple[str, str, str]] = []
+    deletions: List[Tuple[str, str, str]] = []
+    updates: List[Tuple[str, str, str]] = []
+
+    for spec in specs:
+        force = spec.startswith("+")
+        clean_spec = spec[1:] if force else spec
+        src, dst = clean_spec.split(":", 1)
+        old_oid = remote_map.get(dst, "0" * 40)
+        if src == "":
+            new_oid = "0" * 40
+            deletions.append((old_oid, new_oid, dst))
+        else:
+            new_oid = subprocess.check_output(["git", "rev-parse", src], text=True).strip()
+            updates.append((old_oid, new_oid, dst))
+        parsed_specs.append((old_oid, new_oid, dst))
+
+    if not updates:
+        # Pure ref deletion(s)
+        empty_pack = pack_object_list([])
+        try:
+            send_receive_pack_payload(client, deletions, empty_pack)
+            return [(dst, None) for _, _, dst in parsed_specs]
+        except Exception as e:
+            return [(dst, str(e)) for _, _, dst in parsed_specs]
+
+    # Scan total missing objects across all updates
+    target_new_oids = [new_oid for _, new_oid, _ in updates]
+    all_missing = scan_missing_objects_with_sizes(target_new_oids, known_remote_oids)
+    total_objs = len(all_missing)
+    total_uncomp = sum(item[2] for item in all_missing)
+
+    # FAST PATH: fits within a single chunk budget -> send in 1 single HTTP request!
+    if total_objs <= max_objs and total_uncomp <= max_uncomp:
+        rev_args: List[str] = list(target_new_oids)
+        for ex in known_remote_oids:
+            rev_args.append(f"^{ex}")
+        pack_proc = subprocess.run(
+            ["git", "pack-objects", "--stdout", "--revs", "--delta-base-offset", "-q"],
+            input=("\n".join(rev_args) + "\n").encode("utf-8"),
+            capture_output=True,
+            check=True,
+        )
+        pack_data = pack_proc.stdout
+        if len(pack_data) <= max_pack:
+            try:
+                send_receive_pack_payload(client, parsed_specs, pack_data)
+                return [(dst, None) for _, _, dst in parsed_specs]
+            except MemoryError:
+                # Fall through to multi-chunk path if server reported OOM
+                pass
+            except Exception as e:
+                err_msg = str(e)
+                if "メモリ不足" not in err_msg and "Out of memory" not in err_msg:
+                    return [(dst, err_msg) for _, _, dst in parsed_specs]
+
+    # MULTI-CHUNK PATH: Partition along first-parent commit checkpoints & bounded object chunks
+    log_err(
+        f"Large push detected ({total_objs:,} objects, {total_uncomp / (1024 * 1024):.2f} MB uncompressed). "
+        f"Using Smart HTTP v1 chunked transfer (max {max_objs:,} objects / {max_uncomp / (1024 * 1024):.1f} MB raw per chunk)..."
+    )
+
+    results_out: List[Tuple[str, Optional[str]]] = []
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        for old_oid, new_oid, dst in updates:
+            curr_remote_oid = old_oid
+            try:
+                # Find first-parent commit chain from curr_remote_oid -> new_oid for resumable ref checkpoints
+                fp_cmd = ["git", "rev-list", "--first-parent", "--reverse", new_oid]
+                for ex in known_remote_oids:
+                    fp_cmd.append(f"^{ex}")
+                fp_commits = [
+                    c.strip()
+                    for c in subprocess.check_output(fp_cmd, text=True).splitlines()
+                    if c.strip()
+                ]
+                if not fp_commits or fp_commits[-1] != new_oid:
+                    fp_commits.append(new_oid)
+
+                # Group first-parent commits into checkpoint windows of up to `max_commits`
+                checkpoints: List[str] = []
+                for idx in range(max_commits - 1, len(fp_commits), max_commits):
+                    checkpoints.append(fp_commits[idx])
+                if not checkpoints or checkpoints[-1] != new_oid:
+                    checkpoints.append(new_oid)
+
+                # Build the sequence of object chunks across all checkpoints
+                # Each planned item is: (rev_lines, raw_bytes, is_checkpoint_end, target_checkpoint_oid)
+                planned_chunks: List[Tuple[List[str], int, bool, str]] = []
+                simulated_known = set(known_remote_oids)
+
+                for cp_oid in checkpoints:
+                    cp_objects = scan_missing_objects_with_sizes([cp_oid], simulated_known)
+                    if not cp_objects:
+                        if cp_oid == new_oid and curr_remote_oid != new_oid:
+                            planned_chunks.append(([], 0, True, cp_oid))
+                        simulated_known.add(cp_oid)
+                        continue
+
+                    sub_chunks = partition_objects_into_chunks(cp_objects, max_objs, max_uncomp)
+                    for sc_idx, (sc_lines, sc_bytes) in enumerate(sub_chunks):
+                        is_last_sub = sc_idx == len(sub_chunks) - 1
+                        planned_chunks.append((sc_lines, sc_bytes, is_last_sub, cp_oid))
+                    simulated_known.add(cp_oid)
+
+                total_chunks = len(planned_chunks)
+                if total_chunks == 0:
+                    send_receive_pack_payload(
+                        client, [(curr_remote_oid, new_oid, dst)], pack_object_list([])
+                    )
+                    results_out.append((dst, None))
+                    continue
+
+                # Pipeline `pack_object_list` of chunk i+1 while chunk i is uploading over HTTP
+                next_pack_future: Optional[concurrent.futures.Future[bytes]] = executor.submit(
+                    pack_object_list, planned_chunks[0][0]
+                )
+
+                for chunk_idx, (sc_lines, sc_bytes, is_cp_end, cp_oid) in enumerate(planned_chunks):
+                    assert next_pack_future is not None
+                    pack_bytes = next_pack_future.result()
+
+                    if chunk_idx + 1 < total_chunks:
+                        next_pack_future = executor.submit(
+                            pack_object_list, planned_chunks[chunk_idx + 1][0]
+                        )
+                    else:
+                        next_pack_future = None
+
+                    noop_cmd = [(curr_remote_oid, curr_remote_oid, dst)]
+                    if is_cp_end:
+                        step_cmd = [(curr_remote_oid, cp_oid, dst)]
+                    else:
+                        step_cmd = noop_cmd
+
+                    t_start = time.time()
+                    send_object_chunk_with_adaptive_split(
+                        client,
+                        sc_lines,
+                        step_cmd,
+                        noop_cmd,
+                        max_pack,
+                        prebuilt_pack=pack_bytes,
+                    )
+                    elapsed = time.time() - t_start
+
+                    if is_cp_end:
+                        curr_remote_oid = cp_oid
+                        known_remote_oids.add(cp_oid)
+
+                    log_err(
+                        f"  Chunk {chunk_idx + 1}/{total_chunks}: {len(sc_lines):,} objects "
+                        f"({len(pack_bytes) / 1024:.1f} KB pack / {sc_bytes / (1024 * 1024):.2f} MB raw) "
+                        f"in {elapsed:.2f}s -> {curr_remote_oid[:7]}"
+                    )
+
+                results_out.append((dst, None))
+            except Exception as e:
+                log_err(f"Error pushing {dst}: {e}")
+                results_out.append((dst, str(e)))
+
+    if deletions:
+        try:
+            send_receive_pack_payload(client, deletions, pack_object_list([]))
+            for _, _, dst in deletions:
+                results_out.append((dst, None))
+        except Exception as e:
+            for _, _, dst in deletions:
+                results_out.append((dst, str(e)))
+
+    return results_out
 
 
 def main() -> int:
@@ -670,71 +1246,13 @@ def main() -> int:
                 return 1
             remote_map = {refname: oid for oid, refname in refs}
 
-            cmds = bytearray()
-            rev_args: List[str] = []
-            results: List[str] = []
-
-            for spec in specs:
-                force = spec.startswith("+")
-                clean_spec = spec[1:] if force else spec
-                src, dst = clean_spec.split(":", 1)
-                old_oid = remote_map.get(dst, "0" * 40)
-                if src == "":
-                    new_oid = "0" * 40
-                else:
-                    new_oid = subprocess.check_output(
-                        ["git", "rev-parse", src], text=True
-                    ).strip()
-                    rev_args.append(new_oid)
-                    if old_oid != "0" * 40:
-                        rev_args.append(f"^{old_oid}")
-
-                cmd_str = f"{old_oid} {new_oid} {dst}\x00report-status\n"
-                pkt = cmd_str.encode("utf-8")
-                cmds.extend(f"{len(pkt) + 4:04x}".encode("ascii") + pkt)
-                results.append(dst)
-
-            cmds.extend(b"0000")
-
-            pack_data = b""
-            if rev_args:
-                pack_proc = subprocess.run(
-                    ["git", "pack-objects", "--stdout", "--revs"],
-                    input=("\n".join(rev_args) + "\n").encode("utf-8"),
-                    capture_output=True,
-                    check=True,
-                )
-                pack_data = pack_proc.stdout
-
-            full_payload = bytes(cmds) + pack_data
-            envelope = json.dumps(
-                {
-                    "service": "git-receive-pack",
-                    "git_path": client.full_git_path("/git-receive-pack"),
-                    "encoding": "base64",
-                    "body_base64": base64.b64encode(full_payload).decode("ascii"),
-                }
-            ).encode("utf-8")
-
-            resp = client.request(
-                "POST",
-                "/git-receive-pack",
-                {"service": "git-receive-pack", "encoding": "base64"},
-                body=envelope,
-                content_type="application/json",
-            )
-            text_resp = resp.decode("utf-8", errors="replace")
-            if "ERR " in text_resp:
-                log_err(text_resp.strip())
-                return 1
-
-            for dst in results:
-                ng_marker = f"ng {dst} "
-                if ng_marker in text_resp:
-                    reason = text_resp.split(ng_marker, 1)[1].splitlines()[0]
-                    sys.stdout.write(f"error {dst} {reason}\n")
-                else:
+            push_outcomes = execute_push(client, specs, remote_map)
+            for dst, err_reason in push_outcomes:
+                if err_reason is None:
                     sys.stdout.write(f"ok {dst}\n")
+                else:
+                    clean_reason = err_reason.splitlines()[0] if err_reason else "push failed"
+                    sys.stdout.write(f"error {dst} {clean_reason}\n")
             sys.stdout.write("\n")
             sys.stdout.flush()
 

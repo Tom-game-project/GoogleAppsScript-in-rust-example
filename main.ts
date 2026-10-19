@@ -110,7 +110,11 @@ global.do_get_test00 = function(): void {
 
 global.doPost = function(e: GoogleAppsScript.Events.DoPost): GoogleAppsScript.Content.TextOutput {
     attachWebAppUrl(e);
-    const r = rsDoPost(JSON.stringify(e)) as unknown as GasTextOutput;
+    const serialized = JSON.stringify(e);
+    if (e && e.postData) {
+        (e.postData as unknown as Record<string, unknown>).contents = "";
+    }
+    const r = rsDoPost(serialized) as unknown as GasTextOutput;
     return r.rawTextOutput;
 };
 
