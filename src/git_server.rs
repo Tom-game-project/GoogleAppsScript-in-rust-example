@@ -12,7 +12,6 @@
 //! - `GET  ?action=list_repos`                                     (JSON list of repositories in `GIT_DRIVE_FOLDER_ID`)
 //! - `POST ?action=create_repo`                                    (Create a new empty `<project_name>.git` repository in Drive)
 
-use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{Cursor, Write as IoWrite};
 
@@ -720,22 +719,22 @@ fn write_text_file(parent: &GasFolder, name: &str, content: &str, mime_type: &st
 /// - In-memory object and ref caching: Subsequent reads within the same request are served in 0ms.
 pub struct GasGitStore {
     pub repo: String,
-    repo_folder: RefCell<Option<GasFolder>>,
-    objects_folder: RefCell<Option<GasFolder>>,
-    head_cache: RefCell<Option<String>>,
-    refs_cache: RefCell<Option<BTreeMap<String, ObjectId>>>,
+    repo_folder: Option<GasFolder>,
+    objects_folder: Option<GasFolder>,
+    head_cache: Option<String>,
+    refs_cache: Option<BTreeMap<String, ObjectId>>,
     /// Inflated raw loose objects (`<kind> <size>\0<body>`), bounded to `MAX_OBJECT_CACHE_BYTES`.
-    object_cache: RefCell<BTreeMap<ObjectId, Vec<u8>>>,
-    object_cache_bytes: RefCell<usize>,
+    object_cache: BTreeMap<ObjectId, Vec<u8>>,
+    object_cache_bytes: usize,
     /// Compressed object strings (`z:<len>:<base64>` or `<base64>`) indexed from loaded bundles without eager decompression!
-    compressed_object_index: RefCell<BTreeMap<ObjectId, String>>,
-    blob_size_cache: RefCell<BTreeMap<ObjectId, usize>>,
-    known_existing_objects: RefCell<BTreeSet<ObjectId>>,
-    catalog_loaded: RefCell<bool>,
-    has_separated_blob_bundles: RefCell<bool>,
-    unloaded_commit_bundles: RefCell<Vec<GasFile>>,
-    unloaded_meta_bundles: RefCell<Vec<GasFile>>,
-    unloaded_blob_bundles: RefCell<Vec<GasFile>>,
+    compressed_object_index: BTreeMap<ObjectId, String>,
+    blob_size_cache: BTreeMap<ObjectId, usize>,
+    known_existing_objects: BTreeSet<ObjectId>,
+    catalog_loaded: bool,
+    has_separated_blob_bundles: bool,
+    unloaded_commit_bundles: Vec<GasFile>,
+    unloaded_meta_bundles: Vec<GasFile>,
+    unloaded_blob_bundles: Vec<GasFile>,
 }
 
 impl GasGitStore {
@@ -752,20 +751,20 @@ impl GasGitStore {
         if cache_get(&exists_key).as_deref() == Some("1") {
             return Ok(Self {
                 repo: normalized,
-                repo_folder: RefCell::new(None),
-                objects_folder: RefCell::new(None),
-                head_cache: RefCell::new(None),
-                refs_cache: RefCell::new(None),
-                object_cache: RefCell::new(BTreeMap::new()),
-                object_cache_bytes: RefCell::new(0),
-                compressed_object_index: RefCell::new(BTreeMap::new()),
-                blob_size_cache: RefCell::new(BTreeMap::new()),
-                known_existing_objects: RefCell::new(BTreeSet::new()),
-                catalog_loaded: RefCell::new(false),
-                has_separated_blob_bundles: RefCell::new(false),
-                unloaded_commit_bundles: RefCell::new(Vec::new()),
-                unloaded_meta_bundles: RefCell::new(Vec::new()),
-                unloaded_blob_bundles: RefCell::new(Vec::new()),
+                repo_folder: None,
+                objects_folder: None,
+                head_cache: None,
+                refs_cache: None,
+                object_cache: BTreeMap::new(),
+                object_cache_bytes: 0,
+                compressed_object_index: BTreeMap::new(),
+                blob_size_cache: BTreeMap::new(),
+                known_existing_objects: BTreeSet::new(),
+                catalog_loaded: false,
+                has_separated_blob_bundles: false,
+                unloaded_commit_bundles: Vec::new(),
+                unloaded_meta_bundles: Vec::new(),
+                unloaded_blob_bundles: Vec::new(),
             });
         }
 
@@ -785,25 +784,25 @@ impl GasGitStore {
 
         Ok(Self {
             repo: normalized,
-            repo_folder: RefCell::new(Some(repo_folder)),
-            objects_folder: RefCell::new(None),
-            head_cache: RefCell::new(None),
-            refs_cache: RefCell::new(None),
-            object_cache: RefCell::new(BTreeMap::new()),
-            object_cache_bytes: RefCell::new(0),
-            compressed_object_index: RefCell::new(BTreeMap::new()),
-            blob_size_cache: RefCell::new(BTreeMap::new()),
-            known_existing_objects: RefCell::new(BTreeSet::new()),
-            catalog_loaded: RefCell::new(false),
-            has_separated_blob_bundles: RefCell::new(false),
-            unloaded_commit_bundles: RefCell::new(Vec::new()),
-            unloaded_meta_bundles: RefCell::new(Vec::new()),
-            unloaded_blob_bundles: RefCell::new(Vec::new()),
+            repo_folder: Some(repo_folder),
+            objects_folder: None,
+            head_cache: None,
+            refs_cache: None,
+            object_cache: BTreeMap::new(),
+            object_cache_bytes: 0,
+            compressed_object_index: BTreeMap::new(),
+            blob_size_cache: BTreeMap::new(),
+            known_existing_objects: BTreeSet::new(),
+            catalog_loaded: false,
+            has_separated_blob_bundles: false,
+            unloaded_commit_bundles: Vec::new(),
+            unloaded_meta_bundles: Vec::new(),
+            unloaded_blob_bundles: Vec::new(),
         })
     }
 
-    fn with_repo_folder<R>(&self, f: impl FnOnce(&GasFolder) -> R) -> Result<R, String> {
-        if self.repo_folder.borrow().is_none() {
+    fn with_repo_folder<R>(&mut self, f: impl FnOnce(&GasFolder) -> R) -> Result<R, String> {
+        if self.repo_folder.is_none() {
             let (_root_id, root_folder) = open_root_drive_folder()?;
             let canonical_folder_name = format!("{}.git", self.repo);
             let folder = find_child_folder_by_name(&root_folder, &canonical_folder_name)
@@ -814,26 +813,32 @@ impl GasGitStore {
                         self.repo
                     )
                 })?;
-            *self.repo_folder.borrow_mut() = Some(folder);
+            self.repo_folder = Some(folder);
         }
-        let borrow = self.repo_folder.borrow();
-        Ok(f(borrow.as_ref().unwrap()))
+        let folder = self
+            .repo_folder
+            .as_ref()
+            .ok_or_else(|| "Repository folder unavailable".to_string())?;
+        Ok(f(folder))
     }
 
-    fn with_objects_folder<R>(&self, f: impl FnOnce(&GasFolder) -> R) -> Result<R, String> {
-        if self.objects_folder.borrow().is_none() {
+    fn with_objects_folder<R>(&mut self, f: impl FnOnce(&GasFolder) -> R) -> Result<R, String> {
+        if self.objects_folder.is_none() {
             let obj_folder = self.with_repo_folder(|repo_folder| {
                 find_child_folder_by_name(repo_folder, OBJECTS_FOLDER_NAME)
                     .unwrap_or_else(|| repo_folder.create_folder(OBJECTS_FOLDER_NAME))
             })?;
-            *self.objects_folder.borrow_mut() = Some(obj_folder);
+            self.objects_folder = Some(obj_folder);
         }
-        let borrow = self.objects_folder.borrow();
-        Ok(f(borrow.as_ref().unwrap()))
+        let folder = self
+            .objects_folder
+            .as_ref()
+            .ok_or_else(|| "Objects folder unavailable".to_string())?;
+        Ok(f(folder))
     }
 
-    fn ensure_meta_loaded(&self) {
-        if self.head_cache.borrow().is_some() && self.refs_cache.borrow().is_some() {
+    fn ensure_meta_loaded(&mut self) {
+        if self.head_cache.is_some() && self.refs_cache.is_some() {
             return;
         }
 
@@ -846,8 +851,8 @@ impl GasGitStore {
                         refs_map.insert(k, oid);
                     }
                 }
-                *self.head_cache.borrow_mut() = Some(meta.head);
-                *self.refs_cache.borrow_mut() = Some(refs_map);
+                self.head_cache = Some(meta.head);
+                self.refs_cache = Some(refs_map);
                 return;
             }
         }
@@ -889,8 +894,8 @@ impl GasGitStore {
             cache_put(&meta_key, &meta_json, CACHE_TTL_META_SECS);
         }
 
-        *self.head_cache.borrow_mut() = Some(head_raw);
-        *self.refs_cache.borrow_mut() = Some(refs_map);
+        self.head_cache = Some(head_raw);
+        self.refs_cache = Some(refs_map);
     }
 
     /// Create a new empty Git repository `<project_name>.git` inside the registered Google Drive folder (`GIT_DRIVE_FOLDER_ID`).
@@ -1051,7 +1056,7 @@ impl GasGitStore {
 
     /// Serialize any `gix_object::WriteTo` implementation into loose object format (`<kind> <size>\0<body>`),
     /// compute its SHA-1 `ObjectId` via `gix_object::compute_hash`, and persist it in the repository's Drive `objects/` folder.
-    pub fn write_object(&self, object: &dyn WriteTo) -> Result<ObjectId, String> {
+    pub fn write_object(&mut self, object: &dyn WriteTo) -> Result<ObjectId, String> {
         let mut body = Vec::with_capacity(object.size() as usize);
         object
             .write_to(&mut body)
@@ -1062,37 +1067,35 @@ impl GasGitStore {
     /// O(1) bounded in-memory object cache insertion.
     /// Never runs an O(N) scan; if `MAX_OBJECT_CACHE_BYTES` is reached, clears `object_cache` in O(1)
     /// (since `compressed_object_index` retains all compressed strings from loaded bundles in memory).
-    fn cache_loose_in_memory(&self, oid: ObjectId, loose_bytes: Vec<u8>) {
-        self.known_existing_objects.borrow_mut().insert(oid);
+    fn cache_loose_in_memory(&mut self, oid: ObjectId, loose_bytes: Vec<u8>) {
+        self.known_existing_objects.insert(oid);
         if let Ok((kind, size, _)) = gix_object::decode::loose_header(&loose_bytes) {
             if kind == ObjectKind::Blob {
-                self.blob_size_cache.borrow_mut().insert(oid, size as usize);
+                self.blob_size_cache.insert(oid, size as usize);
                 if loose_bytes.len() > 2 * 1024 * 1024 {
                     return;
                 }
             }
         }
-        let mut cache = self.object_cache.borrow_mut();
-        if cache.contains_key(&oid) {
+        if self.object_cache.contains_key(&oid) {
             return;
         }
-        let mut used = self.object_cache_bytes.borrow_mut();
-        if *used + loose_bytes.len() > MAX_OBJECT_CACHE_BYTES {
-            cache.clear();
-            *used = 0;
+        if self.object_cache_bytes + loose_bytes.len() > MAX_OBJECT_CACHE_BYTES {
+            self.object_cache.clear();
+            self.object_cache_bytes = 0;
         }
-        *used += loose_bytes.len();
-        cache.insert(oid, loose_bytes);
+        self.object_cache_bytes += loose_bytes.len();
+        self.object_cache.insert(oid, loose_bytes);
     }
 
     /// Compute SHA-1 `ObjectId` for `(kind, body)` and store the loose object inside `<repo>.git/objects/<oid>` on Google Drive.
-    pub fn write_raw_object(&self, kind: ObjectKind, body: &[u8]) -> Result<ObjectId, String> {
+    pub fn write_raw_object(&mut self, kind: ObjectKind, body: &[u8]) -> Result<ObjectId, String> {
         let oid = gix_object::compute_hash(HashKind::Sha1, kind, body)
             .map_err(|e| format!("Failed to compute SHA-1 hash: {}", e))?;
 
-        if self.object_cache.borrow().contains_key(&oid)
-            || self.compressed_object_index.borrow().contains_key(&oid)
-            || self.known_existing_objects.borrow().contains(&oid)
+        if self.object_cache.contains_key(&oid)
+            || self.compressed_object_index.contains_key(&oid)
+            || self.known_existing_objects.contains(&oid)
         {
             return Ok(oid);
         }
@@ -1115,15 +1118,13 @@ impl GasGitStore {
         })?;
 
         cache_put(&git_obj_cache_key(&oid_hex), &encoded, CACHE_TTL_IMMUTABLE_SECS);
-        self.compressed_object_index
-            .borrow_mut()
-            .insert(oid, encoded);
+        self.compressed_object_index.insert(oid, encoded);
         self.cache_loose_in_memory(oid, loose_bytes);
         Ok(oid)
     }
 
     fn record_pushed_commits_in_cache(
-        &self,
+        &mut self,
         new_commits: &[CommitItem],
         commit_bundle_names: &[String],
     ) {
@@ -1195,7 +1196,7 @@ impl GasGitStore {
     }
 
     fn flush_bundle_file(
-        &self,
+        &mut self,
         filename: String,
         bundle_map: &mut BTreeMap<String, String>,
     ) -> Result<(), String> {
@@ -1219,7 +1220,7 @@ impl GasGitStore {
     /// - `bundle_meta_<batch_id>.json`: `Tree` objects + `__sz__:<oid>` blob byte-sizes (enables directory browsing without loading blobs!).
     /// - `bundle_blob_<batch_id>.json`: `Blob` file contents, flushed every 4 MB while draining `objects`.
     pub fn write_objects_batch(
-        &self,
+        &mut self,
         batch_id: &str,
         mut objects: BTreeMap<ObjectId, (ObjectKind, Vec<u8>)>,
     ) -> Result<(), String> {
@@ -1245,9 +1246,9 @@ impl GasGitStore {
         let mut cache_batch_bytes: usize = 0;
 
         while let Some((oid, (kind, body))) = objects.pop_first() {
-            self.known_existing_objects.borrow_mut().insert(oid);
+            self.known_existing_objects.insert(oid);
             if kind == ObjectKind::Blob {
-                self.blob_size_cache.borrow_mut().insert(oid, body.len());
+                self.blob_size_cache.insert(oid, body.len());
             }
 
             let header = gix_object::encode::loose_header(kind, body.len() as u64);
@@ -1267,9 +1268,7 @@ impl GasGitStore {
             drop(loose_bytes);
 
             if kind != ObjectKind::Blob {
-                self.compressed_object_index
-                    .borrow_mut()
-                    .insert(oid, encoded.clone());
+                self.compressed_object_index.insert(oid, encoded.clone());
                 if encoded.len() <= 32_768
                     && cache_batch_bytes + encoded.len() <= 300_000
                     && cache_entries.len() < 40
@@ -1383,21 +1382,17 @@ impl GasGitStore {
 
     /// Batch-prefetch multiple Git objects from GAS `CacheService.getScriptCache().getAll(...)`
     /// in a single host call so directory rendering doesn't make N separate cache calls.
-    pub fn prefetch_objects(&self, oids: &[ObjectId]) {
-        let missing: Vec<(ObjectId, String)> = {
-            let cache = self.object_cache.borrow();
-            let comp_idx = self.compressed_object_index.borrow();
-            let blob_sizes = self.blob_size_cache.borrow();
-            oids.iter()
-                .filter(|&oid| {
-                    !cache.contains_key(oid)
-                        && !comp_idx.contains_key(oid)
-                        && !blob_sizes.contains_key(oid)
-                })
-                .take(100)
-                .map(|oid| (*oid, git_obj_cache_key(&oid.to_hex().to_string())))
-                .collect()
-        };
+    pub fn prefetch_objects(&mut self, oids: &[ObjectId]) {
+        let missing: Vec<(ObjectId, String)> = oids
+            .iter()
+            .filter(|&oid| {
+                !self.object_cache.contains_key(oid)
+                    && !self.compressed_object_index.contains_key(oid)
+                    && !self.blob_size_cache.contains_key(oid)
+            })
+            .take(100)
+            .map(|oid| (*oid, git_obj_cache_key(&oid.to_hex().to_string())))
+            .collect();
         if missing.is_empty() {
             return;
         }
@@ -1410,41 +1405,38 @@ impl GasGitStore {
             missing.into_iter().map(|(oid, k)| (k, oid)).collect();
         for (k, encoded) in found {
             if let Some(&oid) = key_to_oid.get(&k) {
-                self.known_existing_objects.borrow_mut().insert(oid);
-                self.compressed_object_index
-                    .borrow_mut()
-                    .insert(oid, encoded);
+                self.known_existing_objects.insert(oid);
+                self.compressed_object_index.insert(oid, encoded);
             }
         }
     }
 
-    pub fn read_blob_size(&self, oid: &ObjectId) -> Option<usize> {
-        if let Some(&sz) = self.blob_size_cache.borrow().get(oid) {
+    pub fn read_blob_size(&mut self, oid: &ObjectId) -> Option<usize> {
+        if let Some(&sz) = self.blob_size_cache.get(oid) {
             return Some(sz);
         }
-        if let Some(loose) = self.object_cache.borrow().get(oid) {
+        if let Some(loose) = self.object_cache.get(oid) {
             if let Ok((ObjectKind::Blob, size, _)) = gix_object::decode::loose_header(loose) {
                 return Some(size as usize);
             }
         }
         self.ensure_bundle_catalog_loaded();
         // Pop meta bundles on demand until `blob_size_cache` or `compressed_object_index` has `oid`
-        while !self.blob_size_cache.borrow().contains_key(oid)
-            && !self.compressed_object_index.borrow().contains_key(oid)
+        while !self.blob_size_cache.contains_key(oid)
+            && !self.compressed_object_index.contains_key(oid)
         {
-            let next_meta = self.unloaded_meta_bundles.borrow_mut().pop();
-            let Some(file) = next_meta else {
+            let Some(file) = self.unloaded_meta_bundles.pop() else {
                 break;
             };
             self.index_bundle_file(&file);
         }
-        if let Some(&sz) = self.blob_size_cache.borrow().get(oid) {
+        if let Some(&sz) = self.blob_size_cache.get(oid) {
             return Some(sz);
         }
         let loose = self.read_loose_object(oid)?;
         let (kind, size, _) = gix_object::decode::loose_header(&loose).ok()?;
         if kind == ObjectKind::Blob {
-            self.blob_size_cache.borrow_mut().insert(*oid, size as usize);
+            self.blob_size_cache.insert(*oid, size as usize);
             Some(size as usize)
         } else {
             None
@@ -1453,45 +1445,101 @@ impl GasGitStore {
 
     /// Index a single `bundle_commit_*.json`, `bundle_meta_*.json`, or legacy `bundle_*.json` file
     /// into `self.compressed_object_index` and `self.blob_size_cache` WITHOUT decompressing the objects!
-    fn index_bundle_file(&self, file: &GasFile) {
+    fn index_bundle_file(&mut self, file: &GasFile) {
         let json_str = file.get_blob().get_data_as_string(None);
         if let Ok(bundle) = serde_json::from_str::<BTreeMap<String, String>>(&json_str) {
             drop(json_str);
-            let mut comp_idx = self.compressed_object_index.borrow_mut();
-            let mut blob_sizes = self.blob_size_cache.borrow_mut();
-            let mut known = self.known_existing_objects.borrow_mut();
-
             for (hex_key, encoded_val) in bundle {
                 if let Some(oid_hex) = hex_key.strip_prefix(BLOB_SIZE_PREFIX) {
                     if let (Ok(b_oid), Ok(sz)) = (
                         ObjectId::from_hex(oid_hex.as_bytes()),
                         encoded_val.trim().parse::<usize>(),
                     ) {
-                        known.insert(b_oid);
-                        blob_sizes.insert(b_oid, sz);
+                        self.known_existing_objects.insert(b_oid);
+                        self.blob_size_cache.insert(b_oid, sz);
                     }
                     continue;
                 }
                 if let Ok(b_oid) = ObjectId::from_hex(hex_key.as_bytes()) {
-                    known.insert(b_oid);
-                    comp_idx.insert(b_oid, encoded_val);
+                    self.known_existing_objects.insert(b_oid);
+                    self.compressed_object_index.insert(b_oid, encoded_val);
                 }
             }
+        }
+    }
+
+    /// Scan a single bundle file during `load_all_commits`, extracting `Commit` objects via the
+    /// 16-byte stack header probe (`decode_if_commit_loose_object`) without retaining millions
+    /// of bytes of non-commit `Tree` strings in memory across dozens of bundles.
+    fn scan_bundle_for_commits(
+        &mut self,
+        file: &GasFile,
+        commits_by_oid: &mut BTreeMap<ObjectId, CommitItem>,
+        indexed_bundles: &mut BTreeSet<String>,
+    ) {
+        let fname = file.get_name();
+        let fid = file.get_id();
+        let bundle_tag = if fid.is_empty() {
+            fname.clone()
+        } else {
+            format!("{}#{}", fname, fid)
+        };
+        if indexed_bundles.contains(&bundle_tag) || indexed_bundles.contains(&fname) {
+            return;
+        }
+        let json_str = file.get_blob().get_data_as_string(None);
+        if let Ok(bundle) = serde_json::from_str::<BTreeMap<String, String>>(&json_str) {
+            drop(json_str);
+            for (hex_key, encoded_val) in bundle {
+                if let Some(oid_hex) = hex_key.strip_prefix(BLOB_SIZE_PREFIX) {
+                    if let (Ok(b_oid), Ok(sz)) = (
+                        ObjectId::from_hex(oid_hex.as_bytes()),
+                        encoded_val.trim().parse::<usize>(),
+                    ) {
+                        self.known_existing_objects.insert(b_oid);
+                        self.blob_size_cache.insert(b_oid, sz);
+                    }
+                    continue;
+                }
+                if let Ok(b_oid) = ObjectId::from_hex(hex_key.as_bytes()) {
+                    self.known_existing_objects.insert(b_oid);
+                    let mut is_commit = false;
+                    if !commits_by_oid.contains_key(&b_oid) {
+                        if let Some(loose) = decode_if_commit_loose_object(&encoded_val) {
+                            if let Some(item) = parse_commit_item_from_loose(b_oid, &loose) {
+                                commits_by_oid.insert(b_oid, item);
+                                is_commit = true;
+                            }
+                        }
+                    } else {
+                        is_commit = true;
+                    }
+                    // Always keep Commit objects and cap non-commit Tree strings in `compressed_object_index`
+                    // so scanning dozens of 4 MB `bundle_meta_*.json` files never bloats Wasm RAM!
+                    if is_commit || self.compressed_object_index.len() < 2_500 {
+                        self.compressed_object_index.insert(b_oid, encoded_val);
+                    }
+                }
+            }
+            indexed_bundles.insert(fname);
+            indexed_bundles.insert(bundle_tag);
         }
     }
 
     /// Catalog all bundle files in `objects/` in a single `get_files()` pass without downloading
     /// their contents or calling `get_last_updated()` per file!
     /// Reverses the collected lists so `.pop()` yields the first (newest) file returned by Drive's `getFiles()`.
-    pub fn ensure_bundle_catalog_loaded(&self) {
-        if *self.catalog_loaded.borrow() {
+    pub fn ensure_bundle_catalog_loaded(&mut self) {
+        if self.catalog_loaded {
             return;
         }
-        *self.catalog_loaded.borrow_mut() = true;
+        self.catalog_loaded = true;
 
         let mut commit_files: Vec<GasFile> = Vec::new();
         let mut meta_files: Vec<GasFile> = Vec::new();
         let mut blob_files: Vec<GasFile> = Vec::new();
+        let mut loose_files: Vec<(ObjectId, GasFile)> = Vec::new();
+        let mut found_separated_blobs = false;
 
         let _ = self.with_objects_folder(|objects_folder| {
             let iter = objects_folder.get_files();
@@ -1504,40 +1552,45 @@ impl GasGitStore {
                 if name.starts_with("bundle_commit_") && name.ends_with(".json") {
                     commit_files.push(file);
                 } else if name.starts_with("bundle_blob_") && name.ends_with(".json") {
-                    *self.has_separated_blob_bundles.borrow_mut() = true;
+                    found_separated_blobs = true;
                     blob_files.push(file);
                 } else if name.starts_with("bundle_") && name.ends_with(".json") {
                     meta_files.push(file);
                 } else if name.len() == 40 && name.chars().all(|c| c.is_ascii_hexdigit()) {
                     if let Ok(l_oid) = ObjectId::from_hex(name.as_bytes()) {
-                        if !self.compressed_object_index.borrow().contains_key(&l_oid) {
-                            let encoded_val = file.get_blob().get_data_as_string(None);
-                            self.known_existing_objects.borrow_mut().insert(l_oid);
-                            self.compressed_object_index
-                                .borrow_mut()
-                                .insert(l_oid, encoded_val);
-                        }
+                        loose_files.push((l_oid, file));
                     }
                 }
             }
         });
 
+        if found_separated_blobs {
+            self.has_separated_blob_bundles = true;
+        }
+        for (l_oid, file) in loose_files {
+            if !self.compressed_object_index.contains_key(&l_oid) {
+                let encoded_val = file.get_blob().get_data_as_string(None);
+                self.known_existing_objects.insert(l_oid);
+                self.compressed_object_index.insert(l_oid, encoded_val);
+            }
+        }
+
         commit_files.reverse();
         meta_files.reverse();
         blob_files.reverse();
 
-        *self.unloaded_commit_bundles.borrow_mut() = commit_files;
-        *self.unloaded_meta_bundles.borrow_mut() = meta_files;
-        *self.unloaded_blob_bundles.borrow_mut() = blob_files;
+        self.unloaded_commit_bundles = commit_files;
+        self.unloaded_meta_bundles = meta_files;
+        self.unloaded_blob_bundles = blob_files;
     }
 
     /// Ensure all commit & metadata bundles are indexed into `self.compressed_object_index`.
-    pub fn ensure_bundles_loaded(&self) {
+    pub fn ensure_bundles_loaded(&mut self) {
         self.ensure_bundle_catalog_loaded();
-        while let Some(file) = self.unloaded_commit_bundles.borrow_mut().pop() {
+        while let Some(file) = self.unloaded_commit_bundles.pop() {
             self.index_bundle_file(&file);
         }
-        while let Some(file) = self.unloaded_meta_bundles.borrow_mut().pop() {
+        while let Some(file) = self.unloaded_meta_bundles.pop() {
             self.index_bundle_file(&file);
         }
     }
@@ -1548,12 +1601,12 @@ impl GasGitStore {
     /// 3. GAS `CacheService.getScriptCache()` (~1-2ms, 0 `DriveApp` calls)
     /// 4. On-demand newest-first pop of `unloaded_commit_bundles` and `unloaded_meta_bundles` (stops as soon as `oid` is indexed!)
     /// 5. On-demand newest-first pop of `unloaded_blob_bundles` (ONLY if `oid` is a Blob, never for Commit/Tree lookups!)
-    pub fn read_loose_object(&self, oid: &ObjectId) -> Option<Vec<u8>> {
-        if let Some(cached) = self.object_cache.borrow().get(oid) {
+    pub fn read_loose_object(&mut self, oid: &ObjectId) -> Option<Vec<u8>> {
+        if let Some(cached) = self.object_cache.get(oid) {
             return Some(cached.clone());
         }
 
-        if let Some(encoded) = self.compressed_object_index.borrow().get(oid).cloned() {
+        if let Some(encoded) = self.compressed_object_index.get(oid).cloned() {
             if let Some(decoded) = decode_stored_loose_object(&encoded) {
                 self.cache_loose_in_memory(*oid, decoded.clone());
                 return Some(decoded);
@@ -1565,9 +1618,7 @@ impl GasGitStore {
 
         if let Some(encoded) = cache_get(&cache_key) {
             if let Some(decoded) = decode_stored_loose_object(&encoded) {
-                self.compressed_object_index
-                    .borrow_mut()
-                    .insert(*oid, encoded);
+                self.compressed_object_index.insert(*oid, encoded);
                 self.cache_loose_in_memory(*oid, decoded.clone());
                 return Some(decoded);
             }
@@ -1576,16 +1627,15 @@ impl GasGitStore {
         self.ensure_bundle_catalog_loaded();
 
         // If `oid` is not already known to be a separated Blob, check commit & meta bundles on-demand (newest first!)
-        if !self.blob_size_cache.borrow().contains_key(oid) {
-            while !self.compressed_object_index.borrow().contains_key(oid) {
-                let next_commit_bundle = self.unloaded_commit_bundles.borrow_mut().pop();
-                let Some(file) = next_commit_bundle else {
+        if !self.blob_size_cache.contains_key(oid) {
+            while !self.compressed_object_index.contains_key(oid) {
+                let Some(file) = self.unloaded_commit_bundles.pop() else {
                     break;
                 };
                 self.index_bundle_file(&file);
             }
 
-            if let Some(encoded) = self.compressed_object_index.borrow().get(oid).cloned() {
+            if let Some(encoded) = self.compressed_object_index.get(oid).cloned() {
                 if let Some(decoded) = decode_stored_loose_object(&encoded) {
                     if encoded.len() <= 32_768 {
                         cache_put(&cache_key, &encoded, CACHE_TTL_IMMUTABLE_SECS);
@@ -1595,17 +1645,16 @@ impl GasGitStore {
                 }
             }
 
-            while !self.compressed_object_index.borrow().contains_key(oid)
-                && !self.blob_size_cache.borrow().contains_key(oid)
+            while !self.compressed_object_index.contains_key(oid)
+                && !self.blob_size_cache.contains_key(oid)
             {
-                let next_meta_bundle = self.unloaded_meta_bundles.borrow_mut().pop();
-                let Some(file) = next_meta_bundle else {
+                let Some(file) = self.unloaded_meta_bundles.pop() else {
                     break;
                 };
                 self.index_bundle_file(&file);
             }
 
-            if let Some(encoded) = self.compressed_object_index.borrow().get(oid).cloned() {
+            if let Some(encoded) = self.compressed_object_index.get(oid).cloned() {
                 if let Some(decoded) = decode_stored_loose_object(&encoded) {
                     if encoded.len() <= 32_768 {
                         cache_put(&cache_key, &encoded, CACHE_TTL_IMMUTABLE_SECS);
@@ -1617,15 +1666,11 @@ impl GasGitStore {
         }
 
         // Only scan `unloaded_blob_bundles` if `oid` is a known Blob in `blob_size_cache` (or if no meta bundles recorded blob sizes)
-        let should_scan_blobs = self.blob_size_cache.borrow().contains_key(oid)
-            || !*self.has_separated_blob_bundles.borrow();
+        let should_scan_blobs =
+            self.blob_size_cache.contains_key(oid) || !self.has_separated_blob_bundles;
 
         if should_scan_blobs {
-            loop {
-                let next_blob_file = self.unloaded_blob_bundles.borrow_mut().pop();
-                let Some(file) = next_blob_file else {
-                    break;
-                };
+            while let Some(file) = self.unloaded_blob_bundles.pop() {
                 let json_str = file.get_blob().get_data_as_string(None);
                 let mut found_target: Option<Vec<u8>> = None;
                 if let Ok(bundle) = serde_json::from_str::<BTreeMap<String, String>>(&json_str) {
@@ -1634,7 +1679,7 @@ impl GasGitStore {
                         let Ok(b_oid) = ObjectId::from_hex(hex_key.as_bytes()) else {
                             continue;
                         };
-                        self.known_existing_objects.borrow_mut().insert(b_oid);
+                        self.known_existing_objects.insert(b_oid);
                         if b_oid == *oid {
                             if let Some(decoded) = decode_stored_loose_object(&encoded_val) {
                                 if encoded_val.len() <= 32_768 {
@@ -1644,11 +1689,9 @@ impl GasGitStore {
                                 found_target = Some(decoded);
                             }
                         } else if encoded_val.len() <= 65_536
-                            && self.compressed_object_index.borrow().len() < 8_000
+                            && self.compressed_object_index.len() < 8_000
                         {
-                            self.compressed_object_index
-                                .borrow_mut()
-                                .insert(b_oid, encoded_val);
+                            self.compressed_object_index.insert(b_oid, encoded_val);
                         }
                     }
                 }
@@ -1699,10 +1742,10 @@ impl GasGitStore {
     /// Load all commits reachable from `HEAD` and `refs` using:
     /// 1. Sharded + zlib-compressed `CacheService` (`gcommits_v2:<repo>`, ~2ms, 0 Drive calls).
     /// 2. Persistent `commits_cache.json` in `repo_folder` on Google Drive (~250ms, 1 Drive file read).
-    /// 3. Incremental / time-budgeted (`MAX_COLD_SCAN_SECS = 24s`) commit walk that never decompresses
+    /// 3. Incremental / time-budgeted (`MAX_COLD_SCAN_SECS`) commit walk that never decompresses
     ///    `Tree` or `Blob` objects and checkpoints progress to `commits_cache.json` so initial index
     ///    access on huge repositories never approaches GAS's 6-minute timeout.
-    pub fn load_all_commits(&self) -> Vec<CommitItem> {
+    pub fn load_all_commits(&mut self) -> Vec<CommitItem> {
         let start_secs = current_unix_secs();
         let head_sym = self
             .head_symref()
@@ -1811,24 +1854,18 @@ impl GasGitStore {
         }
 
         // 2. Also include any commits already in `self.compressed_object_index` or `self.object_cache` (e.g. written in this request)
-        {
-            let obj_cache = self.object_cache.borrow();
-            for (&oid, loose) in obj_cache.iter() {
-                if !commits_by_oid.contains_key(&oid) && loose.starts_with(b"commit ") {
-                    if let Some(item) = parse_commit_item_from_loose(oid, loose) {
-                        commits_by_oid.insert(oid, item);
-                    }
+        for (&oid, loose) in self.object_cache.iter() {
+            if !commits_by_oid.contains_key(&oid) && loose.starts_with(b"commit ") {
+                if let Some(item) = parse_commit_item_from_loose(oid, loose) {
+                    commits_by_oid.insert(oid, item);
                 }
             }
         }
-        {
-            let comp_idx = self.compressed_object_index.borrow();
-            for (&oid, encoded) in comp_idx.iter() {
-                if !commits_by_oid.contains_key(&oid) {
-                    if let Some(loose) = decode_if_commit_loose_object(encoded) {
-                        if let Some(item) = parse_commit_item_from_loose(oid, &loose) {
-                            commits_by_oid.insert(oid, item);
-                        }
+        for (&oid, encoded) in self.compressed_object_index.iter() {
+            if !commits_by_oid.contains_key(&oid) {
+                if let Some(loose) = decode_if_commit_loose_object(encoded) {
+                    if let Some(item) = parse_commit_item_from_loose(oid, &loose) {
+                        commits_by_oid.insert(oid, item);
                     }
                 }
             }
@@ -1839,73 +1876,12 @@ impl GasGitStore {
 
         let mut hit_time_budget = false;
 
-        // Helper closure to scan a single bundle file, extracting ONLY Commit objects via the
-        // 1-microsecond 16-byte header probe (`decode_if_commit_loose_object`) without retaining
-        // tens of megabytes of non-commit `Tree` strings in memory across 40+ bundles.
-        let scan_bundle_for_commits =
-            |file: &GasFile,
-             commits_by_oid: &mut BTreeMap<ObjectId, CommitItem>,
-             indexed_bundles: &mut BTreeSet<String>| {
-                let fname = file.get_name();
-                let fid = file.get_id();
-                let bundle_tag = if fid.is_empty() {
-                    fname.clone()
-                } else {
-                    format!("{}#{}", fname, fid)
-                };
-                if indexed_bundles.contains(&bundle_tag) || indexed_bundles.contains(&fname) {
-                    return;
-                }
-                let json_str = file.get_blob().get_data_as_string(None);
-                if let Ok(bundle) = serde_json::from_str::<BTreeMap<String, String>>(&json_str) {
-                    drop(json_str);
-                    let mut comp_idx = self.compressed_object_index.borrow_mut();
-                    let mut blob_sizes = self.blob_size_cache.borrow_mut();
-                    let mut known = self.known_existing_objects.borrow_mut();
-
-                    for (hex_key, encoded_val) in bundle {
-                        if let Some(oid_hex) = hex_key.strip_prefix(BLOB_SIZE_PREFIX) {
-                            if let (Ok(b_oid), Ok(sz)) = (
-                                ObjectId::from_hex(oid_hex.as_bytes()),
-                                encoded_val.trim().parse::<usize>(),
-                            ) {
-                                known.insert(b_oid);
-                                blob_sizes.insert(b_oid, sz);
-                            }
-                            continue;
-                        }
-                        if let Ok(b_oid) = ObjectId::from_hex(hex_key.as_bytes()) {
-                            known.insert(b_oid);
-                            let mut is_commit = false;
-                            if !commits_by_oid.contains_key(&b_oid) {
-                                if let Some(loose) = decode_if_commit_loose_object(&encoded_val) {
-                                    if let Some(item) = parse_commit_item_from_loose(b_oid, &loose)
-                                    {
-                                        commits_by_oid.insert(b_oid, item);
-                                        is_commit = true;
-                                    }
-                                }
-                            } else {
-                                is_commit = true;
-                            }
-                            // Always keep Commit objects and cap non-commit Tree strings in `comp_idx`
-                            // so scanning dozens of 4 MB `bundle_meta_*.json` files never bloats Wasm RAM!
-                            if is_commit || comp_idx.len() < 2_500 {
-                                comp_idx.insert(b_oid, encoded_val);
-                            }
-                        }
-                    }
-                    indexed_bundles.insert(fname);
-                    indexed_bundles.insert(bundle_tag);
-                }
-            };
-
         // First scan compact `bundle_commit_*.json` files (contain only Commit & Tag objects!)
-        while let Some(file) = self.unloaded_commit_bundles.borrow_mut().pop() {
-            scan_bundle_for_commits(&file, &mut commits_by_oid, &mut indexed_bundles);
+        while let Some(file) = self.unloaded_commit_bundles.pop() {
+            self.scan_bundle_for_commits(&file, &mut commits_by_oid, &mut indexed_bundles);
             if !commits_by_oid.is_empty()
                 && current_unix_secs().saturating_sub(start_secs) >= MAX_COLD_SCAN_SECS
-                && !self.unloaded_commit_bundles.borrow().is_empty()
+                && !self.unloaded_commit_bundles.is_empty()
             {
                 hit_time_budget = true;
                 break;
@@ -1914,13 +1890,13 @@ impl GasGitStore {
 
         // Next, if the commit graph from HEAD/refs is not yet complete in `commits_by_oid`,
         // scan unindexed `bundle_meta_*.json` / `bundle_*.json` files.
-        // Iterate without discarding `GasFile` handles so any subsequent `Tree` lookup in the same request still works!
+        // Retain `GasFile` handles so any subsequent `Tree` lookup in the same request still works!
         if !hit_time_budget && !is_graph_complete(&commits_by_oid) {
             let mut retained_meta: Vec<GasFile> = Vec::new();
-            while let Some(file) = self.unloaded_meta_bundles.borrow_mut().pop() {
-                scan_bundle_for_commits(&file, &mut commits_by_oid, &mut indexed_bundles);
+            while let Some(file) = self.unloaded_meta_bundles.pop() {
+                self.scan_bundle_for_commits(&file, &mut commits_by_oid, &mut indexed_bundles);
                 let graph_done = is_graph_complete(&commits_by_oid);
-                let more_remaining = !self.unloaded_meta_bundles.borrow().is_empty();
+                let more_remaining = !self.unloaded_meta_bundles.is_empty();
                 retained_meta.push(file);
                 if graph_done {
                     break;
@@ -1933,9 +1909,8 @@ impl GasGitStore {
                     break;
                 }
             }
-            let mut meta_borrow = self.unloaded_meta_bundles.borrow_mut();
             while let Some(f) = retained_meta.pop() {
-                meta_borrow.push(f);
+                self.unloaded_meta_bundles.push(f);
             }
         }
 
@@ -2009,7 +1984,7 @@ impl GasGitStore {
     }
 
     /// Read and decode `(ObjectKind, Vec<u8>)` (body without loose header) for `oid`.
-    pub fn read_raw_object(&self, oid: &ObjectId) -> Result<Option<(ObjectKind, Vec<u8>)>, String> {
+    pub fn read_raw_object(&mut self, oid: &ObjectId) -> Result<Option<(ObjectKind, Vec<u8>)>, String> {
         let Some(loose) = self.read_loose_object(oid) else {
             return Ok(None);
         };
@@ -2028,22 +2003,22 @@ impl GasGitStore {
     }
 
     /// List all references (`refs/...`) in sorted order.
-    pub fn list_refs(&self) -> BTreeMap<String, ObjectId> {
+    pub fn list_refs(&mut self) -> BTreeMap<String, ObjectId> {
         self.ensure_meta_loaded();
-        self.refs_cache.borrow().clone().unwrap_or_default()
+        self.refs_cache.clone().unwrap_or_default()
     }
 
     /// Return the symbolic target of `HEAD` (e.g. `Some("refs/heads/main")`) if `HEAD` is a symref.
-    pub fn head_symref(&self) -> Option<String> {
+    pub fn head_symref(&mut self) -> Option<String> {
         self.ensure_meta_loaded();
-        let head_val = self.head_cache.borrow().clone().unwrap_or_default();
+        let head_val = self.head_cache.clone().unwrap_or_default();
         head_val
             .strip_prefix("ref:")
             .map(|target| target.trim().to_string())
     }
 
     /// Resolve a reference name (`HEAD` or `refs/...`) to its `ObjectId`.
-    pub fn resolve_ref(&self, name: &str) -> Option<ObjectId> {
+    pub fn resolve_ref(&mut self, name: &str) -> Option<ObjectId> {
         self.ensure_meta_loaded();
         if name == "HEAD" {
             if let Some(sym) = self.head_symref() {
@@ -2051,24 +2026,22 @@ impl GasGitStore {
                     return Some(oid);
                 }
             }
-            let head_raw = self.head_cache.borrow().clone().unwrap_or_default();
+            let head_raw = self.head_cache.clone().unwrap_or_default();
             if let Ok(oid) = ObjectId::from_hex(head_raw.trim().as_bytes()) {
                 return Some(oid);
             }
             return self
                 .refs_cache
-                .borrow()
                 .as_ref()
                 .and_then(|m| m.values().next().copied());
         }
         self.refs_cache
-            .borrow()
             .as_ref()
             .and_then(|m| m.get(name).copied())
     }
 
     /// Update or delete a reference and persist `refs.json` (and `HEAD` if needed) in Google Drive.
-    pub fn update_ref(&self, ref_name: &str, new_oid: &ObjectId) -> Result<(), String> {
+    pub fn update_ref(&mut self, ref_name: &str, new_oid: &ObjectId) -> Result<(), String> {
         gix_validate::reference::name(ref_name.as_bytes().as_bstr())
             .map_err(|e| format!("Invalid reference name '{}': {}", ref_name, e))?;
 
@@ -2076,8 +2049,7 @@ impl GasGitStore {
         let current_sym = self.head_symref();
 
         let should_update_head = {
-            let mut refs_opt = self.refs_cache.borrow_mut();
-            let refs = refs_opt.get_or_insert_with(BTreeMap::new);
+            let refs = self.refs_cache.get_or_insert_with(BTreeMap::new);
             if new_oid.is_null() {
                 refs.remove(ref_name);
                 false
@@ -2093,7 +2065,6 @@ impl GasGitStore {
 
         let serialized_map: BTreeMap<String, String> = self
             .refs_cache
-            .borrow()
             .as_ref()
             .map(|m| {
                 m.iter()
@@ -2104,11 +2075,17 @@ impl GasGitStore {
         let json = serde_json::to_string_pretty(&serialized_map)
             .map_err(|e| format!("Failed to serialize refs.json: {}", e))?;
 
+        let new_head_opt = if should_update_head {
+            let new_head = format!("ref: {}", ref_name);
+            self.head_cache = Some(new_head.clone());
+            Some(new_head)
+        } else {
+            None
+        };
+
         self.with_repo_folder(|repo_folder| {
             write_text_file(repo_folder, REFS_FILE_NAME, &json, "application/json");
-            if should_update_head {
-                let new_head = format!("ref: {}", ref_name);
-                *self.head_cache.borrow_mut() = Some(new_head.clone());
+            if let Some(new_head) = new_head_opt {
                 write_text_file(
                     repo_folder,
                     HEAD_FILE_NAME,
@@ -2120,7 +2097,6 @@ impl GasGitStore {
 
         let head_str = self
             .head_cache
-            .borrow()
             .clone()
             .unwrap_or_else(|| format!("ref: {}", DEFAULT_BRANCH));
         if let Ok(meta_json) = serde_json::to_string(&CachedRepoMeta {
@@ -2149,7 +2125,7 @@ pub fn handle_info_refs(service: &str, project_name: &str) -> Result<Vec<u8>, St
         ));
     }
 
-    let store = GasGitStore::open(project_name)?;
+    let mut store = GasGitStore::open(project_name)?;
     let refs = store.list_refs();
     let head_sym = store
         .head_symref()
@@ -2203,7 +2179,7 @@ pub fn handle_info_refs(service: &str, project_name: &str) -> Result<Vec<u8>, St
 
 /// Handle `POST /<project_name>.git/git-upload-pack` (`git fetch`, `git clone`, `git pull`).
 pub fn handle_upload_pack(req_body: &[u8], project_name: &str) -> Result<Vec<u8>, String> {
-    let store = GasGitStore::open(project_name)?;
+    let mut store = GasGitStore::open(project_name)?;
 
     let mut wants: Vec<ObjectId> = Vec::new();
     let mut haves: BTreeSet<ObjectId> = BTreeSet::new();
@@ -2280,7 +2256,7 @@ pub fn handle_upload_pack(req_body: &[u8], project_name: &str) -> Result<Vec<u8>
             if first_common_have.is_none() {
                 first_common_have = Some(*have_oid);
             }
-            collect_reachable_objects(&store, *have_oid, &mut excluded_oids)?;
+            collect_reachable_objects(&mut store, *have_oid, &mut excluded_oids)?;
         }
     }
 
@@ -2379,7 +2355,7 @@ pub fn handle_upload_pack(req_body: &[u8], project_name: &str) -> Result<Vec<u8>
 }
 
 fn collect_reachable_objects(
-    store: &GasGitStore,
+    store: &mut GasGitStore,
     root: ObjectId,
     visited: &mut BTreeSet<ObjectId>,
 ) -> Result<(), String> {
@@ -2502,7 +2478,7 @@ pub fn handle_receive_pack(req_body: &[u8], project_name: &str) -> Result<Vec<u8
     let lock = gas_lock_service::get_script_lock();
     let _locked = lock.try_lock(10_000);
 
-    let store = match GasGitStore::open(project_name) {
+    let mut store = match GasGitStore::open(project_name) {
         Ok(s) => s,
         Err(e) => {
             lock.release_lock();
@@ -2570,7 +2546,7 @@ pub fn handle_receive_pack(req_body: &[u8], project_name: &str) -> Result<Vec<u8
     };
 
     let unpack_status = if !pack_slice.is_empty() {
-        match unpack_pack_v2(pack_slice, &store) {
+        match unpack_pack_v2(pack_slice, &mut store) {
             Ok(_count) => "unpack ok".to_string(),
             Err(err) => format!("unpack {}", err),
         }
@@ -2640,7 +2616,7 @@ pub fn handle_receive_pack(req_body: &[u8], project_name: &str) -> Result<Vec<u8
 
 /// Unpack a Git `PACK` v2 stream using `gix_zlib::Inflate`, `gix_hash`, and `gix_object`.
 /// Stores all unpacked objects in a single batch file in Google Drive (`write_objects_batch`).
-fn unpack_pack_v2(pack: &[u8], store: &GasGitStore) -> Result<usize, String> {
+fn unpack_pack_v2(pack: &[u8], store: &mut GasGitStore) -> Result<usize, String> {
     if pack.len() < 32 {
         return Err(format!("pack too short ({} bytes)", pack.len()));
     }
@@ -2654,7 +2630,8 @@ fn unpack_pack_v2(pack: &[u8], store: &GasGitStore) -> Result<usize, String> {
     let num_objects = u32::from_be_bytes([pack[8], pack[9], pack[10], pack[11]]) as usize;
 
     let data_end = pack.len() - 20;
-    let expected_trailer = ObjectId::from_bytes_or_panic(&pack[data_end..]);
+    let expected_trailer = ObjectId::try_from(&pack[data_end..])
+        .map_err(|e| format!("invalid pack trailer: {}", e))?;
     let mut hasher = gix_hash::hasher(HashKind::Sha1);
     hasher.update(&pack[..data_end]);
     let actual_trailer = hasher
@@ -2705,8 +2682,7 @@ fn unpack_pack_v2(pack: &[u8], store: &GasGitStore) -> Result<usize, String> {
                     1 => ObjectKind::Commit,
                     2 => ObjectKind::Tree,
                     3 => ObjectKind::Blob,
-                    4 => ObjectKind::Tag,
-                    _ => unreachable!(),
+                    _ => ObjectKind::Tag,
                 };
                 let (decompressed, consumed) =
                     inflate_pack_entry(&mut inflate, &pack[pos..data_end], uncompressed_size)?;
@@ -2765,7 +2741,8 @@ fn unpack_pack_v2(pack: &[u8], store: &GasGitStore) -> Result<usize, String> {
                 if pos + 20 > data_end {
                     return Err("truncated REF_DELTA base OID".to_string());
                 }
-                let base_oid = ObjectId::from_bytes_or_panic(&pack[pos..pos + 20]);
+                let base_oid = ObjectId::try_from(&pack[pos..pos + 20])
+                    .map_err(|e| format!("invalid REF_DELTA base OID: {}", e))?;
                 pos += 20;
 
                 let (delta_bytes, consumed) =
@@ -3048,7 +3025,7 @@ pub fn get_commits_json(project_name: &str) -> String {
         }
     };
 
-    let store = match GasGitStore::open(&normalized) {
+    let mut store = match GasGitStore::open(&normalized) {
         Ok(s) => s,
         Err(e) => {
             let res = RepoCommitsResponse {
@@ -3137,7 +3114,7 @@ pub struct CommitDetailResponse {
 }
 
 fn collect_tree_snapshot(
-    store: &GasGitStore,
+    store: &mut GasGitStore,
     tree_oid: ObjectId,
     prefix: &str,
     entries_out: &mut Vec<CommitTreeEntry>,
@@ -3395,7 +3372,7 @@ pub fn get_commit_detail_json(project_name: &str, commit_oid_str: &str) -> Strin
         }
     };
 
-    let store = match GasGitStore::open(&normalized) {
+    let mut store = match GasGitStore::open(&normalized) {
         Ok(s) => s,
         Err(e) => {
             let res = CommitDetailResponse {
@@ -3530,7 +3507,7 @@ pub fn get_commit_detail_json(project_name: &str, commit_oid_str: &str) -> Strin
     let mut tree_entries = Vec::new();
     let mut current_blobs: BTreeMap<String, (ObjectId, Vec<u8>)> = BTreeMap::new();
     collect_tree_snapshot(
-        &store,
+        &mut store,
         tree_oid,
         "",
         &mut tree_entries,
@@ -3544,7 +3521,7 @@ pub fn get_commit_detail_json(project_name: &str, commit_oid_str: &str) -> Strin
             if let Ok(ObjectRef::Commit(parent_commit)) = ObjectRef::from_loose(&p_loose) {
                 let mut dummy_entries = Vec::new();
                 collect_tree_snapshot(
-                    &store,
+                    &mut store,
                     parent_commit.tree(),
                     "",
                     &mut dummy_entries,
@@ -4072,10 +4049,10 @@ pub fn handle_do_post(event: &mut GasDoPostEvent) -> GasTextOutput {
 /// Abstract reader over a Git repository so `resolve_commit_browser_request`
 /// works identically across Google Drive (`GasGitStore`) and in-memory unit tests.
 pub trait GitObjectReader {
-    fn read_loose(&self, oid: &ObjectId) -> Option<Vec<u8>>;
-    fn list_commits(&self) -> Vec<CommitItem>;
-    fn prefetch_objects(&self, _oids: &[ObjectId]) {}
-    fn read_blob_size(&self, oid: &ObjectId) -> Option<usize> {
+    fn read_loose(&mut self, oid: &ObjectId) -> Option<Vec<u8>>;
+    fn list_commits(&mut self) -> Vec<CommitItem>;
+    fn prefetch_objects(&mut self, _oids: &[ObjectId]) {}
+    fn read_blob_size(&mut self, oid: &ObjectId) -> Option<usize> {
         let loose = self.read_loose(oid)?;
         let (kind, size, _) = gix_object::decode::loose_header(&loose).ok()?;
         if kind == ObjectKind::Blob {
@@ -4087,19 +4064,19 @@ pub trait GitObjectReader {
 }
 
 impl GitObjectReader for GasGitStore {
-    fn read_loose(&self, oid: &ObjectId) -> Option<Vec<u8>> {
+    fn read_loose(&mut self, oid: &ObjectId) -> Option<Vec<u8>> {
         self.read_loose_object(oid)
     }
 
-    fn list_commits(&self) -> Vec<CommitItem> {
+    fn list_commits(&mut self) -> Vec<CommitItem> {
         self.load_all_commits()
     }
 
-    fn prefetch_objects(&self, oids: &[ObjectId]) {
+    fn prefetch_objects(&mut self, oids: &[ObjectId]) {
         GasGitStore::prefetch_objects(self, oids);
     }
 
-    fn read_blob_size(&self, oid: &ObjectId) -> Option<usize> {
+    fn read_blob_size(&mut self, oid: &ObjectId) -> Option<usize> {
         GasGitStore::read_blob_size(self, oid)
     }
 }
@@ -4287,7 +4264,7 @@ pub fn render_not_found_error_document(
 /// Uses `?page=1`, `?page=2`, ... query parameters for commit list pagination so page numbers never
 /// collide with directory or file names in the repository.
 pub fn resolve_commit_browser_request(
-    reader: &dyn GitObjectReader,
+    reader: &mut dyn GitObjectReader,
     project_name: &str,
     commit_ref: &str,
     subpath: &[String],
@@ -4704,7 +4681,7 @@ pub fn resolve_commit_browser_request(
     };
     let root_tree_oid = commit_obj.tree();
 
-    let render_directory = |tree_oid: ObjectId, dir_subpath: &[String]| -> CommitBrowserOutput {
+    let render_directory = |reader: &mut dyn GitObjectReader, tree_oid: ObjectId, dir_subpath: &[String]| -> CommitBrowserOutput {
         let Some(tree_loose) = reader.read_loose(&tree_oid) else {
             return render_404(
                 &format!("/{}.git/{}", project_name, resolved_oid_str),
@@ -4851,7 +4828,7 @@ pub fn resolve_commit_browser_request(
     };
 
     if subpath.is_empty() {
-        return render_directory(root_tree_oid, &[]);
+        return render_directory(reader, root_tree_oid, &[]);
     }
 
     let full_req_display = format!(
@@ -4991,7 +4968,7 @@ pub fn resolve_commit_browser_request(
     };
 
     match target_kind {
-        ObjectKind::Tree => render_directory(target_oid, subpath),
+        ObjectKind::Tree => render_directory(reader, target_oid, subpath),
         ObjectKind::Blob => {
             if trailing_slash {
                 return render_404(
@@ -5053,7 +5030,7 @@ fn handle_commit_browser_get(
         .filter(|s| !s.trim().is_empty())
         .or_else(get_web_app_exec_url);
 
-    let store = match GasGitStore::open(project_name) {
+    let mut store = match GasGitStore::open(project_name) {
         Ok(s) => s,
         Err(err) => {
             let title = "404 Not Found - Repository Does Not Exist (Not a Raw File)";
@@ -5086,7 +5063,7 @@ fn handle_commit_browser_get(
     };
 
     let output = resolve_commit_browser_request(
-        &store,
+        &mut store,
         project_name,
         commit_ref,
         subpath,
@@ -5273,11 +5250,11 @@ mod tests {
     }
 
     impl GitObjectReader for DummyReader {
-        fn read_loose(&self, oid: &ObjectId) -> Option<Vec<u8>> {
+        fn read_loose(&mut self, oid: &ObjectId) -> Option<Vec<u8>> {
             self.objects.get(oid).cloned()
         }
 
-        fn list_commits(&self) -> Vec<CommitItem> {
+        fn list_commits(&mut self) -> Vec<CommitItem> {
             self.commits.clone()
         }
     }
@@ -5308,7 +5285,7 @@ mod tests {
                 refs: vec![],
             },
         ];
-        let reader = DummyReader {
+        let mut reader = DummyReader {
             commits,
             objects: BTreeMap::new(),
         };
@@ -5317,7 +5294,7 @@ mod tests {
 
         // Accessing `exec/my-repo.git` (`commit_ref = ""`) renders commit hash list with full `https://script.google.com/.../exec/...` hrefs
         let repo_root_out = resolve_commit_browser_request(
-            &reader,
+            &mut reader,
             "my-repo",
             "",
             &[],
@@ -5339,7 +5316,7 @@ mod tests {
 
         // Ambiguous prefix `a1b2` matches both commits (and redirects to `?page=1` when page_size=1)
         let ambig_redir = resolve_commit_browser_request(
-            &reader,
+            &mut reader,
             "my-repo",
             "a1b2",
             &[],

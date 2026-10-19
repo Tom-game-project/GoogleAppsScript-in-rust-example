@@ -143,18 +143,20 @@ impl Guest for Component {
                 drive_app::gas_drive_app::get_storage_used()
             ));
 
-            let file = drive_app::gas_drive_app::get_file_by_id(&value)
-                .expect(&format!("no such file {}", value));
-            logger::log(&format!("file name: {}", &file.get_name()));
+            if let Some(file) = drive_app::gas_drive_app::get_file_by_id(&value) {
+                logger::log(&format!("file name: {}", &file.get_name()));
 
-            let blob = file.get_blob();
-            let mut buf = blob.get_bytes();
+                let blob = file.get_blob();
+                let mut buf = blob.get_bytes();
 
-            logger::log(&format!("byte {:?}", buf));
-            buf.push(10);
-            blob.set_bytes(&buf);
-            file.set_content(&blob.get_data_as_string(None));
-            logger::log("Success to set file");
+                logger::log(&format!("byte {:?}", buf));
+                buf.push(10);
+                blob.set_bytes(&buf);
+                file.set_content(&blob.get_data_as_string(None));
+                logger::log("Success to set file");
+            } else {
+                logger::log(&format!("no such file {}", value));
+            }
         } else {
             logger::log(&format!("no such key: {}", key));
         }
