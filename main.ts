@@ -53,26 +53,10 @@ interface GasGlobal {
 
 declare const global: GasGlobal;
 
-function getWebAppUrl(): string | undefined {
-    try {
-        if (typeof ScriptApp !== "undefined" && typeof ScriptApp.getService === "function") {
-            const url = ScriptApp.getService().getUrl();
-            if (url && url.trim() !== "") {
-                return url.trim();
-            }
-        }
-    } catch {
-        // Ignore if ScriptApp.getService() is unavailable
-    }
-    return undefined;
-}
-
 global.doGet = function(
     e: GoogleAppsScript.Events.DoGet,
 ): GoogleAppsScript.Content.TextOutput | GoogleAppsScript.HTML.HtmlOutput {
-    const webAppUrl = getWebAppUrl();
-    const payload = webAppUrl ? Object.assign({}, e, { webAppUrl }) : e;
-    const r = rsDoGet(JSON.stringify(payload)) as unknown as WitWebResponse | GasTextOutput;
+    const r = rsDoGet(JSON.stringify(e)) as unknown as WitWebResponse | GasTextOutput;
     if ("tag" in r) {
         if (r.tag === "html") {
             return r.val.rawHtmlOutput;

@@ -3,6 +3,7 @@ import {
 	AuthMode,
 	fromWitAuthMode,
 	GasAuthorizationInfo,
+	GasService,
 	GasTrigger,
 	unwrapTrigger,
 } from "./gas-script-types";
@@ -29,6 +30,17 @@ export function getProjectTriggers(): GasTrigger[] {
 
 export function getScriptId(): string {
 	return ScriptApp.getScriptId();
+}
+
+export function getService(): GasService {
+	try {
+		if (typeof ScriptApp !== "undefined" && typeof ScriptApp.getService === "function") {
+			return new GasService(ScriptApp.getService());
+		}
+	} catch {
+		// Fall through if ScriptApp.getService() is unavailable
+	}
+	return new GasService(null);
 }
 
 export function invalidateAuth(): void {

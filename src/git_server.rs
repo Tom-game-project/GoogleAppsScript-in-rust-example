@@ -45,6 +45,7 @@ use crate::bindings::gas::cache_service::gas_cache_service;
 use crate::bindings::gas::lock_service::gas_lock_service;
 use crate::bindings::gas::logger::logger;
 use crate::bindings::gas::property::properties_service;
+use crate::bindings::gas::script_app::gas_script_app;
 
 pub const ENV_GIT_DRIVE_FOLDER_ID: &str = "GIT_DRIVE_FOLDER_ID";
 const CACHE_TTL_IMMUTABLE_SECS: i32 = 21_600; // 6 hours (maximum GAS CacheService TTL)
@@ -89,10 +90,104 @@ fn decode_stored_loose_object(encoded: &str) -> Option<Vec<u8>> {
     }
 }
 
+/// Fast 16-byte stack header probe: checks if a stored object (`z:<len>:<base64>` or `<base64>`)
+/// starts with `b"commit "` by decoding only the first 64 Base64 chars (48 bytes) and inflating
+/// at most 16 bytes on the stack. Skips `tree` and `blob` objects in ~1 microsecond with zero heap allocation!
+fn decode_if_commit_loose_object(encoded: &str) -> Option<Vec<u8>> {
+    let trimmed = encoded.trim();
+    if let Some(rest) = trimmed.strip_prefix("z:") {
+        let (len_str, b64_part) = rest.split_once(':')?;
+        let expected_size = len_str.parse::<usize>().ok()?;
+        if expected_size < 16 {
+            return None;
+        }
+        let b64_trimmed = b64_part.trim().as_bytes();
+        let probe_len = (b64_trimmed.len() & !3).min(64);
+        if probe_len >= 4 {
+            if let Ok(probe_comp) = BASE64_STANDARD.decode(&b64_trimmed[..probe_len]) {
+                let mut inflate = Inflate::default();
+                let mut probe_out = [0u8; 16];
+                if let Ok((_status, _consumed, produced)) =
+                    inflate.once(&probe_comp, &mut probe_out)
+                {
+                    if produced >= 7 && &probe_out[..7] != b"commit " {
+                        return None;
+                    }
+                }
+            }
+        }
+        let compressed = BASE64_STANDARD.decode(b64_trimmed).ok()?;
+        let mut inflate = Inflate::default();
+        let (decompressed, _) = inflate_pack_entry(&mut inflate, &compressed, expected_size).ok()?;
+        if decompressed.starts_with(b"commit ") {
+            Some(decompressed)
+        } else {
+            None
+        }
+    } else {
+        let bytes = BASE64_STANDARD.decode(trimmed.as_bytes()).ok()?;
+        if bytes.starts_with(b"commit ") {
+            Some(bytes)
+        } else {
+            None
+        }
+    }
+}
+
+fn parse_commit_item_from_loose(oid: ObjectId, loose: &[u8]) -> Option<CommitItem> {
+    let Ok(ObjectRef::Commit(c)) = ObjectRef::from_loose(loose) else {
+        return None;
+    };
+    let parents: Vec<String> = c.parents().map(|p| p.to_hex().to_string()).collect();
+    let (author_name, author_email) = match c.author().or_else(|_| c.committer()) {
+        Ok(sig) => (
+            sig.name.to_str_lossy().into_owned(),
+            sig.email.to_str_lossy().into_owned(),
+        ),
+        Err(_) => ("Unknown".to_string(), String::new()),
+    };
+    let timestamp = match c.time() {
+        Ok(t) => t.seconds,
+        Err(_) => 0,
+    };
+    let full_msg = c.message.to_str_lossy();
+    let summary = full_msg.lines().next().unwrap_or("").to_string();
+    let body = full_msg.to_string();
+    let hex = oid.to_hex().to_string();
+    let short_oid = hex[..7.min(hex.len())].to_string();
+    Some(CommitItem {
+        oid: hex,
+        short_oid,
+        parents,
+        author_name,
+        author_email,
+        timestamp,
+        summary,
+        body,
+        refs: Vec::new(),
+    })
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct CachedRepoMeta {
     head: String,
     refs: BTreeMap<String, String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+struct StoredCommitsCache {
+    head_oid: Option<String>,
+    refs: BTreeMap<String, String>,
+    complete: bool,
+    #[serde(default)]
+    indexed_bundles: BTreeSet<String>,
+    #[serde(default)]
+    frontier: Vec<String>,
+    commits_compressed: String,
+}
+
+fn current_unix_secs() -> u64 {
+    crate::bindings::wasi::clocks::system_clock::now().seconds
 }
 
 fn repo_exists_cache_key(repo: &str) -> String {
@@ -104,7 +199,11 @@ fn repo_meta_cache_key(repo: &str) -> String {
 }
 
 fn repo_commits_cache_key(repo: &str) -> String {
-    format!("gcommits_v1:{}", repo)
+    format!("gcommits_v2:{}", repo)
+}
+
+fn repo_commits_chunk_key(repo: &str, idx: usize) -> String {
+    format!("gcommits_v2:{}:{}", repo, idx)
 }
 
 fn repos_list_cache_key(root_folder_id: &str) -> String {
@@ -166,6 +265,57 @@ fn cache_remove_all(keys: &[String]) {
     let keys_vec: Vec<String> = keys.to_vec();
     cache.remove_all(&keys_vec);
 }
+
+const COMMITS_SHARD_CHUNK_BYTES: usize = 80_000;
+const MAX_COMMITS_SHARDS: usize = 16;
+
+fn cache_get_sharded_commits(repo: &str) -> Option<Vec<CommitItem>> {
+    let meta_key = repo_commits_cache_key(repo);
+    let count_str = cache_get(&meta_key)?;
+    if let Ok(direct) = serde_json::from_str::<Vec<CommitItem>>(&count_str) {
+        return Some(direct);
+    }
+    let shard_count = count_str.trim().parse::<usize>().ok()?;
+    if shard_count == 0 || shard_count > MAX_COMMITS_SHARDS {
+        return None;
+    }
+    let keys: Vec<String> = (0..shard_count)
+        .map(|idx| repo_commits_chunk_key(repo, idx))
+        .collect();
+    let pairs = cache_get_all(&keys);
+    if pairs.len() != shard_count {
+        return None;
+    }
+    let map: BTreeMap<String, String> = pairs.into_iter().collect();
+    let mut combined = String::with_capacity(shard_count * COMMITS_SHARD_CHUNK_BYTES);
+    for k in &keys {
+        let part = map.get(k)?;
+        combined.push_str(part);
+    }
+    let decompressed = decode_stored_loose_object(&combined)?;
+    serde_json::from_slice::<Vec<CommitItem>>(&decompressed).ok()
+}
+
+fn cache_put_sharded_commits(repo: &str, commits: &[CommitItem]) {
+    let Ok(json_bytes) = serde_json::to_vec(commits) else {
+        return;
+    };
+    let compressed = encode_stored_loose_object(&json_bytes);
+    let chunks: Vec<&str> = compressed
+        .as_bytes()
+        .chunks(COMMITS_SHARD_CHUNK_BYTES)
+        .filter_map(|c| std::str::from_utf8(c).ok())
+        .collect();
+    if chunks.is_empty() || chunks.len() > MAX_COMMITS_SHARDS {
+        return;
+    }
+    let mut entries: Vec<(String, String)> = Vec::with_capacity(chunks.len() + 1);
+    for (idx, &chunk) in chunks.iter().enumerate() {
+        entries.push((repo_commits_chunk_key(repo, idx), chunk.to_string()));
+    }
+    entries.push((repo_commits_cache_key(repo), chunks.len().to_string()));
+    cache_put_all(&entries, CACHE_TTL_META_SECS);
+}
 pub const ENV_GAS_WEB_APP_URL: &str = "GAS_WEB_APP_URL";
 pub const ENV_GIT_COMMIT_PAGE_SIZE: &str = "GIT_COMMIT_PAGE_SIZE";
 pub const DEFAULT_COMMIT_PAGE_SIZE: usize = 20;
@@ -173,7 +323,9 @@ const DEFAULT_BRANCH: &str = "refs/heads/main";
 const MAX_SIDEBAND_CHUNK: usize = 65500;
 const HEAD_FILE_NAME: &str = "HEAD";
 const REFS_FILE_NAME: &str = "refs.json";
+const COMMITS_CACHE_FILE_NAME: &str = "commits_cache.json";
 const OBJECTS_FOLDER_NAME: &str = "objects";
+const MAX_COLD_SCAN_SECS: u64 = 18; // Stop cold legacy bundle downloads at 18s and checkpoint to commits_cache.json
 
 /// Escape a string for safe inclusion in HTML text or double/single-quoted attribute contexts.
 pub fn escape_html(input: &str) -> String {
@@ -477,6 +629,21 @@ pub fn get_env_or_script_property(key: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+/// Retrieve the deployed GAS Web App `/exec` URL via WIT (`gas:script-app/gas-script-app.get-service().get-url()`)
+/// with fallback to the `GAS_WEB_APP_URL` environment variable / Script Property.
+pub fn get_web_app_exec_url() -> Option<String> {
+    if let Some(url) = gas_script_app::get_service()
+        .get_url()
+        .map(|u| u.trim().trim_end_matches('/').to_string())
+        .filter(|u| !u.is_empty())
+    {
+        return Some(url);
+    }
+    get_env_or_script_property(ENV_GAS_WEB_APP_URL)
+        .map(|u| u.trim().trim_end_matches('/').to_string())
+        .filter(|u| !u.is_empty())
+}
+
 /// Retrieve the configured Google Drive Root Folder ID (`GIT_DRIVE_FOLDER_ID`).
 pub fn get_root_drive_folder_id() -> Result<String, String> {
     get_env_or_script_property(ENV_GIT_DRIVE_FOLDER_ID).ok_or_else(|| {
@@ -555,11 +722,17 @@ pub struct GasGitStore {
     objects_folder: RefCell<Option<GasFolder>>,
     head_cache: RefCell<Option<String>>,
     refs_cache: RefCell<Option<BTreeMap<String, ObjectId>>>,
+    /// Inflated raw loose objects (`<kind> <size>\0<body>`), bounded to `MAX_OBJECT_CACHE_BYTES`.
     object_cache: RefCell<BTreeMap<ObjectId, Vec<u8>>>,
     object_cache_bytes: RefCell<usize>,
+    /// Compressed object strings (`z:<len>:<base64>` or `<base64>`) indexed from loaded bundles without eager decompression!
+    compressed_object_index: RefCell<BTreeMap<ObjectId, String>>,
     blob_size_cache: RefCell<BTreeMap<ObjectId, usize>>,
     known_existing_objects: RefCell<BTreeSet<ObjectId>>,
-    bundles_loaded: RefCell<bool>,
+    catalog_loaded: RefCell<bool>,
+    has_separated_blob_bundles: RefCell<bool>,
+    unloaded_commit_bundles: RefCell<Vec<GasFile>>,
+    unloaded_meta_bundles: RefCell<Vec<GasFile>>,
     unloaded_blob_bundles: RefCell<Vec<GasFile>>,
 }
 
@@ -583,9 +756,13 @@ impl GasGitStore {
                 refs_cache: RefCell::new(None),
                 object_cache: RefCell::new(BTreeMap::new()),
                 object_cache_bytes: RefCell::new(0),
+                compressed_object_index: RefCell::new(BTreeMap::new()),
                 blob_size_cache: RefCell::new(BTreeMap::new()),
                 known_existing_objects: RefCell::new(BTreeSet::new()),
-                bundles_loaded: RefCell::new(false),
+                catalog_loaded: RefCell::new(false),
+                has_separated_blob_bundles: RefCell::new(false),
+                unloaded_commit_bundles: RefCell::new(Vec::new()),
+                unloaded_meta_bundles: RefCell::new(Vec::new()),
                 unloaded_blob_bundles: RefCell::new(Vec::new()),
             });
         }
@@ -612,9 +789,13 @@ impl GasGitStore {
             refs_cache: RefCell::new(None),
             object_cache: RefCell::new(BTreeMap::new()),
             object_cache_bytes: RefCell::new(0),
+            compressed_object_index: RefCell::new(BTreeMap::new()),
             blob_size_cache: RefCell::new(BTreeMap::new()),
             known_existing_objects: RefCell::new(BTreeSet::new()),
-            bundles_loaded: RefCell::new(false),
+            catalog_loaded: RefCell::new(false),
+            has_separated_blob_bundles: RefCell::new(false),
+            unloaded_commit_bundles: RefCell::new(Vec::new()),
+            unloaded_meta_bundles: RefCell::new(Vec::new()),
             unloaded_blob_bundles: RefCell::new(Vec::new()),
         })
     }
@@ -876,12 +1057,14 @@ impl GasGitStore {
         self.write_raw_object(object.kind(), &body)
     }
 
+    /// O(1) bounded in-memory object cache insertion.
+    /// Never runs an O(N) scan; if `MAX_OBJECT_CACHE_BYTES` is reached, clears `object_cache` in O(1)
+    /// (since `compressed_object_index` retains all compressed strings from loaded bundles in memory).
     fn cache_loose_in_memory(&self, oid: ObjectId, loose_bytes: Vec<u8>) {
         self.known_existing_objects.borrow_mut().insert(oid);
         if let Ok((kind, size, _)) = gix_object::decode::loose_header(&loose_bytes) {
             if kind == ObjectKind::Blob {
                 self.blob_size_cache.borrow_mut().insert(oid, size as usize);
-                // Do not retain single giant blobs (> 2 MB) in the in-memory cache
                 if loose_bytes.len() > 2 * 1024 * 1024 {
                     return;
                 }
@@ -893,28 +1076,8 @@ impl GasGitStore {
         }
         let mut used = self.object_cache_bytes.borrow_mut();
         if *used + loose_bytes.len() > MAX_OBJECT_CACHE_BYTES {
-            // Evict cached Blob entries while preserving compact Commit/Tree objects
-            let blob_keys: Vec<ObjectId> = cache
-                .iter()
-                .filter_map(|(k, v)| {
-                    if let Ok((ObjectKind::Blob, _, _)) = gix_object::decode::loose_header(v) {
-                        Some(*k)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            for bk in blob_keys {
-                if let Some(removed) = cache.remove(&bk) {
-                    *used = used.saturating_sub(removed.len());
-                }
-                if *used + loose_bytes.len() <= MAX_OBJECT_CACHE_BYTES {
-                    break;
-                }
-            }
-            if *used + loose_bytes.len() > MAX_OBJECT_CACHE_BYTES {
-                return;
-            }
+            cache.clear();
+            *used = 0;
         }
         *used += loose_bytes.len();
         cache.insert(oid, loose_bytes);
@@ -926,6 +1089,7 @@ impl GasGitStore {
             .map_err(|e| format!("Failed to compute SHA-1 hash: {}", e))?;
 
         if self.object_cache.borrow().contains_key(&oid)
+            || self.compressed_object_index.borrow().contains_key(&oid)
             || self.known_existing_objects.borrow().contains(&oid)
         {
             return Ok(oid);
@@ -949,8 +1113,68 @@ impl GasGitStore {
         })?;
 
         cache_put(&git_obj_cache_key(&oid_hex), &encoded, CACHE_TTL_IMMUTABLE_SECS);
+        self.compressed_object_index
+            .borrow_mut()
+            .insert(oid, encoded);
         self.cache_loose_in_memory(oid, loose_bytes);
         Ok(oid)
+    }
+
+    fn record_pushed_commits_in_cache(
+        &self,
+        new_commits: &[CommitItem],
+        commit_bundle_names: &[String],
+    ) {
+        if new_commits.is_empty() && commit_bundle_names.is_empty() {
+            return;
+        }
+        let mut commits_by_oid: BTreeMap<String, CommitItem> = BTreeMap::new();
+        let mut indexed_bundles: BTreeSet<String> = BTreeSet::new();
+        let mut was_complete = true;
+
+        if let Ok(Some(cache_json)) =
+            self.with_repo_folder(|rf| read_text_file(rf, COMMITS_CACHE_FILE_NAME))
+        {
+            if let Ok(stored) = serde_json::from_str::<StoredCommitsCache>(&cache_json) {
+                was_complete = stored.complete;
+                indexed_bundles = stored.indexed_bundles;
+                if let Some(decompressed) = decode_stored_loose_object(&stored.commits_compressed) {
+                    if let Ok(cached_list) = serde_json::from_slice::<Vec<CommitItem>>(&decompressed)
+                    {
+                        for item in cached_list {
+                            commits_by_oid.insert(item.oid.clone(), item);
+                        }
+                    }
+                }
+            }
+        }
+
+        for bname in commit_bundle_names {
+            indexed_bundles.insert(bname.clone());
+        }
+        for item in new_commits {
+            commits_by_oid.insert(item.oid.clone(), item.clone());
+        }
+
+        let mut list: Vec<CommitItem> = commits_by_oid.into_values().collect();
+        list.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| a.oid.cmp(&b.oid)));
+
+        if let Ok(commits_bytes) = serde_json::to_vec(&list) {
+            let compressed = encode_stored_loose_object(&commits_bytes);
+            let stored = StoredCommitsCache {
+                head_oid: None, // Will be finalized with current head/refs on update_ref or first read
+                refs: BTreeMap::new(),
+                complete: was_complete,
+                indexed_bundles,
+                frontier: Vec::new(),
+                commits_compressed: compressed,
+            };
+            if let Ok(stored_json) = serde_json::to_string(&stored) {
+                let _ = self.with_repo_folder(|rf| {
+                    write_text_file(rf, COMMITS_CACHE_FILE_NAME, &stored_json, "application/json")
+                });
+            }
+        }
     }
 
     fn flush_bundle_file(
@@ -973,11 +1197,10 @@ impl GasGitStore {
         })
     }
 
-    /// Persist a batch of unpacked Git objects into Google Drive using zlib-compressed, memory-bounded sub-bundles:
-    /// - Structural metadata objects (`Commit`, `Tree`, `Tag`) + blob byte-size entries (`__sz__:<oid>`)
-    ///   are stored in `bundle_meta_<batch_id>.json` (fast commit-list & directory browsing without loading blobs!).
-    /// - File content objects (`Blob`) are stored in `bundle_blob_<batch_id>_<part>.json`, flushed every 4 MB
-    ///   while draining `objects` via `pop_first()` so raw object `Vec<u8>` buffers are freed as they are compressed.
+    /// Persist a batch of unpacked Git objects into Google Drive using 3-tier zlib-compressed sub-bundles:
+    /// - `bundle_commit_<batch_id>.json`: `Commit` and `Tag` objects ONLY (tiny, enables sub-second commit history loading!).
+    /// - `bundle_meta_<batch_id>.json`: `Tree` objects + `__sz__:<oid>` blob byte-sizes (enables directory browsing without loading blobs!).
+    /// - `bundle_blob_<batch_id>.json`: `Blob` file contents, flushed every 4 MB while draining `objects`.
     pub fn write_objects_batch(
         &self,
         batch_id: &str,
@@ -986,6 +1209,12 @@ impl GasGitStore {
         if objects.is_empty() {
             return Ok(());
         }
+
+        let mut commit_map: BTreeMap<String, String> = BTreeMap::new();
+        let mut commit_bytes: usize = 0;
+        let mut commit_part: usize = 0;
+        let mut new_commit_items: Vec<CommitItem> = Vec::new();
+        let mut commit_bundle_names: Vec<String> = Vec::new();
 
         let mut meta_map: BTreeMap<String, String> = BTreeMap::new();
         let mut meta_bytes: usize = 0;
@@ -1011,56 +1240,103 @@ impl GasGitStore {
             let body_len = body.len();
             drop(body);
 
+            if kind == ObjectKind::Commit {
+                if let Some(c_item) = parse_commit_item_from_loose(oid, &loose_bytes) {
+                    new_commit_items.push(c_item);
+                }
+            }
             let hex = oid.to_hex().to_string();
             let encoded = encode_stored_loose_object(&loose_bytes);
+            drop(loose_bytes);
 
-            // Cache Commit/Tree objects (and small Blobs if batch cache budget allows) in CacheService & memory
-            if kind != ObjectKind::Blob || loose_bytes.len() <= 16_384 {
-                self.cache_loose_in_memory(oid, loose_bytes);
-                if encoded.len() <= 32_768 && cache_batch_bytes + encoded.len() <= 300_000 && cache_entries.len() < 40 {
+            if kind != ObjectKind::Blob {
+                self.compressed_object_index
+                    .borrow_mut()
+                    .insert(oid, encoded.clone());
+                if encoded.len() <= 32_768
+                    && cache_batch_bytes + encoded.len() <= 300_000
+                    && cache_entries.len() < 40
+                {
                     cache_batch_bytes += encoded.len();
                     cache_entries.push((git_obj_cache_key(&hex), encoded.clone()));
                 }
-            } else {
-                drop(loose_bytes);
             }
 
-            if kind == ObjectKind::Blob {
-                // Record lightweight blob byte-size in meta bundle so directory listings never need to load blob bundles
-                let sz_key = format!("{}{}", BLOB_SIZE_PREFIX, hex);
-                let sz_val = body_len.to_string();
-                meta_bytes += sz_key.len() + sz_val.len() + 8;
-                meta_map.insert(sz_key, sz_val);
-
-                blob_bytes += hex.len() + encoded.len() + 8;
-                blob_map.insert(hex, encoded);
-
-                if blob_bytes >= MAX_SUB_BUNDLE_JSON_BYTES {
-                    let fname = if blob_part == 0 {
-                        format!("bundle_blob_{}.json", batch_id)
-                    } else {
-                        format!("bundle_blob_{}_{}.json", batch_id, blob_part)
-                    };
-                    blob_part += 1;
-                    blob_bytes = 0;
-                    self.flush_bundle_file(fname, &mut blob_map)?;
+            match kind {
+                ObjectKind::Commit | ObjectKind::Tag => {
+                    commit_bytes += hex.len() + encoded.len() + 8;
+                    commit_map.insert(hex, encoded);
+                    if commit_bytes >= MAX_SUB_BUNDLE_JSON_BYTES {
+                        let fname = if commit_part == 0 {
+                            format!("bundle_commit_{}.json", batch_id)
+                        } else {
+                            format!("bundle_commit_{}_{}.json", batch_id, commit_part)
+                        };
+                        commit_part += 1;
+                        commit_bytes = 0;
+                        commit_bundle_names.push(fname.clone());
+                        self.flush_bundle_file(fname, &mut commit_map)?;
+                    }
                 }
-            } else {
-                meta_bytes += hex.len() + encoded.len() + 8;
-                meta_map.insert(hex, encoded);
-            }
+                ObjectKind::Tree => {
+                    meta_bytes += hex.len() + encoded.len() + 8;
+                    meta_map.insert(hex, encoded);
+                    if meta_bytes >= MAX_SUB_BUNDLE_JSON_BYTES {
+                        let fname = if meta_part == 0 {
+                            format!("bundle_meta_{}.json", batch_id)
+                        } else {
+                            format!("bundle_meta_{}_{}.json", batch_id, meta_part)
+                        };
+                        meta_part += 1;
+                        meta_bytes = 0;
+                        commit_bundle_names.push(fname.clone());
+                        self.flush_bundle_file(fname, &mut meta_map)?;
+                    }
+                }
+                ObjectKind::Blob => {
+                    let sz_key = format!("{}{}", BLOB_SIZE_PREFIX, hex);
+                    let sz_val = body_len.to_string();
+                    meta_bytes += sz_key.len() + sz_val.len() + 8;
+                    meta_map.insert(sz_key, sz_val);
 
-            if meta_bytes >= MAX_SUB_BUNDLE_JSON_BYTES {
-                let fname = if meta_part == 0 {
-                    format!("bundle_meta_{}.json", batch_id)
-                } else {
-                    format!("bundle_meta_{}_{}.json", batch_id, meta_part)
-                };
-                meta_part += 1;
-                meta_bytes = 0;
-                self.flush_bundle_file(fname, &mut meta_map)?;
+                    blob_bytes += hex.len() + encoded.len() + 8;
+                    blob_map.insert(hex, encoded);
+
+                    if blob_bytes >= MAX_SUB_BUNDLE_JSON_BYTES {
+                        let fname = if blob_part == 0 {
+                            format!("bundle_blob_{}.json", batch_id)
+                        } else {
+                            format!("bundle_blob_{}_{}.json", batch_id, blob_part)
+                        };
+                        blob_part += 1;
+                        blob_bytes = 0;
+                        self.flush_bundle_file(fname, &mut blob_map)?;
+                    }
+                    if meta_bytes >= MAX_SUB_BUNDLE_JSON_BYTES {
+                        let fname = if meta_part == 0 {
+                            format!("bundle_meta_{}.json", batch_id)
+                        } else {
+                            format!("bundle_meta_{}_{}.json", batch_id, meta_part)
+                        };
+                        meta_part += 1;
+                        meta_bytes = 0;
+                        commit_bundle_names.push(fname.clone());
+                        self.flush_bundle_file(fname, &mut meta_map)?;
+                    }
+                }
             }
         }
+
+        if !commit_map.is_empty() {
+            let fname = if commit_part == 0 {
+                format!("bundle_commit_{}.json", batch_id)
+            } else {
+                format!("bundle_commit_{}_{}.json", batch_id, commit_part)
+            };
+            commit_bundle_names.push(fname.clone());
+            self.flush_bundle_file(fname, &mut commit_map)?;
+        }
+        self.record_pushed_commits_in_cache(&new_commit_items, &commit_bundle_names);
 
         if !blob_map.is_empty() {
             let fname = if blob_part == 0 {
@@ -1077,6 +1353,7 @@ impl GasGitStore {
             } else {
                 format!("bundle_meta_{}_{}.json", batch_id, meta_part)
             };
+            commit_bundle_names.push(fname.clone());
             self.flush_bundle_file(fname, &mut meta_map)?;
         }
 
@@ -1091,9 +1368,14 @@ impl GasGitStore {
     pub fn prefetch_objects(&self, oids: &[ObjectId]) {
         let missing: Vec<(ObjectId, String)> = {
             let cache = self.object_cache.borrow();
+            let comp_idx = self.compressed_object_index.borrow();
             let blob_sizes = self.blob_size_cache.borrow();
             oids.iter()
-                .filter(|&oid| !cache.contains_key(oid) && !blob_sizes.contains_key(oid))
+                .filter(|&oid| {
+                    !cache.contains_key(oid)
+                        && !comp_idx.contains_key(oid)
+                        && !blob_sizes.contains_key(oid)
+                })
                 .take(100)
                 .map(|oid| (*oid, git_obj_cache_key(&oid.to_hex().to_string())))
                 .collect()
@@ -1110,9 +1392,10 @@ impl GasGitStore {
             missing.into_iter().map(|(oid, k)| (k, oid)).collect();
         for (k, encoded) in found {
             if let Some(&oid) = key_to_oid.get(&k) {
-                if let Some(decoded) = decode_stored_loose_object(&encoded) {
-                    self.cache_loose_in_memory(oid, decoded);
-                }
+                self.known_existing_objects.borrow_mut().insert(oid);
+                self.compressed_object_index
+                    .borrow_mut()
+                    .insert(oid, encoded);
             }
         }
     }
@@ -1126,16 +1409,19 @@ impl GasGitStore {
                 return Some(size as usize);
             }
         }
-        if !*self.bundles_loaded.borrow() {
-            self.ensure_bundles_loaded();
-            if let Some(&sz) = self.blob_size_cache.borrow().get(oid) {
-                return Some(sz);
-            }
-            if let Some(loose) = self.object_cache.borrow().get(oid) {
-                if let Ok((ObjectKind::Blob, size, _)) = gix_object::decode::loose_header(loose) {
-                    return Some(size as usize);
-                }
-            }
+        self.ensure_bundle_catalog_loaded();
+        // Pop meta bundles on demand until `blob_size_cache` or `compressed_object_index` has `oid`
+        while !self.blob_size_cache.borrow().contains_key(oid)
+            && !self.compressed_object_index.borrow().contains_key(oid)
+        {
+            let next_meta = self.unloaded_meta_bundles.borrow_mut().pop();
+            let Some(file) = next_meta else {
+                break;
+            };
+            self.index_bundle_file(&file);
+        }
+        if let Some(&sz) = self.blob_size_cache.borrow().get(oid) {
+            return Some(sz);
         }
         let loose = self.read_loose_object(oid)?;
         let (kind, size, _) = gix_object::decode::loose_header(&loose).ok()?;
@@ -1147,95 +1433,47 @@ impl GasGitStore {
         }
     }
 
-    /// Read loose object bytes (`<kind> <size>\0<body>`) by `ObjectId` using a 4-tier hierarchy:
-    /// 1. In-memory `object_cache` (0ms)
-    /// 2. GAS `CacheService.getScriptCache()` (~1-2ms, 0 `DriveApp` calls)
-    /// 3. Metadata & legacy bundle scan (`ensure_bundles_loaded()` loads `bundle_meta_*.json` and legacy `bundle_*.json`)
-    /// 4. On-demand streaming scan of `unloaded_blob_bundles` (`bundle_blob_*.json`), stopping as soon as `oid` is found
-    pub fn read_loose_object(&self, oid: &ObjectId) -> Option<Vec<u8>> {
-        if let Some(cached) = self.object_cache.borrow().get(oid) {
-            return Some(cached.clone());
-        }
+    /// Index a single `bundle_commit_*.json`, `bundle_meta_*.json`, or legacy `bundle_*.json` file
+    /// into `self.compressed_object_index` and `self.blob_size_cache` WITHOUT decompressing the objects!
+    fn index_bundle_file(&self, file: &GasFile) {
+        let json_str = file.get_blob().get_data_as_string(None);
+        if let Ok(bundle) = serde_json::from_str::<BTreeMap<String, String>>(&json_str) {
+            drop(json_str);
+            let mut comp_idx = self.compressed_object_index.borrow_mut();
+            let mut blob_sizes = self.blob_size_cache.borrow_mut();
+            let mut known = self.known_existing_objects.borrow_mut();
 
-        let oid_hex = oid.to_hex().to_string();
-        let cache_key = git_obj_cache_key(&oid_hex);
-
-        // 1. Check GAS CacheService (content-addressed Git objects are immutable!)
-        if let Some(encoded) = cache_get(&cache_key) {
-            if let Some(decoded) = decode_stored_loose_object(&encoded) {
-                self.cache_loose_in_memory(*oid, decoded.clone());
-                return Some(decoded);
-            }
-        }
-
-        // 2. Ensure `bundle_meta_*.json` and legacy bundles in `objects/` are loaded
-        if !*self.bundles_loaded.borrow() {
-            self.ensure_bundles_loaded();
-            if let Some(cached) = self.object_cache.borrow().get(oid) {
-                return Some(cached.clone());
-            }
-        }
-
-        // 3. On-demand scan of `bundle_blob_*.json` files (stops immediately once `oid` is found!)
-        loop {
-            let next_blob_file = self.unloaded_blob_bundles.borrow_mut().pop();
-            let Some(file) = next_blob_file else {
-                break;
-            };
-            let json_str = file.get_blob().get_data_as_string(None);
-            let mut found_target: Option<Vec<u8>> = None;
-            if let Ok(bundle) = serde_json::from_str::<BTreeMap<String, String>>(&json_str) {
-                drop(json_str);
-                for (hex_key, encoded_val) in bundle {
-                    let Ok(b_oid) = ObjectId::from_hex(hex_key.as_bytes()) else {
-                        continue;
-                    };
-                    if b_oid == *oid {
-                        if let Some(decoded) = decode_stored_loose_object(&encoded_val) {
-                            cache_put(&cache_key, &encoded_val, CACHE_TTL_IMMUTABLE_SECS);
-                            self.cache_loose_in_memory(b_oid, decoded.clone());
-                            found_target = Some(decoded);
-                        }
-                    } else if *self.object_cache_bytes.borrow() + encoded_val.len() <= MAX_OBJECT_CACHE_BYTES {
-                        if let Some(decoded) = decode_stored_loose_object(&encoded_val) {
-                            self.cache_loose_in_memory(b_oid, decoded);
-                        }
-                    } else {
-                        self.known_existing_objects.borrow_mut().insert(b_oid);
+            for (hex_key, encoded_val) in bundle {
+                if let Some(oid_hex) = hex_key.strip_prefix(BLOB_SIZE_PREFIX) {
+                    if let (Ok(b_oid), Ok(sz)) = (
+                        ObjectId::from_hex(oid_hex.as_bytes()),
+                        encoded_val.trim().parse::<usize>(),
+                    ) {
+                        known.insert(b_oid);
+                        blob_sizes.insert(b_oid, sz);
                     }
+                    continue;
+                }
+                if let Ok(b_oid) = ObjectId::from_hex(hex_key.as_bytes()) {
+                    known.insert(b_oid);
+                    comp_idx.insert(b_oid, encoded_val);
                 }
             }
-            if let Some(target_bytes) = found_target {
-                return Some(target_bytes);
-            }
         }
-
-        // 4. Fallback: check if a legacy loose file exists directly in `repo_folder`
-        if let Ok(Some(file)) = self.with_repo_folder(|rf| find_child_file_by_name(rf, &oid_hex)) {
-            let encoded = file.get_blob().get_data_as_string(None);
-            if let Some(decoded) = decode_stored_loose_object(&encoded) {
-                cache_put(&cache_key, encoded.trim(), CACHE_TTL_IMMUTABLE_SECS);
-                self.cache_loose_in_memory(*oid, decoded.clone());
-                return Some(decoded);
-            }
-        }
-
-        None
     }
 
-    /// Scan `objects/` in a single `get_files()` pass:
-    /// - Eagerly loads compact `bundle_meta_*.json` (Commits, Trees, Tags, and `__sz__:<oid>` blob sizes)
-    ///   and legacy `bundle_*.json` files.
-    /// - Queues large `bundle_blob_*.json` files in `unloaded_blob_bundles` for lazy on-demand loading,
-    ///   preventing OOM when browsing or pushing to large repositories.
-    pub fn ensure_bundles_loaded(&self) {
-        if *self.bundles_loaded.borrow() {
+    /// Catalog all bundle files in `objects/` in a single `get_files()` pass without downloading
+    /// their contents or calling `get_last_updated()` per file!
+    /// Reverses the collected lists so `.pop()` yields the first (newest) file returned by Drive's `getFiles()`.
+    pub fn ensure_bundle_catalog_loaded(&self) {
+        if *self.catalog_loaded.borrow() {
             return;
         }
-        *self.bundles_loaded.borrow_mut() = true;
+        *self.catalog_loaded.borrow_mut() = true;
 
-        let mut cache_entries: Vec<(String, String)> = Vec::new();
-        let mut cache_bytes: usize = 0;
+        let mut commit_files: Vec<GasFile> = Vec::new();
+        let mut meta_files: Vec<GasFile> = Vec::new();
+        let mut blob_files: Vec<GasFile> = Vec::new();
 
         let _ = self.with_objects_folder(|objects_folder| {
             let iter = objects_folder.get_files();
@@ -1245,92 +1483,176 @@ impl GasGitStore {
                     continue;
                 }
                 let name = file.get_name();
-                if name.starts_with("bundle_blob_") && name.ends_with(".json") {
-                    self.unloaded_blob_bundles.borrow_mut().push(file);
+                if name.starts_with("bundle_commit_") && name.ends_with(".json") {
+                    commit_files.push(file);
+                } else if name.starts_with("bundle_blob_") && name.ends_with(".json") {
+                    *self.has_separated_blob_bundles.borrow_mut() = true;
+                    blob_files.push(file);
                 } else if name.starts_with("bundle_") && name.ends_with(".json") {
-                    let json_str = file.get_blob().get_data_as_string(None);
-                    if let Ok(bundle) = serde_json::from_str::<BTreeMap<String, String>>(&json_str)
-                    {
-                        drop(json_str);
-                        for (hex_key, encoded_val) in bundle {
-                            if let Some(oid_hex) = hex_key.strip_prefix(BLOB_SIZE_PREFIX) {
-                                if let (Ok(b_oid), Ok(sz)) = (
-                                    ObjectId::from_hex(oid_hex.as_bytes()),
-                                    encoded_val.trim().parse::<usize>(),
-                                ) {
-                                    self.known_existing_objects.borrow_mut().insert(b_oid);
-                                    self.blob_size_cache.borrow_mut().insert(b_oid, sz);
-                                }
-                                continue;
-                            }
-                            if let Ok(b_oid) = ObjectId::from_hex(hex_key.as_bytes()) {
-                                let trimmed = encoded_val.trim();
-                                if let Some(decoded) = decode_stored_loose_object(trimmed) {
-                                    if trimmed.len() <= 32_768
-                                        && cache_bytes + trimmed.len() <= 300_000
-                                        && cache_entries.len() < 40
-                                    {
-                                        cache_bytes += trimmed.len();
-                                        cache_entries.push((
-                                            git_obj_cache_key(&b_oid.to_hex().to_string()),
-                                            trimmed.to_string(),
-                                        ));
-                                    }
-                                    self.cache_loose_in_memory(b_oid, decoded);
-                                }
-                            }
-                        }
-                    }
+                    meta_files.push(file);
                 } else if name.len() == 40 && name.chars().all(|c| c.is_ascii_hexdigit()) {
                     if let Ok(l_oid) = ObjectId::from_hex(name.as_bytes()) {
-                        if !self.object_cache.borrow().contains_key(&l_oid) {
+                        if !self.compressed_object_index.borrow().contains_key(&l_oid) {
                             let encoded_val = file.get_blob().get_data_as_string(None);
-                            let trimmed = encoded_val.trim();
-                            if let Some(decoded) = decode_stored_loose_object(trimmed) {
-                                if trimmed.len() <= 32_768
-                                    && cache_bytes + trimmed.len() <= 300_000
-                                    && cache_entries.len() < 40
-                                {
-                                    cache_bytes += trimmed.len();
-                                    cache_entries.push((
-                                        git_obj_cache_key(&l_oid.to_hex().to_string()),
-                                        trimmed.to_string(),
-                                    ));
-                                }
-                                self.cache_loose_in_memory(l_oid, decoded);
-                            }
+                            self.known_existing_objects.borrow_mut().insert(l_oid);
+                            self.compressed_object_index
+                                .borrow_mut()
+                                .insert(l_oid, encoded_val);
                         }
                     }
                 }
             }
         });
 
-        if !cache_entries.is_empty() {
-            cache_put_all(&cache_entries, CACHE_TTL_IMMUTABLE_SECS);
+        commit_files.reverse();
+        meta_files.reverse();
+        blob_files.reverse();
+
+        *self.unloaded_commit_bundles.borrow_mut() = commit_files;
+        *self.unloaded_meta_bundles.borrow_mut() = meta_files;
+        *self.unloaded_blob_bundles.borrow_mut() = blob_files;
+    }
+
+    /// Ensure all commit & metadata bundles are indexed into `self.compressed_object_index`.
+    pub fn ensure_bundles_loaded(&self) {
+        self.ensure_bundle_catalog_loaded();
+        while let Some(file) = self.unloaded_commit_bundles.borrow_mut().pop() {
+            self.index_bundle_file(&file);
+        }
+        while let Some(file) = self.unloaded_meta_bundles.borrow_mut().pop() {
+            self.index_bundle_file(&file);
         }
     }
 
-    /// Load all commits reachable from `HEAD` and `refs` (plus any commit objects in `object_cache` when `refs` is empty).
-    /// Cached in `CacheService` under `gcommits_v1:<repo>` so repeated commit-list or prefix-search accesses
-    /// complete in milliseconds without touching Google Drive.
-    pub fn load_all_commits(&self) -> Vec<CommitItem> {
-        let commits_key = repo_commits_cache_key(&self.repo);
-        if let Some(cached_json) = cache_get(&commits_key) {
-            if let Ok(cached_commits) = serde_json::from_str::<Vec<CommitItem>>(&cached_json) {
-                return cached_commits;
+    /// Read loose object bytes (`<kind> <size>\0<body>`) by `ObjectId` using a 5-tier lazy hierarchy:
+    /// 1. In-memory inflated `object_cache` (0ms)
+    /// 2. In-memory `compressed_object_index` (~0.05ms single-object inflate)
+    /// 3. GAS `CacheService.getScriptCache()` (~1-2ms, 0 `DriveApp` calls)
+    /// 4. On-demand newest-first pop of `unloaded_commit_bundles` and `unloaded_meta_bundles` (stops as soon as `oid` is indexed!)
+    /// 5. On-demand newest-first pop of `unloaded_blob_bundles` (ONLY if `oid` is a Blob, never for Commit/Tree lookups!)
+    pub fn read_loose_object(&self, oid: &ObjectId) -> Option<Vec<u8>> {
+        if let Some(cached) = self.object_cache.borrow().get(oid) {
+            return Some(cached.clone());
+        }
+
+        if let Some(encoded) = self.compressed_object_index.borrow().get(oid).cloned() {
+            if let Some(decoded) = decode_stored_loose_object(&encoded) {
+                self.cache_loose_in_memory(*oid, decoded.clone());
+                return Some(decoded);
             }
         }
 
-        let head_sym = self
-            .head_symref()
-            .unwrap_or_else(|| DEFAULT_BRANCH.to_string());
-        let head_oid = self.resolve_ref("HEAD");
-        let refs_map = self.list_refs();
+        let oid_hex = oid.to_hex().to_string();
+        let cache_key = git_obj_cache_key(&oid_hex);
 
-        let mut decoration_map: BTreeMap<ObjectId, Vec<String>> = BTreeMap::new();
-        for (rname, roid) in &refs_map {
+        if let Some(encoded) = cache_get(&cache_key) {
+            if let Some(decoded) = decode_stored_loose_object(&encoded) {
+                self.compressed_object_index
+                    .borrow_mut()
+                    .insert(*oid, encoded);
+                self.cache_loose_in_memory(*oid, decoded.clone());
+                return Some(decoded);
+            }
+        }
+
+        self.ensure_bundle_catalog_loaded();
+
+        // If `oid` is not already known to be a separated Blob, check commit & meta bundles on-demand (newest first!)
+        if !self.blob_size_cache.borrow().contains_key(oid) {
+            while !self.compressed_object_index.borrow().contains_key(oid) {
+                let next_commit_bundle = self.unloaded_commit_bundles.borrow_mut().pop();
+                let Some(file) = next_commit_bundle else {
+                    break;
+                };
+                self.index_bundle_file(&file);
+            }
+
+            if let Some(encoded) = self.compressed_object_index.borrow().get(oid).cloned() {
+                if let Some(decoded) = decode_stored_loose_object(&encoded) {
+                    if encoded.len() <= 32_768 {
+                        cache_put(&cache_key, &encoded, CACHE_TTL_IMMUTABLE_SECS);
+                    }
+                    self.cache_loose_in_memory(*oid, decoded.clone());
+                    return Some(decoded);
+                }
+            }
+
+            while !self.compressed_object_index.borrow().contains_key(oid)
+                && !self.blob_size_cache.borrow().contains_key(oid)
+            {
+                let next_meta_bundle = self.unloaded_meta_bundles.borrow_mut().pop();
+                let Some(file) = next_meta_bundle else {
+                    break;
+                };
+                self.index_bundle_file(&file);
+            }
+
+            if let Some(encoded) = self.compressed_object_index.borrow().get(oid).cloned() {
+                if let Some(decoded) = decode_stored_loose_object(&encoded) {
+                    if encoded.len() <= 32_768 {
+                        cache_put(&cache_key, &encoded, CACHE_TTL_IMMUTABLE_SECS);
+                    }
+                    self.cache_loose_in_memory(*oid, decoded.clone());
+                    return Some(decoded);
+                }
+            }
+        }
+
+        // Only scan `unloaded_blob_bundles` if `oid` is a known Blob in `blob_size_cache` (or if no meta bundles recorded blob sizes)
+        let should_scan_blobs = self.blob_size_cache.borrow().contains_key(oid)
+            || !*self.has_separated_blob_bundles.borrow();
+
+        if should_scan_blobs {
+            loop {
+                let next_blob_file = self.unloaded_blob_bundles.borrow_mut().pop();
+                let Some(file) = next_blob_file else {
+                    break;
+                };
+                let json_str = file.get_blob().get_data_as_string(None);
+                let mut found_target: Option<Vec<u8>> = None;
+                if let Ok(bundle) = serde_json::from_str::<BTreeMap<String, String>>(&json_str) {
+                    drop(json_str);
+                    for (hex_key, encoded_val) in bundle {
+                        let Ok(b_oid) = ObjectId::from_hex(hex_key.as_bytes()) else {
+                            continue;
+                        };
+                        self.known_existing_objects.borrow_mut().insert(b_oid);
+                        if b_oid == *oid {
+                            if let Some(decoded) = decode_stored_loose_object(&encoded_val) {
+                                if encoded_val.len() <= 32_768 {
+                                    cache_put(&cache_key, &encoded_val, CACHE_TTL_IMMUTABLE_SECS);
+                                }
+                                self.cache_loose_in_memory(b_oid, decoded.clone());
+                                found_target = Some(decoded);
+                            }
+                        } else if encoded_val.len() <= 65_536
+                            && self.compressed_object_index.borrow().len() < 8_000
+                        {
+                            self.compressed_object_index
+                                .borrow_mut()
+                                .insert(b_oid, encoded_val);
+                        }
+                    }
+                }
+                if let Some(target_bytes) = found_target {
+                    return Some(target_bytes);
+                }
+            }
+        }
+
+        None
+    }
+
+    fn apply_commit_decorations(
+        commits: &mut [CommitItem],
+        head_sym: &str,
+        head_oid: Option<ObjectId>,
+        refs_map: &BTreeMap<String, ObjectId>,
+    ) {
+        let mut decoration_map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (rname, roid) in refs_map {
             let mut labels = Vec::new();
-            if Some(*roid) == head_oid && rname == &head_sym {
+            if Some(*roid) == head_oid && rname == head_sym {
                 let short = rname.strip_prefix("refs/heads/").unwrap_or(rname);
                 labels.push(format!("HEAD -> {}", short));
             } else if let Some(branch) = rname.strip_prefix("refs/heads/") {
@@ -1340,17 +1662,228 @@ impl GasGitStore {
             } else {
                 labels.push(rname.clone());
             }
-            decoration_map.entry(*roid).or_default().extend(labels);
+            decoration_map
+                .entry(roid.to_hex().to_string())
+                .or_default()
+                .extend(labels);
         }
-
         if let Some(h_oid) = head_oid {
-            let entry = decoration_map.entry(h_oid).or_default();
+            let entry = decoration_map.entry(h_oid.to_hex().to_string()).or_default();
             if !entry.iter().any(|s| s.starts_with("HEAD")) {
                 entry.insert(0, "HEAD".to_string());
             }
         }
+        for c in commits.iter_mut() {
+            c.refs = decoration_map.get(&c.oid).cloned().unwrap_or_default();
+        }
+    }
 
-        let mut commits = Vec::new();
+    /// Load all commits reachable from `HEAD` and `refs` using:
+    /// 1. Sharded + zlib-compressed `CacheService` (`gcommits_v2:<repo>`, ~2ms, 0 Drive calls).
+    /// 2. Persistent `commits_cache.json` in `repo_folder` on Google Drive (~250ms, 1 Drive file read).
+    /// 3. Incremental / time-budgeted (`MAX_COLD_SCAN_SECS = 24s`) commit walk that never decompresses
+    ///    `Tree` or `Blob` objects and checkpoints progress to `commits_cache.json` so initial index
+    ///    access on huge repositories never approaches GAS's 6-minute timeout.
+    pub fn load_all_commits(&self) -> Vec<CommitItem> {
+        if let Some(cached_commits) = cache_get_sharded_commits(&self.repo) {
+            return cached_commits;
+        }
+
+        let start_secs = current_unix_secs();
+        let head_sym = self
+            .head_symref()
+            .unwrap_or_else(|| DEFAULT_BRANCH.to_string());
+        let head_oid = self.resolve_ref("HEAD");
+        let refs_map = self.list_refs();
+        let head_hex = head_oid.map(|h| h.to_hex().to_string());
+        let refs_str_map: BTreeMap<String, String> = refs_map
+            .iter()
+            .map(|(k, v)| (k.clone(), v.to_hex().to_string()))
+            .collect();
+
+        // 1. Load persistent `commits_cache.json` from `repo_folder` if present
+        let mut commits_by_oid: BTreeMap<ObjectId, CommitItem> = BTreeMap::new();
+        let mut indexed_bundles: BTreeSet<String> = BTreeSet::new();
+
+        if let Ok(Some(cache_json)) =
+            self.with_repo_folder(|rf| read_text_file(rf, COMMITS_CACHE_FILE_NAME))
+        {
+            if let Ok(stored) = serde_json::from_str::<StoredCommitsCache>(&cache_json) {
+                indexed_bundles = stored.indexed_bundles;
+                if let Some(decompressed) = decode_stored_loose_object(&stored.commits_compressed) {
+                    if let Ok(mut cached_list) =
+                        serde_json::from_slice::<Vec<CommitItem>>(&decompressed)
+                    {
+                        if stored.complete
+                            && stored.head_oid == head_hex
+                            && stored.refs == refs_str_map
+                        {
+                            Self::apply_commit_decorations(
+                                &mut cached_list,
+                                &head_sym,
+                                head_oid,
+                                &refs_map,
+                            );
+                            cache_put_sharded_commits(&self.repo, &cached_list);
+                            return cached_list;
+                        }
+                        for item in cached_list {
+                            if let Ok(c_oid) = ObjectId::from_hex(item.oid.as_bytes()) {
+                                commits_by_oid.insert(c_oid, item);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Also include any commits already in `self.compressed_object_index` or `self.object_cache` (e.g. written in this request)
+        {
+            let obj_cache = self.object_cache.borrow();
+            for (&oid, loose) in obj_cache.iter() {
+                if !commits_by_oid.contains_key(&oid) && loose.starts_with(b"commit ") {
+                    if let Some(item) = parse_commit_item_from_loose(oid, loose) {
+                        commits_by_oid.insert(oid, item);
+                    }
+                }
+            }
+        }
+        {
+            let comp_idx = self.compressed_object_index.borrow();
+            for (&oid, encoded) in comp_idx.iter() {
+                if !commits_by_oid.contains_key(&oid) {
+                    if let Some(loose) = decode_if_commit_loose_object(encoded) {
+                        if let Some(item) = parse_commit_item_from_loose(oid, &loose) {
+                            commits_by_oid.insert(oid, item);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Catalog `objects/` without downloading blobs
+        self.ensure_bundle_catalog_loaded();
+
+        let mut hit_time_budget = false;
+
+        // Helper closure to scan a single bundle file, indexing its compressed strings into `compressed_object_index`
+        // and extracting ONLY Commit objects via the 1-microsecond 16-byte header probe (`decode_if_commit_loose_object`).
+        let scan_bundle_for_commits =
+            |file: &GasFile,
+             commits_by_oid: &mut BTreeMap<ObjectId, CommitItem>,
+             indexed_bundles: &mut BTreeSet<String>| {
+                let fname = file.get_name();
+                if indexed_bundles.contains(&fname) {
+                    return;
+                }
+                let json_str = file.get_blob().get_data_as_string(None);
+                if let Ok(bundle) = serde_json::from_str::<BTreeMap<String, String>>(&json_str) {
+                    drop(json_str);
+                    let mut comp_idx = self.compressed_object_index.borrow_mut();
+                    let mut blob_sizes = self.blob_size_cache.borrow_mut();
+                    let mut known = self.known_existing_objects.borrow_mut();
+
+                    for (hex_key, encoded_val) in bundle {
+                        if let Some(oid_hex) = hex_key.strip_prefix(BLOB_SIZE_PREFIX) {
+                            if let (Ok(b_oid), Ok(sz)) = (
+                                ObjectId::from_hex(oid_hex.as_bytes()),
+                                encoded_val.trim().parse::<usize>(),
+                            ) {
+                                known.insert(b_oid);
+                                blob_sizes.insert(b_oid, sz);
+                            }
+                            continue;
+                        }
+                        if let Ok(b_oid) = ObjectId::from_hex(hex_key.as_bytes()) {
+                            known.insert(b_oid);
+                            if !commits_by_oid.contains_key(&b_oid) {
+                                if let Some(loose) = decode_if_commit_loose_object(&encoded_val) {
+                                    if let Some(item) = parse_commit_item_from_loose(b_oid, &loose)
+                                    {
+                                        commits_by_oid.insert(b_oid, item);
+                                    }
+                                }
+                            }
+                            comp_idx.insert(b_oid, encoded_val);
+                        }
+                    }
+                    indexed_bundles.insert(fname);
+                }
+            };
+
+        // First scan compact `bundle_commit_*.json` files (contain only Commit & Tag objects!)
+        while let Some(file) = self.unloaded_commit_bundles.borrow_mut().pop() {
+            let fname = file.get_name();
+            if !indexed_bundles.contains(&fname) {
+                scan_bundle_for_commits(&file, &mut commits_by_oid, &mut indexed_bundles);
+                if !commits_by_oid.is_empty()
+                    && current_unix_secs().saturating_sub(start_secs) >= MAX_COLD_SCAN_SECS
+                    && !self.unloaded_commit_bundles.borrow().is_empty()
+                {
+                    hit_time_budget = true;
+                    break;
+                }
+            }
+        }
+
+        let is_graph_complete = |map: &BTreeMap<ObjectId, CommitItem>| -> bool {
+            let mut roots: Vec<ObjectId> = Vec::new();
+            if let Some(h) = head_oid {
+                roots.push(h);
+            }
+            for &r in refs_map.values() {
+                if !roots.contains(&r) {
+                    roots.push(r);
+                }
+            }
+            if roots.is_empty() {
+                return false;
+            }
+            let mut seen = BTreeSet::new();
+            let mut q: VecDeque<ObjectId> = roots.into_iter().collect();
+            while let Some(curr) = q.pop_front() {
+                if !seen.insert(curr) {
+                    continue;
+                }
+                let Some(c_item) = map.get(&curr) else {
+                    return false;
+                };
+                for p_hex in &c_item.parents {
+                    if let Ok(p_oid) = ObjectId::from_hex(p_hex.as_bytes()) {
+                        if !seen.contains(&p_oid) {
+                            q.push_back(p_oid);
+                        }
+                    }
+                }
+            }
+            true
+        };
+
+        // Next, only if the commit graph from HEAD/refs is not yet complete in `commits_by_oid`,
+        // scan any unindexed `bundle_meta_*.json` / `bundle_*.json` files within the 18-second time budget.
+        if !hit_time_budget && !is_graph_complete(&commits_by_oid) {
+            while let Some(file) = self.unloaded_meta_bundles.borrow_mut().pop() {
+                let fname = file.get_name();
+                if indexed_bundles.contains(&fname) {
+                    continue;
+                }
+                scan_bundle_for_commits(&file, &mut commits_by_oid, &mut indexed_bundles);
+                if is_graph_complete(&commits_by_oid) {
+                    break;
+                }
+                if !commits_by_oid.is_empty()
+                    && current_unix_secs().saturating_sub(start_secs) >= MAX_COLD_SCAN_SECS
+                    && !self.unloaded_meta_bundles.borrow().is_empty()
+                {
+                    hit_time_budget = true;
+                    break;
+                }
+            }
+        }
+
+        // Collect reachable commits from `HEAD` and `refs` (plus any indexed commits if `HEAD` was in a newer bundle
+        // or if all bundles were scanned)
+        let mut reachable: Vec<CommitItem> = Vec::new();
         let mut visited: BTreeSet<ObjectId> = BTreeSet::new();
         let mut queue: VecDeque<ObjectId> = VecDeque::new();
 
@@ -1367,98 +1900,54 @@ impl GasGitStore {
             if !visited.insert(oid) {
                 continue;
             }
-            let Some(loose) = self.read_loose_object(&oid) else {
-                continue;
-            };
-            if let Ok(ObjectRef::Commit(c)) = ObjectRef::from_loose(&loose) {
-                let parents: Vec<String> = c.parents().map(|p| p.to_hex().to_string()).collect();
-                for p in c.parents() {
-                    queue.push_back(p);
+            if let Some(item) = commits_by_oid.get(&oid) {
+                for p_hex in &item.parents {
+                    if let Ok(p_oid) = ObjectId::from_hex(p_hex.as_bytes()) {
+                        if !visited.contains(&p_oid) {
+                            queue.push_back(p_oid);
+                        }
+                    }
                 }
-                let (author_name, author_email) = match c.author().or_else(|_| c.committer()) {
-                    Ok(sig) => (
-                        sig.name.to_str_lossy().into_owned(),
-                        sig.email.to_str_lossy().into_owned(),
-                    ),
-                    Err(_) => ("Unknown".to_string(), String::new()),
-                };
-                let timestamp = match c.time() {
-                    Ok(t) => t.seconds,
-                    Err(_) => 0,
-                };
-                let full_msg = c.message.to_str_lossy();
-                let summary = full_msg.lines().next().unwrap_or("").to_string();
-                let body = full_msg.to_string();
-                let refs = decoration_map.get(&oid).cloned().unwrap_or_default();
-
-                let hex = oid.to_hex().to_string();
-                let short_oid = hex[..7.min(hex.len())].to_string();
-
-                commits.push(CommitItem {
-                    oid: hex,
-                    short_oid,
-                    parents,
-                    author_name,
-                    author_email,
-                    timestamp,
-                    summary,
-                    body,
-                    refs,
-                });
+                reachable.push(item.clone());
             }
         }
 
-        if commits.is_empty() || *self.bundles_loaded.borrow() {
-            self.ensure_bundles_loaded();
-            let cached_oids: Vec<ObjectId> = self.object_cache.borrow().keys().copied().collect();
-            for oid in cached_oids {
-                if visited.contains(&oid) {
-                    continue;
-                }
-                let Some(loose) = self.read_loose_object(&oid) else {
-                    continue;
-                };
-                if let Ok(ObjectRef::Commit(c)) = ObjectRef::from_loose(&loose) {
-                    visited.insert(oid);
-                    let parents: Vec<String> = c.parents().map(|p| p.to_hex().to_string()).collect();
-                    let (author_name, author_email) = match c.author().or_else(|_| c.committer()) {
-                        Ok(sig) => (
-                            sig.name.to_str_lossy().into_owned(),
-                            sig.email.to_str_lossy().into_owned(),
-                        ),
-                        Err(_) => ("Unknown".to_string(), String::new()),
-                    };
-                    let timestamp = match c.time() {
-                        Ok(t) => t.seconds,
-                        Err(_) => 0,
-                    };
-                    let full_msg = c.message.to_str_lossy();
-                    let summary = full_msg.lines().next().unwrap_or("").to_string();
-                    let body = full_msg.to_string();
-                    let refs = decoration_map.get(&oid).cloned().unwrap_or_default();
-                    let hex = oid.to_hex().to_string();
-                    let short_oid = hex[..7.min(hex.len())].to_string();
+        // Include any additional indexed commits (e.g. when a mid-history bundle was scanned before its child bundle,
+        // or in repositories with loose commits) so progressive indexing never loses commits scanned from a bundle!
+        for (oid, item) in &commits_by_oid {
+            if !visited.contains(oid) {
+                reachable.push(item.clone());
+            }
+        }
 
-                    commits.push(CommitItem {
-                        oid: hex,
-                        short_oid,
-                        parents,
-                        author_name,
-                        author_email,
-                        timestamp,
-                        summary,
-                        body,
-                        refs,
+        Self::apply_commit_decorations(&mut reachable, &head_sym, head_oid, &refs_map);
+        reachable.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| a.oid.cmp(&b.oid)));
+
+        // Persist `commits_cache.json` to `repo_folder` so subsequent requests (or progressive continuation)
+        // never re-download already-indexed bundles!
+        if !reachable.is_empty() || !indexed_bundles.is_empty() {
+            if let Ok(commits_bytes) = serde_json::to_vec(&reachable) {
+                let compressed = encode_stored_loose_object(&commits_bytes);
+                let stored = StoredCommitsCache {
+                    head_oid: head_hex,
+                    refs: refs_str_map,
+                    complete: !hit_time_budget,
+                    indexed_bundles,
+                    frontier: Vec::new(),
+                    commits_compressed: compressed,
+                };
+                if let Ok(stored_json) = serde_json::to_string(&stored) {
+                    let _ = self.with_repo_folder(|rf| {
+                        write_text_file(rf, COMMITS_CACHE_FILE_NAME, &stored_json, "application/json")
                     });
                 }
             }
+            if !hit_time_budget {
+                cache_put_sharded_commits(&self.repo, &reachable);
+            }
         }
 
-        commits.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| a.oid.cmp(&b.oid)));
-        if let Ok(serialized) = serde_json::to_string(&commits) {
-            cache_put(&commits_key, &serialized, CACHE_TTL_META_SECS);
-        }
-        commits
+        reachable
     }
 
     /// Read and decode `(ObjectKind, Vec<u8>)` (body without loose header) for `oid`.
@@ -2371,7 +2860,7 @@ pub fn build_web_ui_state(
     selected_project: Option<String>,
     message: Option<String>,
 ) -> WebUiStateResponse {
-    let base_url = get_env_or_script_property(ENV_GAS_WEB_APP_URL)
+    let base_url = get_web_app_exec_url()
         .unwrap_or_else(|| "https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec".to_string());
 
     match get_root_drive_folder_id() {
@@ -2528,93 +3017,7 @@ pub fn get_commits_json(project_name: &str) -> String {
         return serde_json::to_string(&res).unwrap_or_default();
     }
 
-    let mut decoration_map: BTreeMap<ObjectId, Vec<String>> = BTreeMap::new();
-    for (rname, roid) in &refs_map {
-        let mut labels = Vec::new();
-        if Some(*roid) == head_oid && rname == &head_sym {
-            let short = rname.strip_prefix("refs/heads/").unwrap_or(rname);
-            labels.push(format!("HEAD -> {}", short));
-        } else if let Some(branch) = rname.strip_prefix("refs/heads/") {
-            labels.push(branch.to_string());
-        } else if let Some(tag) = rname.strip_prefix("refs/tags/") {
-            labels.push(format!("tag: {}", tag));
-        } else {
-            labels.push(rname.clone());
-        }
-        decoration_map.entry(*roid).or_default().extend(labels);
-    }
-
-    if let Some(h_oid) = head_oid {
-        let entry = decoration_map.entry(h_oid).or_default();
-        if !entry.iter().any(|s| s.starts_with("HEAD")) {
-            entry.insert(0, "HEAD".to_string());
-        }
-    }
-
-    let mut commits = Vec::new();
-    let mut visited: BTreeSet<ObjectId> = BTreeSet::new();
-    let mut queue: VecDeque<ObjectId> = VecDeque::new();
-
-    if let Some(h) = head_oid {
-        queue.push_back(h);
-    }
-    for roid in refs_map.values() {
-        if !queue.contains(roid) {
-            queue.push_back(*roid);
-        }
-    }
-
-    while let Some(oid) = queue.pop_front() {
-        if !visited.insert(oid) {
-            continue;
-        }
-        if commits.len() >= 100 {
-            break;
-        }
-        let Some(loose) = store.read_loose_object(&oid) else {
-            continue;
-        };
-        if let Ok(obj_ref) = ObjectRef::from_loose(&loose) {
-            if let ObjectRef::Commit(c) = obj_ref {
-                let parents: Vec<String> = c.parents().map(|p| p.to_hex().to_string()).collect();
-                for p in c.parents() {
-                    queue.push_back(p);
-                }
-                let (author_name, author_email) = match c.author().or_else(|_| c.committer()) {
-                    Ok(sig) => (
-                        sig.name.to_str_lossy().into_owned(),
-                        sig.email.to_str_lossy().into_owned(),
-                    ),
-                    Err(_) => ("Unknown".to_string(), String::new()),
-                };
-                let timestamp = match c.time() {
-                    Ok(t) => t.seconds,
-                    Err(_) => 0,
-                };
-                let full_msg = c.message.to_str_lossy();
-                let summary = full_msg.lines().next().unwrap_or("").to_string();
-                let body = full_msg.to_string();
-                let refs = decoration_map.get(&oid).cloned().unwrap_or_default();
-
-                let hex = oid.to_hex().to_string();
-                let short_oid = hex[..7.min(hex.len())].to_string();
-
-                commits.push(CommitItem {
-                    oid: hex,
-                    short_oid,
-                    parents,
-                    author_name,
-                    author_email,
-                    timestamp,
-                    summary,
-                    body,
-                    refs,
-                });
-            }
-        }
-    }
-
-    commits.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    let commits = store.load_all_commits();
 
     let res = RepoCommitsResponse {
         ok: true,
@@ -4586,7 +4989,7 @@ fn handle_commit_browser_get(
         .web_app_url
         .clone()
         .filter(|s| !s.trim().is_empty())
-        .or_else(|| get_env_or_script_property(ENV_GAS_WEB_APP_URL));
+        .or_else(get_web_app_exec_url);
 
     let store = match GasGitStore::open(project_name) {
         Ok(s) => s,

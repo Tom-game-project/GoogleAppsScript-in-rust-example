@@ -19,6 +19,7 @@ import gas_git_ui/types.{
   type RepoSummary, type ServerState, InspectorChanges, InspectorDirectoryTree,
   TabGraph,
 }
+import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string
@@ -50,6 +51,7 @@ pub type Model {
     view_mode: ViewMode,
     history_tab: HistoryTab,
     active_commits: Option(RepoCommits),
+    commit_page: Int,
     selected_commit_oid: Option(String),
     active_commit_detail: Option(CommitDetail),
     is_detail_loading: Bool,
@@ -74,6 +76,7 @@ pub type Msg {
   BackToOverview
   ForceRefreshCommits(project_name: String, head_oid: String)
   SwitchHistoryTab(HistoryTab)
+  SelectCommitPage(page: Int)
   SelectCommitForInspection(commit_oid: String)
   CommitDetailReceived(Result(CommitDetail, String))
   CloseCommitInspector
@@ -101,6 +104,7 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       view_mode: ViewOverview,
       history_tab: TabGraph,
       active_commits: None,
+      commit_page: 1,
       selected_commit_oid: None,
       active_commit_detail: None,
       is_detail_loading: False,
@@ -206,6 +210,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         ..model,
         view_mode: ViewCommits(project_name),
         active_commits: None,
+        commit_page: 1,
         selected_commit_oid: None,
         active_commit_detail: None,
         is_detail_loading: False,
@@ -240,6 +245,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           ..model,
           repositories: updated_repositories,
           active_commits: Some(repo_commits),
+          commit_page: 1,
           is_loading: False,
           error: None,
         ),
@@ -267,6 +273,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     ForceRefreshCommits(project_name, head_oid) -> #(
       Model(
         ..model,
+        commit_page: 1,
         selected_commit_oid: None,
         active_commit_detail: None,
         is_detail_loading: False,
@@ -278,6 +285,11 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
 
     SwitchHistoryTab(tab) -> #(
       Model(..model, history_tab: tab),
+      effect.none(),
+    )
+
+    SelectCommitPage(page) -> #(
+      Model(..model, commit_page: int.max(1, page)),
       effect.none(),
     )
 
@@ -392,6 +404,7 @@ pub fn view(model: Model) -> Element(Msg) {
           Some(repo_commits) ->
             commit_view.view_commit_history(
               repo_commits,
+              model.commit_page,
               model.history_tab,
               model.selected_commit_oid,
               model.active_commit_detail,
@@ -406,6 +419,7 @@ pub fn view(model: Model) -> Element(Msg) {
                 repo_commits.head_oid,
               ),
               SwitchHistoryTab,
+              SelectCommitPage,
               SelectCommitForInspection,
               CloseCommitInspector,
               SwitchInspectorTab,

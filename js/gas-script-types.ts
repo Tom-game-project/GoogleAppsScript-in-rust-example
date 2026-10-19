@@ -91,6 +91,42 @@ export class GasAuthorizationInfo {
 	}
 }
 
+export class GasService {
+	public readonly service: GoogleAppsScript.Script.Service | null;
+
+	constructor(serviceObject: GoogleAppsScript.Script.Service | null) {
+		this.service = serviceObject;
+	}
+
+	disable(): void {
+		if (this.service && typeof this.service.disable === "function") {
+			this.service.disable();
+		}
+	}
+
+	getUrl(): string | undefined {
+		try {
+			if (!this.service || typeof this.service.getUrl !== "function") {
+				return undefined;
+			}
+			const url = this.service.getUrl();
+			return url === null || url === undefined || url.trim() === "" ? undefined : url.trim();
+		} catch {
+			return undefined;
+		}
+	}
+
+	isEnabled(): boolean {
+		try {
+			return this.service && typeof this.service.isEnabled === "function"
+				? Boolean(this.service.isEnabled())
+				: false;
+		} catch {
+			return false;
+		}
+	}
+}
+
 export class GasTrigger {
 	public readonly trigger: GoogleAppsScript.Script.Trigger;
 

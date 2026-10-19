@@ -37,6 +37,14 @@ interface gas-script-types {
 		get-authorization-url: func() -> option<string>;
 	}
 
+	/// https://developers.google.com/apps-script/reference/script/service
+	resource gas-service {
+		constructor();
+		disable: func();
+		get-url: func() -> option<string>;
+		is-enabled: func() -> bool;
+	}
+
 	resource gas-trigger {
 		constructor();
 		get-event-type: func() -> event-type;
@@ -55,6 +63,7 @@ interface gas-script-app {
 		event-type,
 		trigger-source,
 		gas-authorization-info,
+		gas-service,
 		gas-trigger,
 	};
 
@@ -64,6 +73,7 @@ interface gas-script-app {
 	get-oauth-token: func() -> string;
 	get-project-triggers: func() -> list<gas-trigger>;
 	get-script-id: func() -> string;
+	get-service: func() -> gas-service;
 	invalidate-auth: func();
 }
 

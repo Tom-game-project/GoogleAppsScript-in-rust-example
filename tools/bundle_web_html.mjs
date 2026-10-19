@@ -575,6 +575,7 @@ function getFallbackBundleCode() {
         new_repo_description: "",
         view_mode: "overview",
         active_commits: null,
+        commit_page: 1,
         cached_commits: new Map(),
         is_loading: true,
         message: new None(),
@@ -741,7 +742,10 @@ function getFallbackBundleCode() {
       }
       if (msg.type === "ForceRefreshCommits") {
         model.cached_commits.delete(msg.project_name);
-        return [{ ...model, is_loading: true, error: new None() }, fetchCommitsEffect(msg.project_name, msg.head_oid, true)];
+        return [{ ...model, commit_page: 1, is_loading: true, error: new None() }, fetchCommitsEffect(msg.project_name, msg.head_oid, true)];
+      }
+      if (msg.type === "SelectCommitPage") {
+        return [{ ...model, commit_page: Math.max(1, Number(msg.page) || 1) }, effect.none()];
       }
       return [model, effect.none()];
     }
@@ -756,7 +760,69 @@ function getFallbackBundleCode() {
           ]));
         }
 
-        const commits = rc.commits.toArray();
+        const COMMITS_PER_PAGE = 100;
+        const allCommits = rc.commits.toArray();
+        const totalCommits = allCommits.length;
+        const totalPages = totalCommits <= 0 ? 1 : Math.ceil(totalCommits / COMMITS_PER_PAGE);
+        const safePage = Math.min(Math.max(1, model.commit_page || 1), totalPages);
+        const startIdx = (safePage - 1) * COMMITS_PER_PAGE;
+        const commits = allCommits.slice(startIdx, startIdx + COMMITS_PER_PAGE);
+        const rangeStart = totalCommits === 0 ? 0 : startIdx + 1;
+        const rangeEnd = startIdx + commits.length;
+
+        const renderPaginationBar = () => {
+          if (totalCommits === 0) return text("");
+          const pageButtons = [];
+          for (let p = 1; p <= totalPages; p++) {
+            const isCurr = p === safePage;
+            pageButtons.push(
+              html.button(toList([
+                attribute.type_("button"),
+                attribute.disabled(isCurr),
+                event.on_click({ type: "SelectCommitPage", page: p }),
+              ]), toList([text(isCurr ? "[" + p + "]" : String(p))])),
+              text(" ")
+            );
+          }
+          return html.div(toList([
+            attribute.attribute("style", "margin: 10px 0; padding: 8px 10px; background: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 4px;"),
+          ]), toList([
+            html.div(toList([attribute.attribute("style", "margin-bottom: 6px;")]), toList([
+              html.strong(toList([]), toList([
+                text(\`Showing commits \${rangeStart}–\${rangeEnd} of \${totalCommits} (Page \${safePage} / \${totalPages} · \${COMMITS_PER_PAGE} commits/page, newest first / 最新コミット順)\`),
+              ])),
+            ])),
+            totalPages > 1
+              ? html.div(toList([]), toList([
+                  html.button(toList([
+                    attribute.type_("button"),
+                    attribute.disabled(safePage <= 1),
+                    event.on_click({ type: "SelectCommitPage", page: 1 }),
+                  ]), toList([text("« First (1)")])),
+                  text(" "),
+                  html.button(toList([
+                    attribute.type_("button"),
+                    attribute.disabled(safePage <= 1),
+                    event.on_click({ type: "SelectCommitPage", page: safePage - 1 }),
+                  ]), toList([text("‹ Newer 100 / 前の100件 (新しい順)")])),
+                  text(" "),
+                  ...pageButtons,
+                  html.button(toList([
+                    attribute.type_("button"),
+                    attribute.disabled(safePage >= totalPages),
+                    event.on_click({ type: "SelectCommitPage", page: safePage + 1 }),
+                  ]), toList([text("Older 100 / 次の100件 (古い順) ›")])),
+                  text(" "),
+                  html.button(toList([
+                    attribute.type_("button"),
+                    attribute.disabled(safePage >= totalPages),
+                    event.on_click({ type: "SelectCommitPage", page: totalPages }),
+                  ]), toList([text(\`Last (\${totalPages}) »\`)])),
+                ]))
+              : text(""),
+          ]));
+        };
+
         return html.div(toList([attribute.id("gas-git-web-ui")]), toList([
           html.section(toList([]), toList([
             html.div(toList([]), toList([
@@ -768,7 +834,7 @@ function getFallbackBundleCode() {
                 event.on_click({ type: "ForceRefreshCommits", project_name: rc.project_name, head_oid: rc.head_oid }),
               ]), toList([text("Force refresh / 最新コミット再取得")])),
             ])),
-            html.h2(toList([]), toList([text(\`Project: \${rc.project_name} (commits: \${commits.length})\`)])),
+            html.h2(toList([]), toList([text(\`Project: \${rc.project_name} (commits: \${totalCommits} — Page \${safePage}/\${totalPages})\`)])),
             html.p(toList([]), toList([
               text("HEAD: "),
               rc.head_oid ? html.code(toList([]), toList([text(rc.head_oid)])) : text("None (empty repository)"),
@@ -779,7 +845,8 @@ function getFallbackBundleCode() {
                 ? html.strong(toList([]), toList([text("[HIT: localStorage cache (0ms)]")]))
                 : html.span(toList([]), toList([text("[MISS: fetched fresh from GAS]")])),
             ])),
-            commits.length === 0
+            renderPaginationBar(),
+            totalCommits === 0
               ? html.p(toList([]), toList([text("No commits yet in this repository. Push your first commit using git push!")]))
               : html.table(toList([attribute.attribute("border", "1")]), toList([
                   html.thead(toList([]), toList([
@@ -829,6 +896,7 @@ function getFallbackBundleCode() {
                     ])),
                   ])),
                 ])),
+            totalPages > 1 ? renderPaginationBar() : text(""),
           ])),
         ]));
       }

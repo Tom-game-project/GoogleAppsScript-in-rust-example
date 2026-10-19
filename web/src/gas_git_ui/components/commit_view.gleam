@@ -1,5 +1,5 @@
-//// Commit history, same-page Graph/Log switcher, and Commit Inspector component
-//// (file changes diff + interactive directory/file tree browser at any commit).
+//// Commit history, same-page Graph/Log switcher, 100-commits-per-page pagination,
+//// and Commit Inspector component (file changes diff + interactive directory/file tree browser at any commit).
 
 import gas_git_ui/graph
 import gas_git_ui/types.{
@@ -16,8 +16,11 @@ import lustre/element.{type Element, text}
 import lustre/element/html
 import lustre/event
 
+pub const commits_per_page = 100
+
 pub fn view_commit_history(
   repo_commits: RepoCommits,
+  commit_page: Int,
   history_tab: HistoryTab,
   selected_commit_oid: Option(String),
   active_commit_detail: Option(CommitDetail),
@@ -29,6 +32,7 @@ pub fn view_commit_history(
   on_back: msg,
   on_force_refresh: msg,
   on_switch_history_tab: fn(HistoryTab) -> msg,
+  on_select_page: fn(Int) -> msg,
   on_select_commit: fn(String) -> msg,
   on_close_inspector: msg,
   on_switch_inspector_tab: fn(CommitInspectorTab) -> msg,
@@ -38,6 +42,17 @@ pub fn view_commit_history(
 ) -> Element(msg) {
   let commit_count = list.length(repo_commits.commits)
   let count_label = int.to_string(commit_count)
+  let total_pages = case commit_count <= 0 {
+    True -> 1
+    False -> { commit_count + commits_per_page - 1 } / commits_per_page
+  }
+  let safe_page = int.min(int.max(1, commit_page), total_pages)
+  let start_idx = { safe_page - 1 } * commits_per_page
+  let page_commits =
+    repo_commits.commits
+    |> list.drop(start_idx)
+    |> list.take(commits_per_page)
+  let end_idx = start_idx + list.length(page_commits)
 
   html.section([], [
     html.div([], [
@@ -61,6 +76,10 @@ pub fn view_commit_history(
         <> repo_commits.project_name
         <> " (commits: "
         <> count_label
+        <> " — Page "
+        <> int.to_string(safe_page)
+        <> "/"
+        <> int.to_string(total_pages)
         <> ")",
       ),
     ]),
@@ -100,9 +119,17 @@ pub fn view_commit_history(
             ),
           ]),
         ])
-      commits ->
+      _ ->
         html.div([], [
           view_history_mode_switcher(history_tab, on_switch_history_tab),
+          view_commit_pagination_bar(
+            safe_page,
+            total_pages,
+            start_idx + 1,
+            end_idx,
+            commit_count,
+            on_select_page,
+          ),
           case history_tab {
             TabGraph ->
               html.div([], [
@@ -120,7 +147,7 @@ pub fn view_commit_history(
                   ],
                   [
                     graph.render_svg_graph(
-                      commits,
+                      page_commits,
                       selected_commit_oid,
                       on_select_commit,
                     ),
@@ -129,10 +156,22 @@ pub fn view_commit_history(
               ])
             TabCommitLog ->
               view_commit_log_table(
-                commits,
+                page_commits,
                 selected_commit_oid,
                 on_select_commit,
               )
+          },
+          case total_pages > 1 {
+            True ->
+              view_commit_pagination_bar(
+                safe_page,
+                total_pages,
+                start_idx + 1,
+                end_idx,
+                commit_count,
+                on_select_page,
+              )
+            False -> text("")
           },
           view_commit_inspector_panel(
             selected_commit_oid,
@@ -151,6 +190,121 @@ pub fn view_commit_history(
         ])
     },
   ])
+}
+
+fn view_commit_pagination_bar(
+  current_page: Int,
+  total_pages: Int,
+  range_start: Int,
+  range_end: Int,
+  total_commits: Int,
+  on_select_page: fn(Int) -> msg,
+) -> Element(msg) {
+  let page_numbers = build_page_range(1, total_pages, [])
+
+  html.div(
+    [
+      attribute.attribute(
+        "style",
+        "margin: 10px 0; padding: 8px 10px; background: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 4px;",
+      ),
+    ],
+    [
+      html.div([attribute.attribute("style", "margin-bottom: 6px;")], [
+        html.strong([], [
+          text(
+            "Showing commits "
+            <> int.to_string(range_start)
+            <> "–"
+            <> int.to_string(range_end)
+            <> " of "
+            <> int.to_string(total_commits)
+            <> " (Page "
+            <> int.to_string(current_page)
+            <> " / "
+            <> int.to_string(total_pages)
+            <> " · "
+            <> int.to_string(commits_per_page)
+            <> " commits/page, newest first / 最新コミット順)",
+          ),
+        ]),
+      ]),
+      case total_pages > 1 {
+        False -> text("")
+        True ->
+          html.div(
+            [],
+            list.flatten([
+              [
+                html.button(
+                  [
+                    attribute.type_("button"),
+                    attribute.disabled(current_page <= 1),
+                    event.on_click(on_select_page(1)),
+                  ],
+                  [text("« First (1)")],
+                ),
+                text(" "),
+                html.button(
+                  [
+                    attribute.type_("button"),
+                    attribute.disabled(current_page <= 1),
+                    event.on_click(on_select_page(current_page - 1)),
+                  ],
+                  [text("‹ Newer 100 / 前の100件 (新しい順)")],
+                ),
+                text(" "),
+              ],
+              list.map(page_numbers, fn(p) {
+                let is_curr = p == current_page
+                html.span([], [
+                  html.button(
+                    [
+                      attribute.type_("button"),
+                      attribute.disabled(is_curr),
+                      event.on_click(on_select_page(p)),
+                    ],
+                    [
+                      text(case is_curr {
+                        True -> "[" <> int.to_string(p) <> "]"
+                        False -> int.to_string(p)
+                      }),
+                    ],
+                  ),
+                  text(" "),
+                ])
+              }),
+              [
+                html.button(
+                  [
+                    attribute.type_("button"),
+                    attribute.disabled(current_page >= total_pages),
+                    event.on_click(on_select_page(current_page + 1)),
+                  ],
+                  [text("Older 100 / 次の100件 (古い順) ›")],
+                ),
+                text(" "),
+                html.button(
+                  [
+                    attribute.type_("button"),
+                    attribute.disabled(current_page >= total_pages),
+                    event.on_click(on_select_page(total_pages)),
+                  ],
+                  [text("Last (" <> int.to_string(total_pages) <> ") »")],
+                ),
+              ],
+            ]),
+          )
+      },
+    ],
+  )
+}
+
+fn build_page_range(curr: Int, max_p: Int, acc: List(Int)) -> List(Int) {
+  case curr > max_p {
+    True -> list.reverse(acc)
+    False -> build_page_range(curr + 1, max_p, [curr, ..acc])
+  }
 }
 
 fn view_history_mode_switcher(
