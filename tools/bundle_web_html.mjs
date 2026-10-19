@@ -596,20 +596,39 @@ function getFallbackBundleCode() {
       return [model, eff];
     }
 
+    function isCommitPayloadComplete(data, cleanHead) {
+      if (!data?.ok || !Array.isArray(data?.commits)) return false;
+      const actualHead = String(data?.head_oid ?? cleanHead ?? "").trim();
+      if (!actualHead) return true;
+      if (data.commits.length === 0) return false;
+      const oidSet = new Set(data.commits.map((c) => String(c?.oid ?? "").trim()).filter(Boolean));
+      if (!oidSet.has(actualHead)) return false;
+      for (const c of data.commits) {
+        const parents = Array.isArray(c?.parents) ? c.parents : [];
+        for (const p of parents) {
+          const ps = String(p ?? "").trim();
+          if (ps && !oidSet.has(ps)) return false;
+        }
+      }
+      return true;
+    }
+
     function saveCommitsToLocalCache(projectName, requestedHead, data) {
-      if (!data?.ok || typeof window === "undefined" || !window.localStorage) return;
+      if (!isCommitPayloadComplete(data, requestedHead) || typeof window === "undefined" || !window.localStorage) return;
       try {
-        const prefix = \`gas_git_commits_\${projectName}_\`;
+        const prefix = \`gas_git_commits_v2_\${projectName}_\`;
+        const legacyPrefix = \`gas_git_commits_\${projectName}_\`;
         const keysToRemove = [];
         for (let i = 0; i < window.localStorage.length; i++) {
           const k = window.localStorage.key(i);
-          if (k && k.startsWith(prefix)) keysToRemove.push(k);
+          if (k && (k.startsWith(prefix) || k.startsWith(legacyPrefix))) keysToRemove.push(k);
         }
         for (const k of keysToRemove) window.localStorage.removeItem(k);
+        window.localStorage.removeItem(\`gas_git_commits_latest_\${projectName}\`);
         const actualHead = String(data?.head_oid ?? requestedHead ?? "").trim();
         const serialized = JSON.stringify(data);
         if (actualHead) window.localStorage.setItem(\`\${prefix}\${actualHead}\`, serialized);
-        window.localStorage.setItem(\`gas_git_commits_latest_\${projectName}\`, serialized);
+        window.localStorage.setItem(\`gas_git_commits_v2_latest_\${projectName}\`, serialized);
       } catch (_) {}
     }
 
@@ -617,14 +636,17 @@ function getFallbackBundleCode() {
       if (typeof window === "undefined" || !window.localStorage) return null;
       try {
         if (cleanHead) {
-          const byHead = window.localStorage.getItem(\`gas_git_commits_\${projectName}_\${cleanHead}\`);
-          if (byHead) return JSON.parse(byHead);
+          const byHead = window.localStorage.getItem(\`gas_git_commits_v2_\${projectName}_\${cleanHead}\`);
+          if (byHead) {
+            const parsed = JSON.parse(byHead);
+            if (isCommitPayloadComplete(parsed, cleanHead)) return parsed;
+          }
         }
-        const latestRaw = window.localStorage.getItem(\`gas_git_commits_latest_\${projectName}\`);
+        const latestRaw = window.localStorage.getItem(\`gas_git_commits_v2_latest_\${projectName}\`);
         if (latestRaw) {
           const parsed = JSON.parse(latestRaw);
           const cachedHead = String(parsed?.head_oid ?? "").trim();
-          if (!cleanHead || cachedHead === cleanHead) return parsed;
+          if ((!cleanHead || cachedHead === cleanHead) && isCommitPayloadComplete(parsed, cleanHead)) return parsed;
         }
       } catch (_) {}
       return null;

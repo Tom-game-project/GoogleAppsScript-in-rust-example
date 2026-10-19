@@ -187,7 +187,9 @@ struct StoredCommitsCache {
 }
 
 fn current_unix_secs() -> u64 {
-    crate::bindings::wasi::clocks::system_clock::now().seconds
+    crate::bindings::wasi::clocks::system_clock::now()
+        .seconds
+        .max(0) as u64
 }
 
 fn repo_exists_cache_key(repo: &str) -> String {
@@ -325,7 +327,7 @@ const HEAD_FILE_NAME: &str = "HEAD";
 const REFS_FILE_NAME: &str = "refs.json";
 const COMMITS_CACHE_FILE_NAME: &str = "commits_cache.json";
 const OBJECTS_FOLDER_NAME: &str = "objects";
-const MAX_COLD_SCAN_SECS: u64 = 18; // Stop cold legacy bundle downloads at 18s and checkpoint to commits_cache.json
+const MAX_COLD_SCAN_SECS: u64 = 200; // Allow up to 200s for cold legacy bundle scans (well under GAS 360s limit) before checkpointing
 
 /// Escape a string for safe inclusion in HTML text or double/single-quoted attribute contexts.
 pub fn escape_html(input: &str) -> String {
@@ -1130,12 +1132,14 @@ impl GasGitStore {
         }
         let mut commits_by_oid: BTreeMap<String, CommitItem> = BTreeMap::new();
         let mut indexed_bundles: BTreeSet<String> = BTreeSet::new();
-        let mut was_complete = true;
+        let mut had_existing_cache = false;
+        let mut was_complete = false;
 
         if let Ok(Some(cache_json)) =
             self.with_repo_folder(|rf| read_text_file(rf, COMMITS_CACHE_FILE_NAME))
         {
             if let Ok(stored) = serde_json::from_str::<StoredCommitsCache>(&cache_json) {
+                had_existing_cache = true;
                 was_complete = stored.complete;
                 indexed_bundles = stored.indexed_bundles;
                 if let Some(decompressed) = decode_stored_loose_object(&stored.commits_compressed) {
@@ -1156,15 +1160,28 @@ impl GasGitStore {
             commits_by_oid.insert(item.oid.clone(), item.clone());
         }
 
+        // Verify whether all parent commits referenced by `commits_by_oid` are present in `commits_by_oid`.
+        // If an incremental push occurs on a repository whose older bundles were never indexed into `commits_cache.json`,
+        // `all_parents_present` will be `false`, ensuring `load_all_commits` scans the older bundles too!
+        let all_parents_present = !commits_by_oid.is_empty()
+            && commits_by_oid
+                .values()
+                .all(|c| c.parents.iter().all(|p| commits_by_oid.contains_key(p)));
+        let is_complete = if had_existing_cache {
+            was_complete && all_parents_present
+        } else {
+            all_parents_present
+        };
+
         let mut list: Vec<CommitItem> = commits_by_oid.into_values().collect();
         list.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| a.oid.cmp(&b.oid)));
 
         if let Ok(commits_bytes) = serde_json::to_vec(&list) {
             let compressed = encode_stored_loose_object(&commits_bytes);
             let stored = StoredCommitsCache {
-                head_oid: None, // Will be finalized with current head/refs on update_ref or first read
+                head_oid: None, // Will be finalized with current head/refs on first read
                 refs: BTreeMap::new(),
-                complete: was_complete,
+                complete: is_complete,
                 indexed_bundles,
                 frontier: Vec::new(),
                 commits_compressed: compressed,
@@ -1336,7 +1353,6 @@ impl GasGitStore {
             commit_bundle_names.push(fname.clone());
             self.flush_bundle_file(fname, &mut commit_map)?;
         }
-        self.record_pushed_commits_in_cache(&new_commit_items, &commit_bundle_names);
 
         if !blob_map.is_empty() {
             let fname = if blob_part == 0 {
@@ -1356,6 +1372,8 @@ impl GasGitStore {
             commit_bundle_names.push(fname.clone());
             self.flush_bundle_file(fname, &mut meta_map)?;
         }
+
+        self.record_pushed_commits_in_cache(&new_commit_items, &commit_bundle_names);
 
         if !cache_entries.is_empty() {
             cache_put_all(&cache_entries, CACHE_TTL_IMMUTABLE_SECS);
@@ -1685,10 +1703,6 @@ impl GasGitStore {
     ///    `Tree` or `Blob` objects and checkpoints progress to `commits_cache.json` so initial index
     ///    access on huge repositories never approaches GAS's 6-minute timeout.
     pub fn load_all_commits(&self) -> Vec<CommitItem> {
-        if let Some(cached_commits) = cache_get_sharded_commits(&self.repo) {
-            return cached_commits;
-        }
-
         let start_secs = current_unix_secs();
         let head_sym = self
             .head_symref()
@@ -1700,6 +1714,64 @@ impl GasGitStore {
             .iter()
             .map(|(k, v)| (k.clone(), v.to_hex().to_string()))
             .collect();
+
+        let is_graph_complete = |map: &BTreeMap<ObjectId, CommitItem>| -> bool {
+            if map.is_empty() {
+                return false;
+            }
+            let mut roots: Vec<ObjectId> = Vec::new();
+            if let Some(h) = head_oid {
+                roots.push(h);
+            }
+            for (rname, &r) in &refs_map {
+                if (rname.starts_with("refs/heads/") || map.contains_key(&r)) && !roots.contains(&r)
+                {
+                    roots.push(r);
+                }
+            }
+            if roots.is_empty() {
+                return false;
+            }
+            let mut seen = BTreeSet::new();
+            let mut q: VecDeque<ObjectId> = roots.into_iter().collect();
+            while let Some(curr) = q.pop_front() {
+                if !seen.insert(curr) {
+                    continue;
+                }
+                let Some(c_item) = map.get(&curr) else {
+                    return false;
+                };
+                for p_hex in &c_item.parents {
+                    if let Ok(p_oid) = ObjectId::from_hex(p_hex.as_bytes()) {
+                        if !seen.contains(&p_oid) {
+                            q.push_back(p_oid);
+                        }
+                    }
+                }
+            }
+            // Also verify no commit in `map` has a dangling parent missing from `map`
+            map.values().all(|c| {
+                c.parents.iter().all(|p_hex| {
+                    ObjectId::from_hex(p_hex.as_bytes())
+                        .map(|p_oid| map.contains_key(&p_oid))
+                        .unwrap_or(true)
+                })
+            })
+        };
+
+        if let Some(cached_commits) = cache_get_sharded_commits(&self.repo) {
+            let temp_map: BTreeMap<ObjectId, CommitItem> = cached_commits
+                .iter()
+                .filter_map(|c| {
+                    ObjectId::from_hex(c.oid.as_bytes())
+                        .ok()
+                        .map(|oid| (oid, c.clone()))
+                })
+                .collect();
+            if is_graph_complete(&temp_map) {
+                return cached_commits;
+            }
+        }
 
         // 1. Load persistent `commits_cache.json` from `repo_folder` if present
         let mut commits_by_oid: BTreeMap<ObjectId, CommitItem> = BTreeMap::new();
@@ -1714,9 +1786,15 @@ impl GasGitStore {
                     if let Ok(mut cached_list) =
                         serde_json::from_slice::<Vec<CommitItem>>(&decompressed)
                     {
+                        for item in &cached_list {
+                            if let Ok(c_oid) = ObjectId::from_hex(item.oid.as_bytes()) {
+                                commits_by_oid.insert(c_oid, item.clone());
+                            }
+                        }
                         if stored.complete
                             && stored.head_oid == head_hex
                             && stored.refs == refs_str_map
+                            && is_graph_complete(&commits_by_oid)
                         {
                             Self::apply_commit_decorations(
                                 &mut cached_list,
@@ -1726,11 +1804,6 @@ impl GasGitStore {
                             );
                             cache_put_sharded_commits(&self.repo, &cached_list);
                             return cached_list;
-                        }
-                        for item in cached_list {
-                            if let Ok(c_oid) = ObjectId::from_hex(item.oid.as_bytes()) {
-                                commits_by_oid.insert(c_oid, item);
-                            }
                         }
                     }
                 }
@@ -1766,14 +1839,21 @@ impl GasGitStore {
 
         let mut hit_time_budget = false;
 
-        // Helper closure to scan a single bundle file, indexing its compressed strings into `compressed_object_index`
-        // and extracting ONLY Commit objects via the 1-microsecond 16-byte header probe (`decode_if_commit_loose_object`).
+        // Helper closure to scan a single bundle file, extracting ONLY Commit objects via the
+        // 1-microsecond 16-byte header probe (`decode_if_commit_loose_object`) without retaining
+        // tens of megabytes of non-commit `Tree` strings in memory across 40+ bundles.
         let scan_bundle_for_commits =
             |file: &GasFile,
              commits_by_oid: &mut BTreeMap<ObjectId, CommitItem>,
              indexed_bundles: &mut BTreeSet<String>| {
                 let fname = file.get_name();
-                if indexed_bundles.contains(&fname) {
+                let fid = file.get_id();
+                let bundle_tag = if fid.is_empty() {
+                    fname.clone()
+                } else {
+                    format!("{}#{}", fname, fid)
+                };
+                if indexed_bundles.contains(&bundle_tag) || indexed_bundles.contains(&fname) {
                     return;
                 }
                 let json_str = file.get_blob().get_data_as_string(None);
@@ -1796,88 +1876,66 @@ impl GasGitStore {
                         }
                         if let Ok(b_oid) = ObjectId::from_hex(hex_key.as_bytes()) {
                             known.insert(b_oid);
+                            let mut is_commit = false;
                             if !commits_by_oid.contains_key(&b_oid) {
                                 if let Some(loose) = decode_if_commit_loose_object(&encoded_val) {
                                     if let Some(item) = parse_commit_item_from_loose(b_oid, &loose)
                                     {
                                         commits_by_oid.insert(b_oid, item);
+                                        is_commit = true;
                                     }
                                 }
+                            } else {
+                                is_commit = true;
                             }
-                            comp_idx.insert(b_oid, encoded_val);
+                            // Always keep Commit objects and cap non-commit Tree strings in `comp_idx`
+                            // so scanning dozens of 4 MB `bundle_meta_*.json` files never bloats Wasm RAM!
+                            if is_commit || comp_idx.len() < 2_500 {
+                                comp_idx.insert(b_oid, encoded_val);
+                            }
                         }
                     }
                     indexed_bundles.insert(fname);
+                    indexed_bundles.insert(bundle_tag);
                 }
             };
 
         // First scan compact `bundle_commit_*.json` files (contain only Commit & Tag objects!)
         while let Some(file) = self.unloaded_commit_bundles.borrow_mut().pop() {
-            let fname = file.get_name();
-            if !indexed_bundles.contains(&fname) {
-                scan_bundle_for_commits(&file, &mut commits_by_oid, &mut indexed_bundles);
-                if !commits_by_oid.is_empty()
-                    && current_unix_secs().saturating_sub(start_secs) >= MAX_COLD_SCAN_SECS
-                    && !self.unloaded_commit_bundles.borrow().is_empty()
-                {
-                    hit_time_budget = true;
-                    break;
-                }
+            scan_bundle_for_commits(&file, &mut commits_by_oid, &mut indexed_bundles);
+            if !commits_by_oid.is_empty()
+                && current_unix_secs().saturating_sub(start_secs) >= MAX_COLD_SCAN_SECS
+                && !self.unloaded_commit_bundles.borrow().is_empty()
+            {
+                hit_time_budget = true;
+                break;
             }
         }
 
-        let is_graph_complete = |map: &BTreeMap<ObjectId, CommitItem>| -> bool {
-            let mut roots: Vec<ObjectId> = Vec::new();
-            if let Some(h) = head_oid {
-                roots.push(h);
-            }
-            for &r in refs_map.values() {
-                if !roots.contains(&r) {
-                    roots.push(r);
-                }
-            }
-            if roots.is_empty() {
-                return false;
-            }
-            let mut seen = BTreeSet::new();
-            let mut q: VecDeque<ObjectId> = roots.into_iter().collect();
-            while let Some(curr) = q.pop_front() {
-                if !seen.insert(curr) {
-                    continue;
-                }
-                let Some(c_item) = map.get(&curr) else {
-                    return false;
-                };
-                for p_hex in &c_item.parents {
-                    if let Ok(p_oid) = ObjectId::from_hex(p_hex.as_bytes()) {
-                        if !seen.contains(&p_oid) {
-                            q.push_back(p_oid);
-                        }
-                    }
-                }
-            }
-            true
-        };
-
-        // Next, only if the commit graph from HEAD/refs is not yet complete in `commits_by_oid`,
-        // scan any unindexed `bundle_meta_*.json` / `bundle_*.json` files within the 18-second time budget.
+        // Next, if the commit graph from HEAD/refs is not yet complete in `commits_by_oid`,
+        // scan unindexed `bundle_meta_*.json` / `bundle_*.json` files.
+        // Iterate without discarding `GasFile` handles so any subsequent `Tree` lookup in the same request still works!
         if !hit_time_budget && !is_graph_complete(&commits_by_oid) {
+            let mut retained_meta: Vec<GasFile> = Vec::new();
             while let Some(file) = self.unloaded_meta_bundles.borrow_mut().pop() {
-                let fname = file.get_name();
-                if indexed_bundles.contains(&fname) {
-                    continue;
-                }
                 scan_bundle_for_commits(&file, &mut commits_by_oid, &mut indexed_bundles);
-                if is_graph_complete(&commits_by_oid) {
+                let graph_done = is_graph_complete(&commits_by_oid);
+                let more_remaining = !self.unloaded_meta_bundles.borrow().is_empty();
+                retained_meta.push(file);
+                if graph_done {
                     break;
                 }
                 if !commits_by_oid.is_empty()
                     && current_unix_secs().saturating_sub(start_secs) >= MAX_COLD_SCAN_SECS
-                    && !self.unloaded_meta_bundles.borrow().is_empty()
+                    && more_remaining
                 {
                     hit_time_budget = true;
                     break;
                 }
+            }
+            let mut meta_borrow = self.unloaded_meta_bundles.borrow_mut();
+            while let Some(f) = retained_meta.pop() {
+                meta_borrow.push(f);
             }
         }
 
@@ -2542,6 +2600,10 @@ pub fn handle_receive_pack(req_body: &[u8], project_name: &str) -> Result<Vec<u8
                 current_oid.to_hex(),
                 cmd.old_oid.to_hex()
             ));
+            continue;
+        }
+        if cmd.old_oid == cmd.new_oid && current_oid == cmd.new_oid {
+            ref_statuses.push(format!("ok {}", cmd.ref_name));
             continue;
         }
         match store.update_ref(&cmd.ref_name, &cmd.new_oid) {

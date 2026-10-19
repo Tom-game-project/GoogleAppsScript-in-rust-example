@@ -20,10 +20,45 @@ import { toList } from "../gleam.mjs";
 import { Commit, CommitDetail, CommitFileChange, CommitTreeEntry, RepoCommits, RepoSummary, ServerState } from "./types.mjs";
 
 const IDB_NAME = "GasGitServerCacheDB";
-const IDB_VERSION = 1;
-const STORE_REPO_COMMITS = "repo_commits";
+const IDB_VERSION = 2;
+const STORE_REPO_COMMITS = "repo_commits_v2";
 const STORE_COMMIT_DETAILS = "commit_details";
-const CACHE_STORAGE_NAME = "gas-git-cache-v1";
+const CACHE_STORAGE_NAME = "gas-git-cache-v2";
+
+function isCommitPayloadGraphComplete(data, cleanHead) {
+  if (!data || !data.ok || !Array.isArray(data.commits)) {
+    return false;
+  }
+  const commits = data.commits;
+  const actualHead = String(data.head_oid || cleanHead || "").trim();
+  if (!actualHead) {
+    return true;
+  }
+  if (commits.length === 0) {
+    return false;
+  }
+  const oidSet = new Set();
+  for (let i = 0; i < commits.length; i++) {
+    const c = commits[i];
+    if (c && c.oid) {
+      oidSet.add(String(c.oid).trim());
+    }
+  }
+  if (!oidSet.has(actualHead)) {
+    return false;
+  }
+  for (let i = 0; i < commits.length; i++) {
+    const c = commits[i];
+    const parents = Array.isArray(c && c.parents) ? c.parents : [];
+    for (let j = 0; j < parents.length; j++) {
+      const p = String(parents[j] || "").trim();
+      if (p && !oidSet.has(p)) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
 
 function detectDefaultBaseUrl() {
   if (typeof window === "undefined" || !window.location) {
@@ -152,19 +187,25 @@ function readRepoCommitsFromLocalStorage(projectName, cleanHead) {
     if (typeof window !== "undefined" && window.localStorage) {
       if (cleanHead) {
         const rawByHead = window.localStorage.getItem(
-          "gas_git_commits_" + projectName + "_" + cleanHead,
+          "gas_git_commits_v2_" + projectName + "_" + cleanHead,
         );
         if (rawByHead) {
-          return { data: JSON.parse(rawByHead), backend: "localStorage" };
+          const parsedByHead = JSON.parse(rawByHead);
+          if (isCommitPayloadGraphComplete(parsedByHead, cleanHead)) {
+            return { data: parsedByHead, backend: "localStorage" };
+          }
         }
       }
       const rawLatest = window.localStorage.getItem(
-        "gas_git_commits_latest_" + projectName,
+        "gas_git_commits_v2_latest_" + projectName,
       );
       if (rawLatest) {
         const parsed = JSON.parse(rawLatest);
         const cachedHead = String((parsed && parsed.head_oid) || "").trim();
-        if (!cleanHead || cachedHead === cleanHead) {
+        if (
+          (!cleanHead || cachedHead === cleanHead) &&
+          isCommitPayloadGraphComplete(parsed, cleanHead)
+        ) {
           return { data: parsed, backend: "localStorage" };
         }
       }
@@ -179,7 +220,10 @@ function readRepoCommitsPersistent(projectName, cleanHead) {
     .then(function (record) {
       if (record && record.payload) {
         const cachedHead = String(record.head_oid || "").trim();
-        if (!cleanHead || cachedHead === cleanHead) {
+        if (
+          (!cleanHead || cachedHead === cleanHead) &&
+          isCommitPayloadGraphComplete(record.payload, cleanHead)
+        ) {
           return { data: record.payload, backend: "IndexedDB" };
         }
       }
@@ -192,13 +236,16 @@ function readRepoCommitsPersistent(projectName, cleanHead) {
       if (idbHit) return idbHit;
       // 2. Try window.caches (Cache Storage API)
       const urlKey =
-        "https://gas-git-cache.local/repo-commits/" +
+        "https://gas-git-cache.local/repo-commits-v2/" +
         encodeURIComponent(projectName);
       return cacheApiGet(urlKey)
         .then(function (record) {
           if (record && record.payload) {
             const cachedHead = String(record.head_oid || "").trim();
-            if (!cleanHead || cachedHead === cleanHead) {
+            if (
+              (!cleanHead || cachedHead === cleanHead) &&
+              isCommitPayloadGraphComplete(record.payload, cleanHead)
+            ) {
               return { data: record.payload, backend: "CacheStorage" };
             }
           }
@@ -216,7 +263,7 @@ function readRepoCommitsPersistent(projectName, cleanHead) {
 }
 
 function writeRepoCommitsPersistent(projectName, requestedHead, data) {
-  if (!data || !data.ok) {
+  if (!isCommitPayloadGraphComplete(data, requestedHead)) {
     return Promise.resolve(false);
   }
   const actualHead = String(data.head_oid || requestedHead || "").trim();
@@ -230,30 +277,32 @@ function writeRepoCommitsPersistent(projectName, requestedHead, data) {
   // Write to localStorage fallback synchronously (purging stale keys for this project)
   try {
     if (typeof window !== "undefined" && window.localStorage) {
-      const prefix = "gas_git_commits_" + projectName + "_";
+      const prefix = "gas_git_commits_v2_" + projectName + "_";
+      const legacyPrefix = "gas_git_commits_" + projectName + "_";
       const keysToRemove = [];
       for (let i = 0; i < window.localStorage.length; i++) {
         const k = window.localStorage.key(i);
-        if (k && k.startsWith(prefix)) {
+        if (k && (k.startsWith(prefix) || k.startsWith(legacyPrefix))) {
           keysToRemove.push(k);
         }
       }
       for (let j = 0; j < keysToRemove.length; j++) {
         window.localStorage.removeItem(keysToRemove[j]);
       }
+      window.localStorage.removeItem("gas_git_commits_latest_" + projectName);
       const serialized = JSON.stringify(data);
       if (actualHead) {
         window.localStorage.setItem(prefix + actualHead, serialized);
       }
       window.localStorage.setItem(
-        "gas_git_commits_latest_" + projectName,
+        "gas_git_commits_v2_latest_" + projectName,
         serialized,
       );
     }
   } catch (err) {}
 
   const urlKey =
-    "https://gas-git-cache.local/repo-commits/" +
+    "https://gas-git-cache.local/repo-commits-v2/" +
     encodeURIComponent(projectName);
 
   return idbPut(STORE_REPO_COMMITS, record)

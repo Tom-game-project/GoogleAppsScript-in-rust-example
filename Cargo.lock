@@ -7,8 +7,6 @@ name = "GoogleAppsScript-in-rust-example"
 version = "0.1.0"
 dependencies = [
  "base64",
- "gix-actor",
- "gix-date",
  "gix-hash",
  "gix-object",
  "gix-packetline",
