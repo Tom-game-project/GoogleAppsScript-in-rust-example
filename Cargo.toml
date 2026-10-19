@@ -54,13 +54,16 @@ world = "gas"
 "wasi:http" = { path = "wit/deps/wasi-http" }
 "wasi:sockets" = { path = "wit/deps/wasi-sockets" }
 
-# Optimized compiler profiles for Google Apps Script V8 runtime
+# Optimized compiler profiles for Google Apps Script V8 runtime:
+# `opt-level = "s"` with fat LTO and symbol stripping minimizes `.wasm` binary size,
+# directly reducing Base64 payload size and V8 `new WebAssembly.Module` compilation time on every GAS invocation.
 [profile.release]
-opt-level = 3
+opt-level = "s"
 lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = "symbols"
 
 [profile.dev]
-opt-level = 2
+opt-level = "s"
+strip = "debuginfo"

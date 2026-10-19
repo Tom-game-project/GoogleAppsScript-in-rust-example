@@ -41,11 +41,93 @@ use crate::bindings::gas::html_service::{
     gas_html_output::{GasHtmlOutput, HtmlSource, SandboxMode, XFrameOptionsMode},
     gas_html_service,
 };
+use crate::bindings::gas::cache_service::gas_cache_service;
 use crate::bindings::gas::lock_service::gas_lock_service;
 use crate::bindings::gas::logger::logger;
 use crate::bindings::gas::property::properties_service;
 
 pub const ENV_GIT_DRIVE_FOLDER_ID: &str = "GIT_DRIVE_FOLDER_ID";
+const CACHE_TTL_IMMUTABLE_SECS: i32 = 21_600; // 6 hours (maximum GAS CacheService TTL)
+const CACHE_TTL_META_SECS: i32 = 1_800; // 30 minutes for mutable metadata (invalidated on write)
+const MAX_CACHE_VALUE_BYTES: usize = 95_000; // GAS CacheService limit is 100KB per key
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct CachedRepoMeta {
+    head: String,
+    refs: BTreeMap<String, String>,
+}
+
+fn repo_exists_cache_key(repo: &str) -> String {
+    format!("grepo_exists_v1:{}", repo)
+}
+
+fn repo_meta_cache_key(repo: &str) -> String {
+    format!("gmeta_v1:{}", repo)
+}
+
+fn repo_commits_cache_key(repo: &str) -> String {
+    format!("gcommits_v1:{}", repo)
+}
+
+fn repos_list_cache_key(root_folder_id: &str) -> String {
+    format!("grepos_v1:{}", root_folder_id)
+}
+
+fn git_obj_cache_key(oid_hex: &str) -> String {
+    format!("gobj:{}", oid_hex)
+}
+
+fn cache_get(key: &str) -> Option<String> {
+    let cache = gas_cache_service::get_script_cache();
+    cache.get(key)
+}
+
+fn cache_get_all(keys: &[String]) -> Vec<(String, String)> {
+    if keys.is_empty() {
+        return Vec::new();
+    }
+    let cache = gas_cache_service::get_script_cache();
+    let mut out = Vec::new();
+    for chunk in keys.chunks(100) {
+        let chunk_vec: Vec<String> = chunk.to_vec();
+        let pairs = cache.get_all(&chunk_vec);
+        out.extend(pairs);
+    }
+    out
+}
+
+fn cache_put(key: &str, value: &str, ttl_secs: i32) {
+    if value.len() > MAX_CACHE_VALUE_BYTES {
+        return;
+    }
+    let cache = gas_cache_service::get_script_cache();
+    cache.put(key, value, Some(ttl_secs));
+}
+
+fn cache_put_all(entries: &[(String, String)], ttl_secs: i32) {
+    let filtered: Vec<(String, String)> = entries
+        .iter()
+        .filter(|(k, v)| !k.is_empty() && v.len() <= MAX_CACHE_VALUE_BYTES)
+        .cloned()
+        .collect();
+    if filtered.is_empty() {
+        return;
+    }
+    let cache = gas_cache_service::get_script_cache();
+    for chunk in filtered.chunks(50) {
+        let chunk_vec: Vec<(String, String)> = chunk.to_vec();
+        cache.put_all(&chunk_vec, Some(ttl_secs));
+    }
+}
+
+fn cache_remove_all(keys: &[String]) {
+    if keys.is_empty() {
+        return;
+    }
+    let cache = gas_cache_service::get_script_cache();
+    let keys_vec: Vec<String> = keys.to_vec();
+    cache.remove_all(&keys_vec);
+}
 pub const ENV_GAS_WEB_APP_URL: &str = "GAS_WEB_APP_URL";
 pub const ENV_GIT_COMMIT_PAGE_SIZE: &str = "GIT_COMMIT_PAGE_SIZE";
 pub const DEFAULT_COMMIT_PAGE_SIZE: usize = 20;
@@ -431,10 +513,10 @@ fn write_text_file(parent: &GasFolder, name: &str, content: &str, mime_type: &st
 /// - In-memory object and ref caching: Subsequent reads within the same request are served in 0ms.
 pub struct GasGitStore {
     pub repo: String,
-    repo_folder: GasFolder,
-    objects_folder: GasFolder,
-    head_cache: RefCell<String>,
-    refs_cache: RefCell<BTreeMap<String, ObjectId>>,
+    repo_folder: RefCell<Option<GasFolder>>,
+    objects_folder: RefCell<Option<GasFolder>>,
+    head_cache: RefCell<Option<String>>,
+    refs_cache: RefCell<Option<BTreeMap<String, ObjectId>>>,
     object_cache: RefCell<BTreeMap<ObjectId, Vec<u8>>>,
     known_existing_objects: RefCell<BTreeSet<ObjectId>>,
     bundles_loaded: RefCell<bool>,
@@ -443,10 +525,28 @@ pub struct GasGitStore {
 impl GasGitStore {
     /// Open an existing Git repository `<project_name>.git` inside the Google Drive root folder (`GIT_DRIVE_FOLDER_ID`).
     /// Does NOT auto-create the repository or seed an initial commit.
+    ///
+    /// Uses GAS `CacheService.getScriptCache()` and lazy Drive folder resolution so that warm requests
+    /// (such as `exec/<project_name>.git/<commit_hash>/<path>`) execute with **0 `DriveApp` RPC calls**.
     pub fn open(project_name: &str) -> Result<Self, String> {
         let normalized = parse_project_segment(project_name)?;
-        let (_root_id, root_folder) = open_root_drive_folder()?;
+        let _root_id = get_root_drive_folder_id()?;
 
+        let exists_key = repo_exists_cache_key(&normalized);
+        if cache_get(&exists_key).as_deref() == Some("1") {
+            return Ok(Self {
+                repo: normalized,
+                repo_folder: RefCell::new(None),
+                objects_folder: RefCell::new(None),
+                head_cache: RefCell::new(None),
+                refs_cache: RefCell::new(None),
+                object_cache: RefCell::new(BTreeMap::new()),
+                known_existing_objects: RefCell::new(BTreeSet::new()),
+                bundles_loaded: RefCell::new(false),
+            });
+        }
+
+        let (_root_id, root_folder) = open_root_drive_folder()?;
         let canonical_folder_name = format!("{}.git", normalized);
         let repo_folder = find_child_folder_by_name(&root_folder, &canonical_folder_name)
             .or_else(|| find_child_folder_by_name(&root_folder, &normalized))
@@ -458,35 +558,109 @@ impl GasGitStore {
                 )
             })?;
 
-        let objects_folder = find_child_folder_by_name(&repo_folder, OBJECTS_FOLDER_NAME)
-            .unwrap_or_else(|| repo_folder.create_folder(OBJECTS_FOLDER_NAME));
-
-        let head_raw = read_text_file(&repo_folder, HEAD_FILE_NAME)
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| format!("ref: {}", DEFAULT_BRANCH));
-
-        let mut refs_map = BTreeMap::new();
-        if let Some(refs_json) = read_text_file(&repo_folder, REFS_FILE_NAME) {
-            if let Ok(parsed) = serde_json::from_str::<BTreeMap<String, String>>(&refs_json) {
-                for (k, v) in parsed {
-                    if let Ok(oid) = ObjectId::from_hex(v.trim().as_bytes()) {
-                        refs_map.insert(k, oid);
-                    }
-                }
-            }
-        }
+        cache_put(&exists_key, "1", CACHE_TTL_IMMUTABLE_SECS);
 
         Ok(Self {
             repo: normalized,
-            repo_folder,
-            objects_folder,
-            head_cache: RefCell::new(head_raw),
-            refs_cache: RefCell::new(refs_map),
+            repo_folder: RefCell::new(Some(repo_folder)),
+            objects_folder: RefCell::new(None),
+            head_cache: RefCell::new(None),
+            refs_cache: RefCell::new(None),
             object_cache: RefCell::new(BTreeMap::new()),
             known_existing_objects: RefCell::new(BTreeSet::new()),
             bundles_loaded: RefCell::new(false),
         })
+    }
+
+    fn with_repo_folder<R>(&self, f: impl FnOnce(&GasFolder) -> R) -> Result<R, String> {
+        if self.repo_folder.borrow().is_none() {
+            let (_root_id, root_folder) = open_root_drive_folder()?;
+            let canonical_folder_name = format!("{}.git", self.repo);
+            let folder = find_child_folder_by_name(&root_folder, &canonical_folder_name)
+                .or_else(|| find_child_folder_by_name(&root_folder, &self.repo))
+                .ok_or_else(|| {
+                    format!(
+                        "Repository '{}.git' does not exist in the configured Google Drive folder.",
+                        self.repo
+                    )
+                })?;
+            *self.repo_folder.borrow_mut() = Some(folder);
+        }
+        let borrow = self.repo_folder.borrow();
+        Ok(f(borrow.as_ref().unwrap()))
+    }
+
+    fn with_objects_folder<R>(&self, f: impl FnOnce(&GasFolder) -> R) -> Result<R, String> {
+        if self.objects_folder.borrow().is_none() {
+            let obj_folder = self.with_repo_folder(|repo_folder| {
+                find_child_folder_by_name(repo_folder, OBJECTS_FOLDER_NAME)
+                    .unwrap_or_else(|| repo_folder.create_folder(OBJECTS_FOLDER_NAME))
+            })?;
+            *self.objects_folder.borrow_mut() = Some(obj_folder);
+        }
+        let borrow = self.objects_folder.borrow();
+        Ok(f(borrow.as_ref().unwrap()))
+    }
+
+    fn ensure_meta_loaded(&self) {
+        if self.head_cache.borrow().is_some() && self.refs_cache.borrow().is_some() {
+            return;
+        }
+
+        let meta_key = repo_meta_cache_key(&self.repo);
+        if let Some(cached_json) = cache_get(&meta_key) {
+            if let Ok(meta) = serde_json::from_str::<CachedRepoMeta>(&cached_json) {
+                let mut refs_map = BTreeMap::new();
+                for (k, v) in meta.refs {
+                    if let Ok(oid) = ObjectId::from_hex(v.trim().as_bytes()) {
+                        refs_map.insert(k, oid);
+                    }
+                }
+                *self.head_cache.borrow_mut() = Some(meta.head);
+                *self.refs_cache.borrow_mut() = Some(refs_map);
+                return;
+            }
+        }
+
+        let (head_raw, refs_map, raw_refs_str_map) = self
+            .with_repo_folder(|repo_folder| {
+                let head_raw = read_text_file(repo_folder, HEAD_FILE_NAME)
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| format!("ref: {}", DEFAULT_BRANCH));
+
+                let mut refs_map = BTreeMap::new();
+                let mut raw_refs_str_map = BTreeMap::new();
+                if let Some(refs_json) = read_text_file(repo_folder, REFS_FILE_NAME) {
+                    if let Ok(parsed) = serde_json::from_str::<BTreeMap<String, String>>(&refs_json)
+                    {
+                        for (k, v) in parsed {
+                            if let Ok(oid) = ObjectId::from_hex(v.trim().as_bytes()) {
+                                raw_refs_str_map.insert(k.clone(), oid.to_hex().to_string());
+                                refs_map.insert(k, oid);
+                            }
+                        }
+                    }
+                }
+                (head_raw, refs_map, raw_refs_str_map)
+            })
+            .unwrap_or_else(|_| {
+                (
+                    format!("ref: {}", DEFAULT_BRANCH),
+                    BTreeMap::new(),
+                    BTreeMap::new(),
+                )
+            });
+
+        if let Ok(meta_json) = serde_json::to_string(&CachedRepoMeta {
+            head: head_raw.clone(),
+            refs: raw_refs_str_map,
+        }) {
+            cache_put(&meta_key, &meta_json, CACHE_TTL_META_SECS);
+        }
+
+        *self.head_cache.borrow_mut() = Some(head_raw);
+        *self.refs_cache.borrow_mut() = Some(refs_map);
     }
 
     /// Create a new empty Git repository `<project_name>.git` inside the registered Google Drive folder (`GIT_DRIVE_FOLDER_ID`).
@@ -496,7 +670,7 @@ impl GasGitStore {
         description: Option<&str>,
     ) -> Result<RepoSummary, String> {
         let normalized = parse_project_segment(project_name)?;
-        let (_root_id, root_folder) = open_root_drive_folder()?;
+        let (root_id, root_folder) = open_root_drive_folder()?;
         let folder_name = format!("{}.git", normalized);
 
         if find_child_folder_by_name(&root_folder, &folder_name).is_some()
@@ -511,10 +685,27 @@ impl GasGitStore {
             repo_folder.set_description(clean_desc);
         }
 
-        let head_content = format!("ref: {}\n", DEFAULT_BRANCH);
+        let head_trimmed = format!("ref: {}", DEFAULT_BRANCH);
+        let head_content = format!("{}\n", head_trimmed);
         write_text_file(&repo_folder, HEAD_FILE_NAME, &head_content, "text/plain");
         write_text_file(&repo_folder, REFS_FILE_NAME, "{}\n", "application/json");
         repo_folder.create_folder(OBJECTS_FOLDER_NAME);
+
+        cache_put(
+            &repo_exists_cache_key(&normalized),
+            "1",
+            CACHE_TTL_IMMUTABLE_SECS,
+        );
+        if let Ok(meta_json) = serde_json::to_string(&CachedRepoMeta {
+            head: head_trimmed,
+            refs: BTreeMap::new(),
+        }) {
+            cache_put(&repo_meta_cache_key(&normalized), &meta_json, CACHE_TTL_META_SECS);
+        }
+        cache_remove_all(&[
+            repos_list_cache_key(&root_id),
+            repo_commits_cache_key(&normalized),
+        ]);
 
         logger::log(&format!(
             "[gitoxide-gas] Created empty repository '{}' in Google Drive (folder_id={})",
@@ -526,7 +717,17 @@ impl GasGitStore {
     }
 
     /// List all Git repositories stored inside the registered Google Drive folder (`GIT_DRIVE_FOLDER_ID`).
+    /// Uses `CacheService.getScriptCache()` so repeated Web UI index accesses return in <5ms without
+    /// scanning every folder and file in Google Drive.
     pub fn list_repositories() -> Result<Vec<RepoSummary>, String> {
+        let root_id = get_root_drive_folder_id()?;
+        let list_key = repos_list_cache_key(&root_id);
+        if let Some(cached_json) = cache_get(&list_key) {
+            if let Ok(repos) = serde_json::from_str::<Vec<RepoSummary>>(&cached_json) {
+                return Ok(repos);
+            }
+        }
+
         let (_root_id, root_folder) = open_root_drive_folder()?;
         let iter = root_folder.get_folders();
         let mut repos = Vec::new();
@@ -550,29 +751,51 @@ impl GasGitStore {
                 continue;
             };
 
+            cache_put(
+                &repo_exists_cache_key(&project_name),
+                "1",
+                CACHE_TTL_IMMUTABLE_SECS,
+            );
             repos.push(Self::summarize_folder(&project_name, &folder));
         }
 
         repos.sort_by(|a, b| a.name.cmp(&b.name));
+        if let Ok(serialized) = serde_json::to_string(&repos) {
+            cache_put(&list_key, &serialized, CACHE_TTL_META_SECS);
+        }
         Ok(repos)
     }
 
     fn summarize_folder(project_name: &str, folder: &GasFolder) -> RepoSummary {
-        let head_raw = read_text_file(folder, HEAD_FILE_NAME)
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| format!("ref: {}", DEFAULT_BRANCH));
+        let meta_key = repo_meta_cache_key(project_name);
+        let (head_raw, refs_map) = if let Some(cached_json) = cache_get(&meta_key)
+            .and_then(|s| serde_json::from_str::<CachedRepoMeta>(&s).ok())
+        {
+            (cached_json.head, cached_json.refs)
+        } else {
+            let head_raw = read_text_file(folder, HEAD_FILE_NAME)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| format!("ref: {}", DEFAULT_BRANCH));
+            let mut refs_map: BTreeMap<String, String> = BTreeMap::new();
+            if let Some(refs_json) = read_text_file(folder, REFS_FILE_NAME) {
+                if let Ok(parsed) = serde_json::from_str::<BTreeMap<String, String>>(&refs_json) {
+                    refs_map = parsed;
+                }
+            }
+            if let Ok(meta_json) = serde_json::to_string(&CachedRepoMeta {
+                head: head_raw.clone(),
+                refs: refs_map.clone(),
+            }) {
+                cache_put(&meta_key, &meta_json, CACHE_TTL_META_SECS);
+            }
+            (head_raw, refs_map)
+        };
+
         let default_branch = head_raw
             .strip_prefix("ref:")
             .map(|s| s.trim().to_string())
             .unwrap_or_else(|| DEFAULT_BRANCH.to_string());
-
-        let mut refs_map: BTreeMap<String, String> = BTreeMap::new();
-        if let Some(refs_json) = read_text_file(folder, REFS_FILE_NAME) {
-            if let Ok(parsed) = serde_json::from_str::<BTreeMap<String, String>>(&refs_json) {
-                refs_map = parsed;
-            }
-        }
 
         let head_oid = refs_map
             .get(&default_branch)
@@ -623,16 +846,18 @@ impl GasGitStore {
         }
 
         let oid_hex = oid.to_hex().to_string();
-        if find_child_file_by_name(&self.objects_folder, &oid_hex).is_none() {
-            let b64 = BASE64_STANDARD.encode(&loose_bytes);
-            self.objects_folder
-                .create_file(CreateFileInput::FromText(TextFileSpec {
-                    name: oid_hex,
-                    content: b64,
+        let b64 = BASE64_STANDARD.encode(&loose_bytes);
+        self.with_objects_folder(|objects_folder| {
+            if find_child_file_by_name(objects_folder, &oid_hex).is_none() {
+                objects_folder.create_file(CreateFileInput::FromText(TextFileSpec {
+                    name: oid_hex.clone(),
+                    content: b64.clone(),
                     mime_type: Some("text/plain".to_string()),
                 }));
-        }
+            }
+        })?;
 
+        cache_put(&git_obj_cache_key(&oid_hex), &b64, CACHE_TTL_IMMUTABLE_SECS);
         self.known_existing_objects.borrow_mut().insert(oid);
         self.object_cache.borrow_mut().insert(oid, loose_bytes);
         Ok(oid)
@@ -650,14 +875,18 @@ impl GasGitStore {
         }
 
         let mut bundle_map: BTreeMap<String, String> = BTreeMap::new();
+        let mut cache_entries: Vec<(String, String)> = Vec::with_capacity(objects.len());
+
         for (oid, (kind, body)) in objects {
             let header = gix_object::encode::loose_header(*kind, body.len() as u64);
             let mut loose_bytes = Vec::with_capacity(header.len() + body.len());
             loose_bytes.extend_from_slice(&header);
             loose_bytes.extend_from_slice(body);
 
+            let hex = oid.to_hex().to_string();
             let b64 = BASE64_STANDARD.encode(&loose_bytes);
-            bundle_map.insert(oid.to_hex().to_string(), b64);
+            bundle_map.insert(hex.clone(), b64.clone());
+            cache_entries.push((git_obj_cache_key(&hex), b64));
 
             self.known_existing_objects.borrow_mut().insert(*oid);
             self.object_cache.borrow_mut().insert(*oid, loose_bytes);
@@ -667,29 +896,64 @@ impl GasGitStore {
             .map_err(|e| format!("Failed to serialize object bundle: {}", e))?;
 
         let bundle_filename = format!("bundle_{}.json", batch_id);
-        self.objects_folder
-            .create_file(CreateFileInput::FromText(TextFileSpec {
+        self.with_objects_folder(|objects_folder| {
+            objects_folder.create_file(CreateFileInput::FromText(TextFileSpec {
                 name: bundle_filename,
                 content: bundle_json,
                 mime_type: Some("application/json".to_string()),
             }));
+        })?;
 
+        cache_put_all(&cache_entries, CACHE_TTL_IMMUTABLE_SECS);
         Ok(())
     }
 
-    /// Read loose object bytes (`<kind> <size>\0<body>`) by `ObjectId` from Google Drive (checking cache, loose files, and object bundles).
+    /// Batch-prefetch multiple Git objects from GAS `CacheService.getScriptCache().getAll(...)`
+    /// in a single host call so directory rendering doesn't make N separate cache calls.
+    pub fn prefetch_objects(&self, oids: &[ObjectId]) {
+        let missing: Vec<(ObjectId, String)> = {
+            let cache = self.object_cache.borrow();
+            oids.iter()
+                .filter(|&oid| !cache.contains_key(oid))
+                .map(|oid| (*oid, git_obj_cache_key(&oid.to_hex().to_string())))
+                .collect()
+        };
+        if missing.is_empty() {
+            return;
+        }
+        let keys: Vec<String> = missing.iter().map(|(_, k)| k.clone()).collect();
+        let found = cache_get_all(&keys);
+        if found.is_empty() {
+            return;
+        }
+        let key_to_oid: BTreeMap<String, ObjectId> =
+            missing.into_iter().map(|(oid, k)| (k, oid)).collect();
+        let mut obj_cache = self.object_cache.borrow_mut();
+        let mut known = self.known_existing_objects.borrow_mut();
+        for (k, b64) in found {
+            if let Some(&oid) = key_to_oid.get(&k) {
+                if let Ok(decoded) = BASE64_STANDARD.decode(b64.trim().as_bytes()) {
+                    known.insert(oid);
+                    obj_cache.insert(oid, decoded);
+                }
+            }
+        }
+    }
+
+    /// Read loose object bytes (`<kind> <size>\0<body>`) by `ObjectId` using a 3-tier hierarchy:
+    /// 1. In-memory `object_cache` (0ms)
+    /// 2. GAS `CacheService.getScriptCache()` (~1-2ms, 0 `DriveApp` calls)
+    /// 3. Single-pass `ensure_bundles_loaded()` scan over `objects/` (loads all `bundle_*.json` and loose files at once and populates `CacheService`)
     pub fn read_loose_object(&self, oid: &ObjectId) -> Option<Vec<u8>> {
         if let Some(cached) = self.object_cache.borrow().get(oid) {
             return Some(cached.clone());
         }
 
         let oid_hex = oid.to_hex().to_string();
+        let cache_key = git_obj_cache_key(&oid_hex);
 
-        // 1. Check if loose file exists
-        if let Some(file) = find_child_file_by_name(&self.objects_folder, &oid_hex)
-            .or_else(|| find_child_file_by_name(&self.repo_folder, &oid_hex))
-        {
-            let b64 = file.get_blob().get_data_as_string(None);
+        // 1. Check GAS CacheService (content-addressed Git objects are immutable!)
+        if let Some(b64) = cache_get(&cache_key) {
             if let Ok(decoded) = BASE64_STANDARD.decode(b64.trim().as_bytes()) {
                 self.known_existing_objects.borrow_mut().insert(*oid);
                 self.object_cache.borrow_mut().insert(*oid, decoded.clone());
@@ -697,7 +961,7 @@ impl GasGitStore {
             }
         }
 
-        // 2. If not found as loose file, scan bundles from objects folder once
+        // 2. Scan `objects/` folder once (reads both `bundle_*.json` and any loose `<oid>` files in a single `getFiles()` pass)
         if !*self.bundles_loaded.borrow() {
             self.ensure_bundles_loaded();
             if let Some(cached) = self.object_cache.borrow().get(oid) {
@@ -705,40 +969,90 @@ impl GasGitStore {
             }
         }
 
+        // 3. Fallback: check if a legacy loose file exists directly in `repo_folder`
+        if let Ok(Some(file)) = self.with_repo_folder(|rf| find_child_file_by_name(rf, &oid_hex)) {
+            let b64 = file.get_blob().get_data_as_string(None);
+            if let Ok(decoded) = BASE64_STANDARD.decode(b64.trim().as_bytes()) {
+                cache_put(&cache_key, b64.trim(), CACHE_TTL_IMMUTABLE_SECS);
+                self.known_existing_objects.borrow_mut().insert(*oid);
+                self.object_cache.borrow_mut().insert(*oid, decoded.clone());
+                return Some(decoded);
+            }
+        }
+
         None
     }
 
-    /// Ensure all batched object bundle files (`bundle_*.json`) in `objects/` are loaded into `object_cache`.
+    /// Ensure all batched object bundle files (`bundle_*.json`) and loose object files in `objects/`
+    /// are loaded into `object_cache` and warmed into `CacheService` in a single `get_files()` pass.
     pub fn ensure_bundles_loaded(&self) {
         if *self.bundles_loaded.borrow() {
             return;
         }
         *self.bundles_loaded.borrow_mut() = true;
-        let iter = self.objects_folder.get_files();
-        while iter.has_next() {
-            let file = iter.next();
-            if file.is_trashed() {
-                continue;
-            }
-            let name = file.get_name();
-            if name.starts_with("bundle_") && name.ends_with(".json") {
-                let json_str = file.get_blob().get_data_as_string(None);
-                if let Ok(bundle) = serde_json::from_str::<BTreeMap<String, String>>(&json_str) {
-                    for (hex_key, b64_val) in bundle {
-                        if let Ok(b_oid) = ObjectId::from_hex(hex_key.as_bytes()) {
-                            if let Ok(decoded) = BASE64_STANDARD.decode(b64_val.trim().as_bytes()) {
-                                self.known_existing_objects.borrow_mut().insert(b_oid);
-                                self.object_cache.borrow_mut().insert(b_oid, decoded);
+
+        let mut cache_entries: Vec<(String, String)> = Vec::new();
+        let _ = self.with_objects_folder(|objects_folder| {
+            let iter = objects_folder.get_files();
+            while iter.has_next() {
+                let file = iter.next();
+                if file.is_trashed() {
+                    continue;
+                }
+                let name = file.get_name();
+                if name.starts_with("bundle_") && name.ends_with(".json") {
+                    let json_str = file.get_blob().get_data_as_string(None);
+                    if let Ok(bundle) = serde_json::from_str::<BTreeMap<String, String>>(&json_str)
+                    {
+                        for (hex_key, b64_val) in bundle {
+                            if let Ok(b_oid) = ObjectId::from_hex(hex_key.as_bytes()) {
+                                let trimmed = b64_val.trim();
+                                if let Ok(decoded) = BASE64_STANDARD.decode(trimmed.as_bytes()) {
+                                    cache_entries.push((
+                                        git_obj_cache_key(&b_oid.to_hex().to_string()),
+                                        trimmed.to_string(),
+                                    ));
+                                    self.known_existing_objects.borrow_mut().insert(b_oid);
+                                    self.object_cache.borrow_mut().insert(b_oid, decoded);
+                                }
+                            }
+                        }
+                    }
+                } else if name.len() == 40 && name.chars().all(|c| c.is_ascii_hexdigit()) {
+                    if let Ok(l_oid) = ObjectId::from_hex(name.as_bytes()) {
+                        if !self.object_cache.borrow().contains_key(&l_oid) {
+                            let b64_val = file.get_blob().get_data_as_string(None);
+                            let trimmed = b64_val.trim();
+                            if let Ok(decoded) = BASE64_STANDARD.decode(trimmed.as_bytes()) {
+                                cache_entries.push((
+                                    git_obj_cache_key(&l_oid.to_hex().to_string()),
+                                    trimmed.to_string(),
+                                ));
+                                self.known_existing_objects.borrow_mut().insert(l_oid);
+                                self.object_cache.borrow_mut().insert(l_oid, decoded);
                             }
                         }
                     }
                 }
             }
+        });
+
+        if !cache_entries.is_empty() {
+            cache_put_all(&cache_entries, CACHE_TTL_IMMUTABLE_SECS);
         }
     }
 
-    /// Load all commits reachable from `HEAD` and `refs` (plus any commit objects in `object_cache`).
+    /// Load all commits reachable from `HEAD` and `refs` (plus any commit objects in `object_cache` when `refs` is empty).
+    /// Cached in `CacheService` under `gcommits_v1:<repo>` so repeated commit-list or prefix-search accesses
+    /// complete in milliseconds without touching Google Drive.
     pub fn load_all_commits(&self) -> Vec<CommitItem> {
+        let commits_key = repo_commits_cache_key(&self.repo);
+        if let Some(cached_json) = cache_get(&commits_key) {
+            if let Ok(cached_commits) = serde_json::from_str::<Vec<CommitItem>>(&cached_json) {
+                return cached_commits;
+            }
+        }
+
         let head_sym = self
             .head_symref()
             .unwrap_or_else(|| DEFAULT_BRANCH.to_string());
@@ -826,51 +1140,56 @@ impl GasGitStore {
             }
         }
 
-        self.ensure_bundles_loaded();
-        let cached_oids: Vec<ObjectId> = self.object_cache.borrow().keys().copied().collect();
-        for oid in cached_oids {
-            if visited.contains(&oid) {
-                continue;
-            }
-            let Some(loose) = self.read_loose_object(&oid) else {
-                continue;
-            };
-            if let Ok(ObjectRef::Commit(c)) = ObjectRef::from_loose(&loose) {
-                visited.insert(oid);
-                let parents: Vec<String> = c.parents().map(|p| p.to_hex().to_string()).collect();
-                let (author_name, author_email) = match c.author().or_else(|_| c.committer()) {
-                    Ok(sig) => (
-                        sig.name.to_str_lossy().into_owned(),
-                        sig.email.to_str_lossy().into_owned(),
-                    ),
-                    Err(_) => ("Unknown".to_string(), String::new()),
+        if commits.is_empty() || *self.bundles_loaded.borrow() {
+            self.ensure_bundles_loaded();
+            let cached_oids: Vec<ObjectId> = self.object_cache.borrow().keys().copied().collect();
+            for oid in cached_oids {
+                if visited.contains(&oid) {
+                    continue;
+                }
+                let Some(loose) = self.read_loose_object(&oid) else {
+                    continue;
                 };
-                let timestamp = match c.time() {
-                    Ok(t) => t.seconds,
-                    Err(_) => 0,
-                };
-                let full_msg = c.message.to_str_lossy();
-                let summary = full_msg.lines().next().unwrap_or("").to_string();
-                let body = full_msg.to_string();
-                let refs = decoration_map.get(&oid).cloned().unwrap_or_default();
-                let hex = oid.to_hex().to_string();
-                let short_oid = hex[..7.min(hex.len())].to_string();
+                if let Ok(ObjectRef::Commit(c)) = ObjectRef::from_loose(&loose) {
+                    visited.insert(oid);
+                    let parents: Vec<String> = c.parents().map(|p| p.to_hex().to_string()).collect();
+                    let (author_name, author_email) = match c.author().or_else(|_| c.committer()) {
+                        Ok(sig) => (
+                            sig.name.to_str_lossy().into_owned(),
+                            sig.email.to_str_lossy().into_owned(),
+                        ),
+                        Err(_) => ("Unknown".to_string(), String::new()),
+                    };
+                    let timestamp = match c.time() {
+                        Ok(t) => t.seconds,
+                        Err(_) => 0,
+                    };
+                    let full_msg = c.message.to_str_lossy();
+                    let summary = full_msg.lines().next().unwrap_or("").to_string();
+                    let body = full_msg.to_string();
+                    let refs = decoration_map.get(&oid).cloned().unwrap_or_default();
+                    let hex = oid.to_hex().to_string();
+                    let short_oid = hex[..7.min(hex.len())].to_string();
 
-                commits.push(CommitItem {
-                    oid: hex,
-                    short_oid,
-                    parents,
-                    author_name,
-                    author_email,
-                    timestamp,
-                    summary,
-                    body,
-                    refs,
-                });
+                    commits.push(CommitItem {
+                        oid: hex,
+                        short_oid,
+                        parents,
+                        author_name,
+                        author_email,
+                        timestamp,
+                        summary,
+                        body,
+                        refs,
+                    });
+                }
             }
         }
 
         commits.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| a.oid.cmp(&b.oid)));
+        if let Ok(serialized) = serde_json::to_string(&commits) {
+            cache_put(&commits_key, &serialized, CACHE_TTL_META_SECS);
+        }
         commits
     }
 
@@ -895,12 +1214,14 @@ impl GasGitStore {
 
     /// List all references (`refs/...`) in sorted order.
     pub fn list_refs(&self) -> BTreeMap<String, ObjectId> {
-        self.refs_cache.borrow().clone()
+        self.ensure_meta_loaded();
+        self.refs_cache.borrow().clone().unwrap_or_default()
     }
 
     /// Return the symbolic target of `HEAD` (e.g. `Some("refs/heads/main")`) if `HEAD` is a symref.
     pub fn head_symref(&self) -> Option<String> {
-        let head_val = self.head_cache.borrow().clone();
+        self.ensure_meta_loaded();
+        let head_val = self.head_cache.borrow().clone().unwrap_or_default();
         head_val
             .strip_prefix("ref:")
             .map(|target| target.trim().to_string())
@@ -908,19 +1229,27 @@ impl GasGitStore {
 
     /// Resolve a reference name (`HEAD` or `refs/...`) to its `ObjectId`.
     pub fn resolve_ref(&self, name: &str) -> Option<ObjectId> {
+        self.ensure_meta_loaded();
         if name == "HEAD" {
             if let Some(sym) = self.head_symref() {
                 if let Some(oid) = self.resolve_ref(&sym) {
                     return Some(oid);
                 }
             }
-            let head_raw = self.head_cache.borrow().clone();
+            let head_raw = self.head_cache.borrow().clone().unwrap_or_default();
             if let Ok(oid) = ObjectId::from_hex(head_raw.trim().as_bytes()) {
                 return Some(oid);
             }
-            return self.refs_cache.borrow().values().next().copied();
+            return self
+                .refs_cache
+                .borrow()
+                .as_ref()
+                .and_then(|m| m.values().next().copied());
         }
-        self.refs_cache.borrow().get(name).copied()
+        self.refs_cache
+            .borrow()
+            .as_ref()
+            .and_then(|m| m.get(name).copied())
     }
 
     /// Update or delete a reference and persist `refs.json` (and `HEAD` if needed) in Google Drive.
@@ -928,17 +1257,21 @@ impl GasGitStore {
         gix_validate::reference::name(ref_name.as_bytes().as_bstr())
             .map_err(|e| format!("Invalid reference name '{}': {}", ref_name, e))?;
 
+        self.ensure_meta_loaded();
+        let current_sym = self.head_symref();
+
         let should_update_head = {
-            let mut refs = self.refs_cache.borrow_mut();
+            let mut refs_opt = self.refs_cache.borrow_mut();
+            let refs = refs_opt.get_or_insert_with(BTreeMap::new);
             if new_oid.is_null() {
                 refs.remove(ref_name);
                 false
             } else {
                 refs.insert(ref_name.to_string(), *new_oid);
                 ref_name.starts_with("refs/heads/")
-                    && self
-                        .head_symref()
-                        .map(|sym| !refs.contains_key(&sym))
+                    && current_sym
+                        .as_ref()
+                        .map(|sym| !refs.contains_key(sym))
                         .unwrap_or(true)
             }
         };
@@ -946,23 +1279,47 @@ impl GasGitStore {
         let serialized_map: BTreeMap<String, String> = self
             .refs_cache
             .borrow()
-            .iter()
-            .map(|(k, v)| (k.clone(), v.to_hex().to_string()))
-            .collect();
+            .as_ref()
+            .map(|m| {
+                m.iter()
+                    .map(|(k, v)| (k.clone(), v.to_hex().to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
         let json = serde_json::to_string_pretty(&serialized_map)
             .map_err(|e| format!("Failed to serialize refs.json: {}", e))?;
-        write_text_file(&self.repo_folder, REFS_FILE_NAME, &json, "application/json");
 
-        if should_update_head {
-            let new_head = format!("ref: {}", ref_name);
-            *self.head_cache.borrow_mut() = new_head.clone();
-            write_text_file(
-                &self.repo_folder,
-                HEAD_FILE_NAME,
-                &format!("{}\n", new_head),
-                "text/plain",
-            );
+        self.with_repo_folder(|repo_folder| {
+            write_text_file(repo_folder, REFS_FILE_NAME, &json, "application/json");
+            if should_update_head {
+                let new_head = format!("ref: {}", ref_name);
+                *self.head_cache.borrow_mut() = Some(new_head.clone());
+                write_text_file(
+                    repo_folder,
+                    HEAD_FILE_NAME,
+                    &format!("{}\n", new_head),
+                    "text/plain",
+                );
+            }
+        })?;
+
+        let head_str = self
+            .head_cache
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| format!("ref: {}", DEFAULT_BRANCH));
+        if let Ok(meta_json) = serde_json::to_string(&CachedRepoMeta {
+            head: head_str,
+            refs: serialized_map,
+        }) {
+            cache_put(&repo_meta_cache_key(&self.repo), &meta_json, CACHE_TTL_META_SECS);
         }
+
+        let mut invalidate_keys = vec![repo_commits_cache_key(&self.repo)];
+        if let Ok(root_id) = get_root_drive_folder_id() {
+            invalidate_keys.push(repos_list_cache_key(&root_id));
+        }
+        cache_remove_all(&invalidate_keys);
 
         Ok(())
     }
@@ -1698,9 +2055,9 @@ pub fn build_web_ui_state(
     let base_url = get_env_or_script_property(ENV_GAS_WEB_APP_URL)
         .unwrap_or_else(|| "https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec".to_string());
 
-    match open_root_drive_folder() {
-        Ok((folder_id, root_folder)) => {
-            let folder_url = root_folder.get_url();
+    match get_root_drive_folder_id() {
+        Ok(folder_id) => {
+            let folder_url = format!("https://drive.google.com/drive/folders/{}", folder_id);
             match GasGitStore::list_repositories() {
                 Ok(repos) => WebUiStateResponse {
                     ok: true,
@@ -2908,6 +3265,7 @@ pub fn handle_do_post(event: &GasDoPostEvent) -> GasTextOutput {
 pub trait GitObjectReader {
     fn read_loose(&self, oid: &ObjectId) -> Option<Vec<u8>>;
     fn list_commits(&self) -> Vec<CommitItem>;
+    fn prefetch_objects(&self, _oids: &[ObjectId]) {}
 }
 
 impl GitObjectReader for GasGitStore {
@@ -2917,6 +3275,10 @@ impl GitObjectReader for GasGitStore {
 
     fn list_commits(&self) -> Vec<CommitItem> {
         self.load_all_commits()
+    }
+
+    fn prefetch_objects(&self, oids: &[ObjectId]) {
+        GasGitStore::prefetch_objects(self, oids);
     }
 }
 
@@ -3163,11 +3525,13 @@ pub fn resolve_commit_browser_request(
         }
     };
 
-    let mut all_commits = reader.list_commits();
     let q = trimmed_commit_ref.to_ascii_lowercase();
     let is_hex = !q.is_empty() && q.len() <= 40 && q.chars().all(|c| c.is_ascii_hexdigit());
 
-    if is_hex && q.len() == 40 && !all_commits.iter().any(|c| c.oid.eq_ignore_ascii_case(&q)) {
+    // Fast path: when `commit_ref` is already a full 40-character SHA-1 commit hash,
+    // read the commit object directly without walking all commits in the repository!
+    let mut direct_exact_commit: Option<CommitItem> = None;
+    if is_hex && q.len() == 40 {
         if let Ok(oid) = ObjectId::from_hex(q.as_bytes()) {
             if let Some(loose) = reader.read_loose(&oid) {
                 if let Ok(ObjectRef::Commit(c)) = ObjectRef::from_loose(&loose) {
@@ -3188,7 +3552,7 @@ pub fn resolve_commit_browser_request(
                     let body = full_msg.to_string();
                     let hex = oid.to_hex().to_string();
                     let short_oid = hex[..7.min(hex.len())].to_string();
-                    all_commits.push(CommitItem {
+                    direct_exact_commit = Some(CommitItem {
                         oid: hex,
                         short_oid,
                         parents,
@@ -3203,6 +3567,12 @@ pub fn resolve_commit_browser_request(
             }
         }
     }
+
+    let all_commits: Vec<CommitItem> = if direct_exact_commit.is_some() {
+        Vec::new()
+    } else {
+        reader.list_commits()
+    };
 
     let render_404 = |req_display: &str,
                       reason: &str,
@@ -3362,7 +3732,9 @@ pub fn resolve_commit_browser_request(
         }
     }
 
-    let matched_commits: Vec<CommitItem> = if is_hex {
+    let matched_commits: Vec<CommitItem> = if let Some(exact) = direct_exact_commit {
+        vec![exact]
+    } else if is_hex {
         all_commits
             .iter()
             .filter(|c| c.oid.to_ascii_lowercase().starts_with(&q))
@@ -3530,6 +3902,9 @@ pub fn resolve_commit_browser_request(
 
         let mut dirs: Vec<String> = Vec::new();
         let mut files: Vec<(String, usize)> = Vec::new();
+
+        let child_oids: Vec<ObjectId> = tree_ref.entries.iter().map(|e| e.oid.to_owned()).collect();
+        reader.prefetch_objects(&child_oids);
 
         for entry in &tree_ref.entries {
             let name = entry.filename.to_str_lossy().into_owned();

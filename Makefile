@@ -103,8 +103,8 @@ build-ui: $(DIST_HTML)
 $(WASM_SRC): $(RS_SRCS) $(DIST_HTML)
 	cargo build $(CARGO_FLAGS)
 
-# グルーコードの生成
-$(JCO_OUT_DIR): $(WASM_SRC) $(JS_SHIMS)
+# グルーコードの生成 + GAS V8 高速 Base64/WebAssembly.Module ローダー最適化
+$(JCO_OUT_DIR): $(WASM_SRC) $(JS_SHIMS) tools/optimize_jco_gas.mjs
 	pnpm exec jco transpile $(WASM_SRC) \
 	-o $(JCO_OUT_DIR) \
 	$(JCO_FLAGS) \
@@ -220,6 +220,7 @@ $(JCO_OUT_DIR): $(WASM_SRC) $(JS_SHIMS)
 	--map 'wasi:http/handler@0.3.2=./wasi-http.ts' \
 	--map 'wasi:http/outgoing-handler=./wasi-http.ts' \
 	--map 'wasi:http/outgoing-handler@0.2.0=./wasi-http.ts'
+	node ./tools/optimize_jco_gas.mjs $(JCO_OUT_DIR)/GoogleAppsScript_in_rust_example.js
 	cp $(JS_SHIMS) $(JCO_OUT_DIR)
 	touch $(JCO_OUT_DIR)
 	echo "success to jco transpile"

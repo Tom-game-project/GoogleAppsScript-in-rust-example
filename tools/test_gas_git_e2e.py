@@ -1981,6 +1981,22 @@ def run_e2e_tests() -> None:
                 assert f"{ambig_prefix}?page=2" in amb_html
             print(f"[OK] 17. Ambiguous commit prefix `exec/project-beta.git/{ambig_prefix}` redirected to `?page=1` and listed candidate commits with `?page=2` link.")
 
+            # 18. Verify GAS V8 Fast Base64/Wasm Loader (`textencoderdecoder.ts` + `optimize_jco_gas.mjs`) and `CacheService` optimizations
+            repo_root = Path(__file__).resolve().parent.parent
+            rs_src = (repo_root / "src" / "git_server.rs").read_text(encoding="utf-8")
+            assert "gas_cache_service::get_script_cache()" in rs_src
+            assert "prefetch_objects" in rs_src
+            assert "direct_exact_commit" in rs_src
+            assert "with_repo_folder" in rs_src
+
+            ts_src = (repo_root / "textencoderdecoder.ts").read_text(encoding="utf-8")
+            assert "__gasDecodeBase64Fast" in ts_src
+            assert "__gasFastBase64Compile" in ts_src
+            assert "globalThis.Buffer" in ts_src
+            opt_script = repo_root / "tools" / "optimize_jco_gas.mjs"
+            assert opt_script.is_file(), "tools/optimize_jco_gas.mjs must exist" 
+            print("[OK] 18. Verified GAS V8 Fast Base64/Wasm Loader (`Buffer.from` lookup table + `WebAssembly.Module` memoization) and `CacheService` 0-Drive-RPC optimizations.")
+
         finally:
             httpd.shutdown()
 

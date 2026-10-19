@@ -8,37 +8,70 @@ export class GasCache {
 	}
 
 	get(key: string): string | undefined {
-		const val = this.cache.get(key);
-		return val === null || val === undefined ? undefined : val;
+		try {
+			const val = this.cache.get(key);
+			return val === null || val === undefined ? undefined : val;
+		} catch {
+			return undefined;
+		}
 	}
 
 	getAll(keys: string[]): Array<[string, string]> {
-		const raw = this.cache.getAll(keys) ?? {};
-		return Object.entries(raw).map(([k, v]): [string, string] => [k, String(v)]);
+		if (!keys || keys.length === 0) {
+			return [];
+		}
+		try {
+			const raw = this.cache.getAll(keys) ?? {};
+			return Object.entries(raw).map(([k, v]): [string, string] => [k, String(v)]);
+		} catch {
+			return [];
+		}
 	}
 
 	put(key: string, value: string, expirationInSeconds?: number): void {
-		if (expirationInSeconds !== undefined && expirationInSeconds !== null) {
-			this.cache.put(key, value, expirationInSeconds);
-		} else {
-			this.cache.put(key, value);
+		try {
+			if (expirationInSeconds !== undefined && expirationInSeconds !== null) {
+				this.cache.put(key, value, expirationInSeconds);
+			} else {
+				this.cache.put(key, value);
+			}
+		} catch {
+			// Ignore cache put errors (e.g. value > 100KB limit)
 		}
 	}
 
 	putAll(values: Array<[string, string]>, expirationInSeconds?: number): void {
-		const dict: { [key: string]: string } = Object.fromEntries(values);
-		if (expirationInSeconds !== undefined && expirationInSeconds !== null) {
-			this.cache.putAll(dict, expirationInSeconds);
-		} else {
-			this.cache.putAll(dict);
+		if (!values || values.length === 0) {
+			return;
+		}
+		try {
+			const dict: { [key: string]: string } = Object.fromEntries(values);
+			if (expirationInSeconds !== undefined && expirationInSeconds !== null) {
+				this.cache.putAll(dict, expirationInSeconds);
+			} else {
+				this.cache.putAll(dict);
+			}
+		} catch {
+			// Ignore cache putAll errors
 		}
 	}
 
 	remove(key: string): void {
-		this.cache.remove(key);
+		try {
+			this.cache.remove(key);
+		} catch {
+			// Ignore
+		}
 	}
 
 	removeAll(keys: string[]): void {
-		this.cache.removeAll(keys);
+		if (!keys || keys.length === 0) {
+			return;
+		}
+		try {
+			this.cache.removeAll(keys);
+		} catch {
+			// Ignore
+		}
 	}
 }
