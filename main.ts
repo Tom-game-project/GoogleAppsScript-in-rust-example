@@ -53,24 +53,26 @@ interface GasGlobal {
 
 declare const global: GasGlobal;
 
-function attachWebAppUrl(e: GoogleAppsScript.Events.DoGet | GoogleAppsScript.Events.DoPost): void {
+function getWebAppUrl(): string | undefined {
     try {
         if (typeof ScriptApp !== "undefined" && typeof ScriptApp.getService === "function") {
             const url = ScriptApp.getService().getUrl();
             if (url && url.trim() !== "") {
-                (e as unknown as Record<string, unknown>).webAppUrl = url.trim();
+                return url.trim();
             }
         }
     } catch {
         // Ignore if ScriptApp.getService() is unavailable
     }
+    return undefined;
 }
 
 global.doGet = function(
     e: GoogleAppsScript.Events.DoGet,
 ): GoogleAppsScript.Content.TextOutput | GoogleAppsScript.HTML.HtmlOutput {
-    attachWebAppUrl(e);
-    const r = rsDoGet(JSON.stringify(e)) as unknown as WitWebResponse | GasTextOutput;
+    const webAppUrl = getWebAppUrl();
+    const payload = webAppUrl ? Object.assign({}, e, { webAppUrl }) : e;
+    const r = rsDoGet(JSON.stringify(payload)) as unknown as WitWebResponse | GasTextOutput;
     if ("tag" in r) {
         if (r.tag === "html") {
             return r.val.rawHtmlOutput;
@@ -109,12 +111,7 @@ global.do_get_test00 = function(): void {
 };
 
 global.doPost = function(e: GoogleAppsScript.Events.DoPost): GoogleAppsScript.Content.TextOutput {
-    attachWebAppUrl(e);
-    const serialized = JSON.stringify(e);
-    if (e && e.postData) {
-        (e.postData as unknown as Record<string, unknown>).contents = "";
-    }
-    const r = rsDoPost(serialized) as unknown as GasTextOutput;
+    const r = rsDoPost(JSON.stringify(e)) as unknown as GasTextOutput;
     return r.rawTextOutput;
 };
 
