@@ -840,9 +840,10 @@ fn write_text_file(parent: &GasFolder, name: &str, content: &str, mime_type: &st
 /// Persistent Git Object and Reference Store backed by Google Drive (`DriveApp`).
 ///
 /// Optimized for Google Apps Script latency:
-/// - Batched object bundle persistence: Unpacked incoming packfiles are stored in a single
-///   `bundle_<trailer>.json` file in Google Drive, reducing N separate `DriveApp.createFile`
-///   API calls down to 1 call (over 100x speedup on multi-object pushes).
+/// - Batched object bundle persistence: the objects of each pushed pack are stored by type in
+///   `bundle_commit_<pack-sha1>.json`, `bundle_meta_<pack-sha1>.json` and `bundle_blob_<pack-sha1>.json`
+///   (each split every 4 MB), so the number of `DriveApp.createFile` calls depends on the number of
+///   bundles, not on the number of objects (see `write_objects_batch`).
 /// - Pure-Rust Base64: Uses `base64::engine::general_purpose::STANDARD` in Wasm linear memory
 ///   with zero JS host boundary crossing or `Array.from` heap allocation overhead.
 /// - In-memory object and ref caching: Subsequent reads within the same request are served in 0ms.
@@ -1185,6 +1186,7 @@ impl GasGitStore {
 
     /// Serialize any `gix_object::WriteTo` implementation into loose object format (`<kind> <size>\0<body>`),
     /// compute its SHA-1 `ObjectId` via `gix_object::compute_hash`, and persist it in the repository's Drive `objects/` folder.
+    /// Note: writes one Drive file per object (legacy layout); pushes use `write_objects_batch` instead.
     pub fn write_object(&mut self, object: &dyn WriteTo) -> Result<ObjectId, String> {
         let mut body = Vec::with_capacity(object.size() as usize);
         object
@@ -1235,6 +1237,7 @@ impl GasGitStore {
     }
 
     /// Compute SHA-1 `ObjectId` for `(kind, body)` and store the loose object inside `<repo>.git/objects/<oid>` on Google Drive.
+    /// Note: one Drive file per object (legacy layout, still readable); pushes use `write_objects_batch` instead.
     pub fn write_raw_object(&mut self, kind: ObjectKind, body: &[u8]) -> Result<ObjectId, String> {
         let oid = gix_object::compute_hash(HashKind::Sha1, kind, body)
             .map_err(|e| format!("Failed to compute SHA-1 hash: {}", e))?;
@@ -1884,7 +1887,7 @@ impl GasGitStore {
     }
 
     /// Load all commits reachable from `HEAD` and `refs` using:
-    /// 1. Sharded + zlib-compressed `CacheService` (`gcommits_v2:<repo>`, ~2ms, 0 Drive calls).
+    /// 1. Sharded + zlib-compressed `CacheService` (`gcommits_v3:<repo>`, ~2ms, 0 Drive calls).
     /// 2. Persistent `commits_cache.json` in `repo_folder` on Google Drive (~250ms, 1 Drive file read).
     /// 3. Incremental / time-budgeted (`MAX_COLD_SCAN_SECS`) commit walk that never decompresses
     ///    `Tree` or `Blob` objects and checkpoints progress to `commits_cache.json` so initial index
@@ -2841,7 +2844,7 @@ pub fn handle_receive_pack(req_body: &[u8], project_name: &str) -> Result<Vec<u8
 }
 
 /// Unpack a Git `PACK` v2 stream using `gix_zlib::Inflate`, `gix_hash`, and `gix_object`.
-/// Stores all unpacked objects in a single batch file in Google Drive (`write_objects_batch`).
+/// Stores all unpacked objects in typed, size-split bundle files in Google Drive (`write_objects_batch`).
 fn unpack_pack_v2(pack: &[u8], store: &mut GasGitStore) -> Result<usize, String> {
     if pack.len() < 32 {
         return Err(format!("pack too short ({} bytes)", pack.len()));

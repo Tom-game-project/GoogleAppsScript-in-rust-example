@@ -88,9 +88,12 @@ Web アプリは `appsscript.json` で `"access": "MYSELF"` としているた�
 
 ## GAS 上のオーバーヘッドを削減する主な最適化
 
-1. **Google Drive API 呼び出しの一括バンドル化 (I/O 98% 削減)**:
-   - 従来の「Git オブジェクト1個ごとに `DriveApp.createFile` を1回呼ぶ」方式を廃止し、プッシュされた PACK のオブジェクト群を1つの `bundle_<hash>.json` にまとめて Google Drive へ保存します。
-   - 100〜200個のオブジェクトがあるプッシュでも、Drive API 呼び出しが従来の 150 回（75秒以上）から **2回（約1秒）** へ激減し、タイムアウトやレート制限を回避します。
+1. **Google Drive API 呼び出しの一括バンドル化**:
+   - 本物の Git のように「Git オブジェクト 1 個ごとに `DriveApp.createFile` を 1 回呼ぶ」方式は採りません。push された PACK のオブジェクト群を種類別に `bundle_commit_<pack-sha1>.json`（Commit / Tag）、`bundle_meta_<pack-sha1>.json`（Tree と Blob サイズ表）、`bundle_blob_<pack-sha1>.json`（Blob）へまとめて保存します。各種別は 4 MB ごとに `_1`, `_2`, … へ分割されます。
+   - Drive への書き込み回数はオブジェクト数ではなくバンドル数（通常は数回）で決まるので、数百オブジェクトの push でもタイムアウトやレート制限にかかりにくくなります。
+   - 種別ごとに分けているため、コミット履歴の表示は `bundle_commit` だけ、ディレクトリ一覧は `bundle_meta` まで読めば済みます。Blob バンドルは中身が必要なときだけ開きます。
+   - 各オブジェクトは 128 バイト以上で圧縮が効く場合に `z:<非圧縮サイズ>:<Base64>` として zlib 圧縮されます。
+   - 保存形式とキャッシュの詳細は [`GAS_GIT_SERVER_JA.md` の 1.2〜1.4](GAS_GIT_SERVER_JA.md#12-google-drive-上の保存形式) を参照してください。
 2. **純粋 Rust によるリニアメモリ内 Base64 処理**:
    - `gas:utilities` 経由のホスト（JS）呼び出しや `Array.from` によるヒープアロケーションを排除し、Wasm リニアメモリ内の `base64::engine::general_purpose::STANDARD` で高速処理します。
 3. **コンパイラ最適化とリリースプロファイル (`Cargo.toml`, `Makefile`)**:
