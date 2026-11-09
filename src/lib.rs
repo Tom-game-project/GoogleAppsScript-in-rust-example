@@ -259,8 +259,9 @@ impl Guest for Component {
         let envs = bindings::wasi::cli::environment::get_environment();
         let cwd = bindings::wasi::cli::environment::get_initial_cwd();
         logger::log(&format!("WASI environment count: {}, cwd: {:?}", envs.len(), cwd));
+        // Environment variables are GAS Script Properties, which may hold secrets: log names only.
         for (k, v) in envs.iter().take(5) {
-            logger::log(&format!("  ENV: {} = {}", k, v));
+            logger::log(&format!("  ENV: {} = <{} chars>", k, v.chars().count()));
         }
     }
 }

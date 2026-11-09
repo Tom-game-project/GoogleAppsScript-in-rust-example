@@ -226,6 +226,39 @@ def normalize_gas_url(
     )
 
 
+def _host_matches(host: str, domain: str) -> bool:
+    return host == domain or host.endswith("." + domain)
+
+
+def credentials_for_url(
+    target_url: str, origin_url: str, auth_headers: Dict[str, str]
+) -> Dict[str, str]:
+    """
+    Decide which credentials may be attached to a request for `target_url`.
+
+    Credentials are never leaked to an arbitrary host reached through a redirect, nor sent over
+    plain HTTP to anything but the exact origin the user configured:
+      - the configured origin (same scheme + host + port): `Authorization` and `Cookie`
+      - `https://*.google.com`: `Authorization` and `Cookie`
+      - `https://*.googleusercontent.com` (GAS response host): `Cookie` only, as before
+      - anything else: nothing
+    """
+    if not auth_headers:
+        return {}
+    t = urllib.parse.urlparse(target_url)
+    o = urllib.parse.urlparse(origin_url)
+    host = (t.hostname or "").lower()
+    if (t.scheme, host, t.port) == (o.scheme, (o.hostname or "").lower(), o.port):
+        return dict(auth_headers)
+    if t.scheme != "https":
+        return {}
+    if _host_matches(host, "google.com"):
+        return dict(auth_headers)
+    if _host_matches(host, "googleusercontent.com") and "Cookie" in auth_headers:
+        return {"Cookie": auth_headers["Cookie"]}
+    return {}
+
+
 class KeepAliveHttpPool:
     """
     Persistent HTTP/1.1 Keep-Alive connection pool with TCP_NODELAY.
@@ -361,7 +394,11 @@ class GasAuthManager:
             data["token"] = token
         if cookie is not None:
             data["cookie"] = cookie
-        AUTH_CACHE_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        # Create the credentials file with 0600 from the start (write-then-chmod leaves a window
+        # where other local users could read the token).
+        fd = os.open(AUTH_CACHE_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(data, indent=2))
         try:
             os.chmod(AUTH_CACHE_PATH, 0o600)
         except OSError:
@@ -601,11 +638,7 @@ class GasHttpClient:
             }
             if content_type and curr_body is not None:
                 headers["Content-Type"] = content_type
-            parsed_curr = urllib.parse.urlparse(curr_url)
-            if "googleusercontent.com" not in parsed_curr.netloc:
-                headers.update(auth_headers)
-            elif "Cookie" in auth_headers:
-                headers["Cookie"] = auth_headers["Cookie"]
+            headers.update(credentials_for_url(curr_url, url, auth_headers))
 
             try:
                 status, reason, headers_map, raw = self.pool.request(

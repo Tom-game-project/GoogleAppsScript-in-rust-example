@@ -2,7 +2,7 @@
   "presets": [
     ["@babel/preset-env", {
       "targets": { "chrome": "58" },
-      "debug": true,
+      "debug": false,
       "useBuiltIns": false,
       "forceAllTransforms": true
     }]

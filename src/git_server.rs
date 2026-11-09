@@ -53,6 +53,12 @@ const MAX_CACHE_VALUE_BYTES: usize = 95_000; // GAS CacheService limit is 100KB 
 const MAX_SUB_BUNDLE_JSON_BYTES: usize = 4 * 1024 * 1024; // 4 MB max per Drive bundle file to avoid DriveApp/V8 memory spikes
 const MAX_OBJECT_CACHE_BYTES: usize = 12 * 1024 * 1024; // 12 MB cap on in-memory object_cache per request
 const BLOB_SIZE_PREFIX: &str = "__sz__:";
+/// Upper bound for a single inflated Git object / delta result. Pack headers and stored `z:<len>:` prefixes are
+/// attacker- or storage-controlled, so every allocation sized from them is capped to avoid OOM traps
+/// (GAS V8 isolates have far less memory than this; legitimate pushes are chunked by `git-remote-gas`).
+const MAX_OBJECT_BYTES: usize = 64 * 1024 * 1024;
+/// Upper bound for the commit-list `per_page` query parameter (prevents huge pagination pages).
+const MAX_PER_PAGE: usize = 500;
 
 /// Encode loose object bytes (`<kind> <size>\0<body>`) for compact storage in Drive bundles and `CacheService`.
 /// Objects >= 128 bytes are zlib-compressed (`z:<uncompressed_len>:<base64>`) when compression reduces size,
@@ -1191,24 +1197,41 @@ impl GasGitStore {
     /// Never runs an O(N) scan; if `MAX_OBJECT_CACHE_BYTES` is reached, clears `object_cache` in O(1)
     /// (since `compressed_object_index` retains all compressed strings from loaded bundles in memory).
     fn cache_loose_in_memory(&mut self, oid: ObjectId, loose_bytes: Vec<u8>) {
+        if self.should_cache_in_memory(oid, &loose_bytes) {
+            self.insert_object_cache(oid, loose_bytes);
+        }
+    }
+
+    /// Record metadata for `oid` and decide whether its inflated bytes are worth keeping in `object_cache`
+    /// (large blobs are not cached, so callers can skip the copy entirely).
+    fn should_cache_in_memory(&mut self, oid: ObjectId, loose_bytes: &[u8]) -> bool {
         self.known_existing_objects.insert(oid);
-        if let Ok((kind, size, _)) = gix_object::decode::loose_header(&loose_bytes) {
+        if let Ok((kind, size, _)) = gix_object::decode::loose_header(loose_bytes) {
             if kind == ObjectKind::Blob {
                 self.blob_size_cache.insert(oid, size as usize);
                 if loose_bytes.len() > 2 * 1024 * 1024 {
-                    return;
+                    return false;
                 }
             }
         }
-        if self.object_cache.contains_key(&oid) {
-            return;
-        }
+        !self.object_cache.contains_key(&oid)
+    }
+
+    fn insert_object_cache(&mut self, oid: ObjectId, loose_bytes: Vec<u8>) {
         if self.object_cache_bytes + loose_bytes.len() > MAX_OBJECT_CACHE_BYTES {
             self.object_cache.clear();
             self.object_cache_bytes = 0;
         }
         self.object_cache_bytes += loose_bytes.len();
         self.object_cache.insert(oid, loose_bytes);
+    }
+
+    /// Cache `decoded` (copying only when it will actually be retained) and return it to the caller.
+    fn remember_decoded(&mut self, oid: ObjectId, decoded: Vec<u8>) -> Vec<u8> {
+        if self.should_cache_in_memory(oid, &decoded) {
+            self.insert_object_cache(oid, decoded.clone());
+        }
+        decoded
     }
 
     /// Compute SHA-1 `ObjectId` for `(kind, body)` and store the loose object inside `<repo>.git/objects/<oid>` on Google Drive.
@@ -1729,11 +1752,12 @@ impl GasGitStore {
             return Some(cached.clone());
         }
 
-        if let Some(encoded) = self.compressed_object_index.get(oid).cloned() {
-            if let Some(decoded) = decode_stored_loose_object(&encoded) {
-                self.cache_loose_in_memory(*oid, decoded.clone());
-                return Some(decoded);
-            }
+        if let Some(decoded) = self
+            .compressed_object_index
+            .get(oid)
+            .and_then(|encoded| decode_stored_loose_object(encoded))
+        {
+            return Some(self.remember_decoded(*oid, decoded));
         }
 
         let oid_hex = oid.to_hex().to_string();
@@ -1742,8 +1766,7 @@ impl GasGitStore {
         if let Some(encoded) = cache_get(&cache_key) {
             if let Some(decoded) = decode_stored_loose_object(&encoded) {
                 self.compressed_object_index.insert(*oid, encoded);
-                self.cache_loose_in_memory(*oid, decoded.clone());
-                return Some(decoded);
+                return Some(self.remember_decoded(*oid, decoded));
             }
         }
 
@@ -1758,14 +1781,8 @@ impl GasGitStore {
                 self.index_bundle_file(&file);
             }
 
-            if let Some(encoded) = self.compressed_object_index.get(oid).cloned() {
-                if let Some(decoded) = decode_stored_loose_object(&encoded) {
-                    if encoded.len() <= 32_768 {
-                        cache_put(&cache_key, &encoded, CACHE_TTL_IMMUTABLE_SECS);
-                    }
-                    self.cache_loose_in_memory(*oid, decoded.clone());
-                    return Some(decoded);
-                }
+            if let Some(decoded) = self.decode_indexed_and_share(oid, &cache_key) {
+                return Some(decoded);
             }
 
             while !self.compressed_object_index.contains_key(oid)
@@ -1777,14 +1794,8 @@ impl GasGitStore {
                 self.index_bundle_file(&file);
             }
 
-            if let Some(encoded) = self.compressed_object_index.get(oid).cloned() {
-                if let Some(decoded) = decode_stored_loose_object(&encoded) {
-                    if encoded.len() <= 32_768 {
-                        cache_put(&cache_key, &encoded, CACHE_TTL_IMMUTABLE_SECS);
-                    }
-                    self.cache_loose_in_memory(*oid, decoded.clone());
-                    return Some(decoded);
-                }
+            if let Some(decoded) = self.decode_indexed_and_share(oid, &cache_key) {
+                return Some(decoded);
             }
         }
 
@@ -1808,8 +1819,7 @@ impl GasGitStore {
                                 if encoded_val.len() <= 32_768 {
                                     cache_put(&cache_key, &encoded_val, CACHE_TTL_IMMUTABLE_SECS);
                                 }
-                                self.cache_loose_in_memory(b_oid, decoded.clone());
-                                found_target = Some(decoded);
+                                found_target = Some(self.remember_decoded(b_oid, decoded));
                             }
                         } else if encoded_val.len() <= 65_536
                             && self.compressed_object_index.len() < 8_000
@@ -1825,6 +1835,17 @@ impl GasGitStore {
         }
 
         None
+    }
+
+    /// Decode `oid` from `compressed_object_index` (if indexed), publish small objects to `CacheService`
+    /// for later requests, and cache the inflated bytes in memory.
+    fn decode_indexed_and_share(&mut self, oid: &ObjectId, cache_key: &str) -> Option<Vec<u8>> {
+        let encoded = self.compressed_object_index.get(oid)?;
+        let decoded = decode_stored_loose_object(encoded)?;
+        if encoded.len() <= 32_768 {
+            cache_put(cache_key, encoded, CACHE_TTL_IMMUTABLE_SECS);
+        }
+        Some(self.remember_decoded(*oid, decoded))
     }
 
     fn apply_commit_decorations(
@@ -1949,7 +1970,7 @@ impl GasGitStore {
             if let Ok(stored) = serde_json::from_str::<StoredCommitsCache>(&cache_json) {
                 indexed_bundles = stored.indexed_bundles;
                 if let Some(decompressed) = decode_stored_loose_object(&stored.commits_compressed) {
-                    if let Ok(mut cached_list) =
+                    if let Ok(cached_list) =
                         serde_json::from_slice::<Vec<CommitItem>>(&decompressed)
                     {
                         for item in &cached_list {
@@ -2165,27 +2186,47 @@ impl GasGitStore {
             .and_then(|m| m.get(name).copied())
     }
 
-    /// Update or delete a reference and persist `refs.json` (and `HEAD` if needed) in Google Drive.
-    pub fn update_ref(&mut self, ref_name: &str, new_oid: &ObjectId) -> Result<(), String> {
-        gix_validate::reference::name(ref_name.as_bytes().as_bstr())
-            .map_err(|e| format!("Invalid reference name '{}': {}", ref_name, e))?;
+    /// Return `true` if `oid` is stored in this repository (cheap in-memory checks first, then a full lookup).
+    pub fn has_object(&mut self, oid: &ObjectId) -> bool {
+        self.known_existing_objects.contains(oid)
+            || self.object_cache.contains_key(oid)
+            || self.compressed_object_index.contains_key(oid)
+            || self.read_loose_object(oid).is_some()
+    }
+
+    /// Update and/or delete several references (null `new_oid` = delete) and persist `refs.json`
+    /// (and `HEAD` if needed) in Google Drive with a single write.
+    pub fn apply_ref_updates(&mut self, updates: &[(String, ObjectId)]) -> Result<(), String> {
+        for (ref_name, _) in updates {
+            gix_validate::reference::name(ref_name.as_bytes().as_bstr())
+                .map_err(|e| format!("Invalid reference name '{}': {}", ref_name, e))?;
+        }
 
         self.ensure_meta_loaded();
         let current_sym = self.head_symref();
 
         let should_update_head = {
             let refs = self.refs_cache.get_or_insert_with(BTreeMap::new);
-            if new_oid.is_null() {
-                refs.remove(ref_name);
-                false
-            } else {
-                refs.insert(ref_name.to_string(), *new_oid);
-                ref_name.starts_with("refs/heads/")
-                    && current_sym
+            let mut first_new_branch: Option<&str> = None;
+            for (ref_name, new_oid) in updates {
+                if new_oid.is_null() {
+                    refs.remove(ref_name);
+                } else {
+                    refs.insert(ref_name.clone(), *new_oid);
+                    if first_new_branch.is_none() && ref_name.starts_with("refs/heads/") {
+                        first_new_branch = Some(ref_name.as_str());
+                    }
+                }
+            }
+            // Point HEAD at a pushed branch only when HEAD's current target does not exist.
+            first_new_branch
+                .filter(|_| {
+                    current_sym
                         .as_ref()
                         .map(|sym| !refs.contains_key(sym))
                         .unwrap_or(true)
-            }
+                })
+                .map(str::to_string)
         };
 
         let serialized_map: BTreeMap<String, String> = self
@@ -2200,13 +2241,11 @@ impl GasGitStore {
         let json = serde_json::to_string_pretty(&serialized_map)
             .map_err(|e| format!("Failed to serialize refs.json: {}", e))?;
 
-        let new_head_opt = if should_update_head {
+        let new_head_opt = should_update_head.map(|ref_name| {
             let new_head = format!("ref: {}", ref_name);
             self.head_cache = Some(new_head.clone());
-            Some(new_head)
-        } else {
-            None
-        };
+            new_head
+        });
 
         self.with_repo_folder(|repo_folder| {
             write_text_file(repo_folder, REFS_FILE_NAME, &json, "application/json");
@@ -2598,18 +2637,85 @@ struct RefUpdateCommand {
     ref_name: String,
 }
 
+/// Validate one `git-receive-pack` command.
+/// Returns `Ok(true)` if the ref must be written, `Ok(false)` for an accepted no-op, or `Err(reason)`.
+fn validate_ref_update(
+    store: &mut GasGitStore,
+    cmd: &RefUpdateCommand,
+    unpack_ok: bool,
+) -> Result<bool, String> {
+    if !unpack_ok {
+        return Err("unpacker failed".to_string());
+    }
+    if !cmd.ref_name.starts_with("refs/") {
+        return Err("refusing to update refs outside refs/".to_string());
+    }
+    gix_validate::reference::name(cmd.ref_name.as_bytes().as_bstr())
+        .map_err(|e| format!("invalid refname ({})", e))?;
+
+    let null = ObjectId::null(HashKind::Sha1);
+    let current_oid = store.resolve_ref(&cmd.ref_name).unwrap_or(null);
+    if current_oid != cmd.old_oid {
+        // `git-remote-gas` sends `old == new` no-op commands between multi-chunk uploads.
+        if cmd.old_oid == cmd.new_oid && current_oid == cmd.new_oid {
+            return Ok(false);
+        }
+        return Err(if current_oid.is_null() {
+            format!("stale info (ref does not exist, expected {})", cmd.old_oid.to_hex())
+        } else if cmd.old_oid.is_null() {
+            format!("already exists (current {})", current_oid.to_hex())
+        } else {
+            format!(
+                "stale info (current {} != expected {})",
+                current_oid.to_hex(),
+                cmd.old_oid.to_hex()
+            )
+        });
+    }
+    if cmd.new_oid == current_oid {
+        return Ok(false);
+    }
+    if !cmd.new_oid.is_null() && !store.has_object(&cmd.new_oid) {
+        return Err(format!("missing object {}", cmd.new_oid.to_hex()));
+    }
+    Ok(true)
+}
+
+/// Maximum time to wait for the script-wide push lock before rejecting a concurrent push.
+const RECEIVE_PACK_LOCK_TIMEOUT_MS: i32 = 30_000;
+
+/// RAII guard that releases the GAS script lock on every exit path (including early `?` returns).
+struct ScriptLockGuard {
+    lock: crate::bindings::gas::lock_service::gas_lock::GasLock,
+}
+
+impl ScriptLockGuard {
+    fn acquire(timeout_ms: i32) -> Result<Self, String> {
+        let lock = gas_lock_service::get_script_lock();
+        if lock.try_lock(timeout_ms) {
+            Ok(Self { lock })
+        } else {
+            Err(format!(
+                "Another push is in progress (could not acquire lock within {} ms); please retry",
+                timeout_ms
+            ))
+        }
+    }
+}
+
+impl Drop for ScriptLockGuard {
+    fn drop(&mut self) {
+        self.lock.release_lock();
+    }
+}
+
 /// Handle `POST /<project_name>.git/git-receive-pack` (`git push`).
 pub fn handle_receive_pack(req_body: &[u8], project_name: &str) -> Result<Vec<u8>, String> {
-    let lock = gas_lock_service::get_script_lock();
-    let _locked = lock.try_lock(10_000);
+    // Serialize pushes: without the lock two concurrent pushes could both pass the
+    // compare-and-swap check below and silently overwrite each other's ref updates.
+    let _lock = ScriptLockGuard::acquire(RECEIVE_PACK_LOCK_TIMEOUT_MS)?;
 
-    let mut store = match GasGitStore::open(project_name) {
-        Ok(s) => s,
-        Err(e) => {
-            lock.release_lock();
-            return Err(e);
-        }
-    };
+    let mut store = GasGitStore::open(project_name)?;
 
     let mut commands: Vec<RefUpdateCommand> = Vec::new();
     let mut client_caps: BTreeSet<String> = BTreeSet::new();
@@ -2620,14 +2726,8 @@ pub fn handle_receive_pack(req_body: &[u8], project_name: &str) -> Result<Vec<u8
         while let Some(line_res) = reader.read_line() {
             let pkt = match line_res {
                 Ok(Ok(p)) => p,
-                Ok(Err(e)) => {
-                    lock.release_lock();
-                    return Err(format!("receive-pack decode error: {}", e));
-                }
-                Err(e) => {
-                    lock.release_lock();
-                    return Err(format!("receive-pack io error: {}", e));
-                }
+                Ok(Err(e)) => return Err(format!("receive-pack decode error: {}", e)),
+                Err(e) => return Err(format!("receive-pack io error: {}", e)),
             };
             if let Some(slice) = pkt.as_slice() {
                 let slice = slice.strip_suffix(b"\n").unwrap_or(slice);
@@ -2645,14 +2745,10 @@ pub fn handle_receive_pack(req_body: &[u8], project_name: &str) -> Result<Vec<u8
                 if let (Some(old_hex), Some(new_hex), Some(ref_name)) =
                     (parts.next(), parts.next(), parts.next())
                 {
-                    let old_oid = ObjectId::from_hex(old_hex.as_bytes()).map_err(|e| {
-                        lock.release_lock();
-                        format!("Invalid old OID '{}': {}", old_hex, e)
-                    })?;
-                    let new_oid = ObjectId::from_hex(new_hex.as_bytes()).map_err(|e| {
-                        lock.release_lock();
-                        format!("Invalid new OID '{}': {}", new_hex, e)
-                    })?;
+                    let old_oid = ObjectId::from_hex(old_hex.as_bytes())
+                        .map_err(|e| format!("Invalid old OID '{}': {}", old_hex, e))?;
+                    let new_oid = ObjectId::from_hex(new_hex.as_bytes())
+                        .map_err(|e| format!("Invalid new OID '{}': {}", new_hex, e))?;
                     commands.push(RefUpdateCommand {
                         old_oid,
                         new_oid,
@@ -2680,40 +2776,45 @@ pub fn handle_receive_pack(req_body: &[u8], project_name: &str) -> Result<Vec<u8
     };
 
     let unpack_ok = unpack_status == "unpack ok";
-    let mut ref_statuses: Vec<String> = Vec::with_capacity(commands.len());
+    let atomic = client_caps.contains("atomic");
 
+    // Phase 1: validate every command against the current refs (compare-and-swap semantics,
+    // identical to `git receive-pack`: `old_oid` must equal the ref's current value, where the
+    // null OID means "ref must not exist").
+    let mut verdicts: Vec<Result<bool, String>> = Vec::with_capacity(commands.len());
     for cmd in &commands {
-        if !unpack_ok {
-            ref_statuses.push(format!("ng {} unpacker failed", cmd.ref_name));
-            continue;
-        }
-        if let Err(e) = gix_validate::reference::name(cmd.ref_name.as_bytes().as_bstr()) {
-            ref_statuses.push(format!("ng {} invalid refname ({})", cmd.ref_name, e));
-            continue;
-        }
-        let current_oid = store
-            .resolve_ref(&cmd.ref_name)
-            .unwrap_or_else(|| ObjectId::null(HashKind::Sha1));
-        if !cmd.old_oid.is_null() && current_oid != cmd.old_oid && !current_oid.is_null() {
-            ref_statuses.push(format!(
-                "ng {} non-fast-forward (current {} != expected {})",
-                cmd.ref_name,
-                current_oid.to_hex(),
-                cmd.old_oid.to_hex()
-            ));
-            continue;
-        }
-        if cmd.old_oid == cmd.new_oid && current_oid == cmd.new_oid {
-            ref_statuses.push(format!("ok {}", cmd.ref_name));
-            continue;
-        }
-        match store.update_ref(&cmd.ref_name, &cmd.new_oid) {
-            Ok(()) => ref_statuses.push(format!("ok {}", cmd.ref_name)),
-            Err(e) => ref_statuses.push(format!("ng {} {}", cmd.ref_name, e)),
+        verdicts.push(validate_ref_update(&mut store, cmd, unpack_ok));
+    }
+    if atomic && verdicts.iter().any(|v| v.is_err()) {
+        for v in verdicts.iter_mut() {
+            if v.is_ok() {
+                *v = Err("atomic transaction failed".to_string());
+            }
         }
     }
 
-    lock.release_lock();
+    // Phase 2: apply all accepted updates with a single `refs.json` write.
+    let updates: Vec<(String, ObjectId)> = commands
+        .iter()
+        .zip(&verdicts)
+        .filter(|(_, v)| matches!(v, Ok(true)))
+        .map(|(cmd, _)| (cmd.ref_name.clone(), cmd.new_oid))
+        .collect();
+    let apply_err = if updates.is_empty() {
+        None
+    } else {
+        store.apply_ref_updates(&updates).err()
+    };
+
+    let mut ref_statuses: Vec<String> = Vec::with_capacity(commands.len());
+    for (cmd, verdict) in commands.iter().zip(&verdicts) {
+        match (verdict, &apply_err) {
+            (Ok(true), Some(e)) => ref_statuses.push(format!("ng {} {}", cmd.ref_name, e)),
+            (Ok(_), _) => ref_statuses.push(format!("ok {}", cmd.ref_name)),
+            (Err(reason), _) => ref_statuses.push(format!("ng {} {}", cmd.ref_name, reason)),
+        }
+    }
+    drop(_lock);
 
     let mut status_pkt = Vec::with_capacity(256);
     pkt_encode::text_to_write(unpack_status.as_bytes(), &mut status_pkt)
@@ -2755,6 +2856,13 @@ fn unpack_pack_v2(pack: &[u8], store: &mut GasGitStore) -> Result<usize, String>
     let num_objects = u32::from_be_bytes([pack[8], pack[9], pack[10], pack[11]]) as usize;
 
     let data_end = pack.len() - 20;
+    // Every pack entry needs at least a 1-byte header plus a 2-byte zlib stream; reject absurd counts up front.
+    if num_objects > data_end / 3 {
+        return Err(format!(
+            "pack declares {} objects but only {} bytes of data",
+            num_objects, data_end
+        ));
+    }
     let expected_trailer = ObjectId::try_from(&pack[data_end..])
         .map_err(|e| format!("invalid pack trailer: {}", e))?;
     let mut hasher = gix_hash::hasher(HashKind::Sha1);
@@ -2788,7 +2896,7 @@ fn unpack_pack_v2(pack: &[u8], store: &mut GasGitStore) -> Result<usize, String>
         pos += 1;
         let obj_type = (first >> 4) & 0x07;
         let mut uncompressed_size = (first & 0x0f) as usize;
-        let mut shift = 4usize;
+        let mut shift = 4u32;
         let mut cont = first & 0x80 != 0;
         while cont {
             if pos >= data_end {
@@ -2796,9 +2904,19 @@ fn unpack_pack_v2(pack: &[u8], store: &mut GasGitStore) -> Result<usize, String>
             }
             let b = pack[pos];
             pos += 1;
-            uncompressed_size |= ((b & 0x7f) as usize) << shift;
+            let part = ((b & 0x7f) as usize)
+                .checked_shl(shift)
+                .filter(|v| v >> shift == (b & 0x7f) as usize)
+                .ok_or_else(|| "pack object size header overflow".to_string())?;
+            uncompressed_size |= part;
             shift += 7;
             cont = b & 0x80 != 0;
+        }
+        if uncompressed_size > MAX_OBJECT_BYTES {
+            return Err(format!(
+                "pack object {} too large ({} bytes, limit {} bytes)",
+                idx, uncompressed_size, MAX_OBJECT_BYTES
+            ));
         }
 
         match obj_type {
@@ -2833,7 +2951,11 @@ fn unpack_pack_v2(pack: &[u8], store: &mut GasGitStore) -> Result<usize, String>
                     }
                     b = pack[pos];
                     pos += 1;
-                    neg_offset = ((neg_offset + 1) << 7) | ((b & 0x7f) as usize);
+                    neg_offset = neg_offset
+                        .checked_add(1)
+                        .and_then(|v| v.checked_mul(128))
+                        .ok_or_else(|| "OFS_DELTA offset overflow".to_string())?
+                        | ((b & 0x7f) as usize);
                 }
                 let base_offset = entry_start
                     .checked_sub(neg_offset)
@@ -2906,17 +3028,26 @@ fn unpack_pack_v2(pack: &[u8], store: &mut GasGitStore) -> Result<usize, String>
     Ok(num_objects)
 }
 
+/// Inflate exactly `expected_size` bytes from a zlib stream at the start of `input`.
+/// Rejects sizes above `MAX_OBJECT_BYTES` (no attacker-sized allocation) and streams that
+/// produce fewer bytes than declared (previously such objects were silently zero-padded).
 fn inflate_pack_entry(
     inflate: &mut Inflate,
     input: &[u8],
     expected_size: usize,
 ) -> Result<(Vec<u8>, usize), String> {
+    if expected_size > MAX_OBJECT_BYTES {
+        return Err(format!(
+            "object too large ({} bytes, limit {} bytes)",
+            expected_size, MAX_OBJECT_BYTES
+        ));
+    }
     inflate.reset();
     let mut out = vec![0u8; expected_size.max(1)];
     let (status, consumed_in, produced_out) = inflate
         .once(input, &mut out)
         .map_err(|e| format!("zlib inflate error: {}", e))?;
-    if status != ZlibStatus::StreamEnd {
+    if status != ZlibStatus::StreamEnd || produced_out != expected_size {
         return Err(format!(
             "incomplete zlib stream in pack entry (status={:?}, expected={} bytes, got={})",
             status, expected_size, produced_out
@@ -2924,6 +3055,16 @@ fn inflate_pack_entry(
     }
     out.truncate(expected_size);
     Ok((out, consumed_in))
+}
+
+/// Read one byte from `data` at `*pos` with bounds checking.
+#[inline]
+fn read_delta_byte(data: &[u8], pos: &mut usize) -> Result<u8, String> {
+    let b = *data
+        .get(*pos)
+        .ok_or_else(|| "unexpected EOF in delta copy instruction".to_string())?;
+    *pos += 1;
+    Ok(b)
 }
 
 fn apply_git_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, String> {
@@ -2937,6 +3078,12 @@ fn apply_git_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, String> {
         ));
     }
     let dst_size = read_delta_varint(delta, &mut pos)?;
+    if dst_size > MAX_OBJECT_BYTES {
+        return Err(format!(
+            "delta result too large ({} bytes, limit {} bytes)",
+            dst_size, MAX_OBJECT_BYTES
+        ));
+    }
     let mut out = Vec::with_capacity(dst_size);
 
     while pos < delta.len() {
@@ -2945,45 +3092,34 @@ fn apply_git_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, String> {
         if cmd & 0x80 != 0 {
             let mut cp_off = 0usize;
             let mut cp_size = 0usize;
-            if cmd & 0x01 != 0 {
-                cp_off |= delta[pos] as usize;
-                pos += 1;
+            for (bit, shift) in [(0x01u8, 0u32), (0x02, 8), (0x04, 16), (0x08, 24)] {
+                if cmd & bit != 0 {
+                    cp_off |= (read_delta_byte(delta, &mut pos)? as usize) << shift;
+                }
             }
-            if cmd & 0x02 != 0 {
-                cp_off |= (delta[pos] as usize) << 8;
-                pos += 1;
-            }
-            if cmd & 0x04 != 0 {
-                cp_off |= (delta[pos] as usize) << 16;
-                pos += 1;
-            }
-            if cmd & 0x08 != 0 {
-                cp_off |= (delta[pos] as usize) << 24;
-                pos += 1;
-            }
-            if cmd & 0x10 != 0 {
-                cp_size |= delta[pos] as usize;
-                pos += 1;
-            }
-            if cmd & 0x20 != 0 {
-                cp_size |= (delta[pos] as usize) << 8;
-                pos += 1;
-            }
-            if cmd & 0x40 != 0 {
-                cp_size |= (delta[pos] as usize) << 16;
-                pos += 1;
+            for (bit, shift) in [(0x10u8, 0u32), (0x20, 8), (0x40, 16)] {
+                if cmd & bit != 0 {
+                    cp_size |= (read_delta_byte(delta, &mut pos)? as usize) << shift;
+                }
             }
             if cp_size == 0 {
                 cp_size = 0x10000;
             }
-            if cp_off + cp_size > base.len() {
-                return Err("delta copy out of bounds".to_string());
+            let cp_end = cp_off
+                .checked_add(cp_size)
+                .filter(|&end| end <= base.len())
+                .ok_or_else(|| "delta copy out of bounds".to_string())?;
+            if out.len() + cp_size > dst_size {
+                return Err("delta result exceeds declared size".to_string());
             }
-            out.extend_from_slice(&base[cp_off..cp_off + cp_size]);
+            out.extend_from_slice(&base[cp_off..cp_end]);
         } else if cmd != 0 {
             let len = cmd as usize;
             if pos + len > delta.len() {
                 return Err("delta literal insert out of bounds".to_string());
+            }
+            if out.len() + len > dst_size {
+                return Err("delta result exceeds declared size".to_string());
             }
             out.extend_from_slice(&delta[pos..pos + len]);
             pos += len;
@@ -3004,10 +3140,13 @@ fn apply_git_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, String> {
 
 fn read_delta_varint(data: &[u8], pos: &mut usize) -> Result<usize, String> {
     let mut val = 0usize;
-    let mut shift = 0usize;
+    let mut shift = 0u32;
     loop {
         if *pos >= data.len() {
             return Err("unexpected EOF reading delta varint".to_string());
+        }
+        if shift >= usize::BITS {
+            return Err("delta varint overflow".to_string());
         }
         let b = data[*pos];
         *pos += 1;
@@ -3095,19 +3234,43 @@ pub fn create_repo_json(project_name: &str, description: Option<&str>) -> String
     }
 }
 
-/// Render the Gleam + Lustre Web UI HTML output with hydrated initial state from `dist/index.html`.
+/// Name of the GAS project HTML file holding the bundled Web UI (`dist/index.html`, uploaded by `clasp push`).
+const WEB_UI_HTML_FILE: &str = "index";
+
+/// Wrap an HTML string in a sandboxed `HtmlOutput`.
+/// `XFrameOptionsMode::DefaultMode` keeps GAS's anti-clickjacking `X-Frame-Options` header, so third-party
+/// sites cannot frame the Web UI (e.g. to trick the owner into clicking "Create repository").
+fn sandboxed_html_output(html: String, title: &str) -> GasHtmlOutput {
+    gas_html_service::create_html_output(Some(HtmlSource::Html(html)))
+        .set_title(title)
+        .set_sandbox_mode(SandboxMode::Iframe)
+        .set_x_frame_options_mode(XFrameOptionsMode::DefaultMode)
+}
+
+/// Render the Gleam + Lustre Web UI HTML output with hydrated initial state.
+///
+/// The UI bundle is read from the GAS project's `index.html` file (pushed from `dist/index.html`) instead of
+/// being embedded with `include_str!`: this keeps ~100 KB of HTML out of the Wasm binary (smaller Base64
+/// payload and faster `WebAssembly.Module` compilation on *every* GAS request), and UI edits no longer force
+/// a fat-LTO relink of the Rust crate.
 pub fn render_web_ui_html(selected_project: Option<String>) -> GasHtmlOutput {
+    let template = gas_html_service::create_html_output_from_file(WEB_UI_HTML_FILE).get_content();
+    if !template.contains("</head>") {
+        let html = render_not_found_error_document(
+            "Web UI is not deployed",
+            "/",
+            "The GAS project file 'index.html' is missing. Run `make push` to upload dist/index.html.",
+            None,
+        );
+        return sandboxed_html_output(html, "GAS Git Server");
+    }
     let initial_state_json = list_repos_json(selected_project).replace("</", "<\\/");
-    let template = include_str!("../dist/index.html");
     let state_script = format!(
         "<script>window.__GAS_GIT_INITIAL_STATE__ = {};</script>\n</head>",
         initial_state_json
     );
     let html_str = template.replacen("</head>", &state_script, 1);
-    gas_html_service::create_html_output(Some(HtmlSource::Html(html_str)))
-        .set_title("GAS Git Server")
-        .set_sandbox_mode(SandboxMode::Iframe)
-        .set_x_frame_options_mode(XFrameOptionsMode::Allowall)
+    sandboxed_html_output(html_str, "GAS Git Server")
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -3821,16 +3984,14 @@ pub fn handle_do_get(event: &GasDoGetEvent) -> WebResponse {
                 );
             }
             "create_repo" => {
-                let name = event
-                    .parameter
-                    .get("project_name")
-                    .or_else(|| event.parameter.get("repo"))
-                    .map(|s| s.as_str())
-                    .unwrap_or("");
-                let desc = event.parameter.get("description").map(|s| s.as_str());
-                let json = create_repo_json(name, desc);
+                // State-changing operations are never accepted over GET: a cross-site `<img src=...>`
+                // would otherwise create repositories with the deploying user's credentials (CSRF).
+                // The Web UI uses `google.script.run.git_create_repo` or `POST ?action=create_repo`.
                 return WebResponse::Text(
-                    gas_content_service::create_text_output(&json).set_mime_type(MimeType::Json),
+                    gas_content_service::create_text_output(
+                        r#"{"ok":false,"error":"create_repo requires POST"}"#,
+                    )
+                    .set_mime_type(MimeType::Json),
                 );
             }
             _ => {}
@@ -3935,10 +4096,7 @@ pub fn handle_do_get(event: &GasDoGetEvent) -> WebResponse {
                     None,
                 );
                 WebResponse::Html(
-                    gas_html_service::create_html_output(Some(HtmlSource::Html(html)))
-                        .set_title(title)
-                        .set_sandbox_mode(SandboxMode::Iframe)
-                        .set_x_frame_options_mode(XFrameOptionsMode::Allowall),
+                    sandboxed_html_output(html, title),
                 )
             }
         }
@@ -5138,7 +5296,8 @@ fn handle_commit_browser_get(
         .parameter
         .get("per_page")
         .and_then(|s| s.parse::<usize>().ok())
-        .filter(|&n| n >= 1);
+        .filter(|&n| n >= 1)
+        .map(|n| n.min(MAX_PER_PAGE));
 
     let page_size = custom_per_page
         .or_else(|| {
@@ -5146,7 +5305,7 @@ fn handle_commit_browser_get(
                 .and_then(|s| s.parse::<usize>().ok())
         })
         .unwrap_or(DEFAULT_COMMIT_PAGE_SIZE)
-        .max(1);
+        .clamp(1, MAX_PER_PAGE);
 
     let page_param = event.parameter.get("page").map(|s| s.as_str());
     let configured_base = event
@@ -5179,10 +5338,7 @@ fn handle_commit_browser_get(
                 );
             }
             return WebResponse::Html(
-                gas_html_service::create_html_output(Some(HtmlSource::Html(html)))
-                    .set_title(title)
-                    .set_sandbox_mode(SandboxMode::Iframe)
-                    .set_x_frame_options_mode(XFrameOptionsMode::Allowall),
+                sandboxed_html_output(html, title),
             );
         }
     };
@@ -5224,10 +5380,7 @@ fn handle_commit_browser_get(
                 )
             } else {
                 WebResponse::Html(
-                    gas_html_service::create_html_output(Some(HtmlSource::Html(html)))
-                        .set_title(&title)
-                        .set_sandbox_mode(SandboxMode::Iframe)
-                        .set_x_frame_options_mode(XFrameOptionsMode::Allowall),
+                    sandboxed_html_output(html, &title),
                 )
             }
         }
@@ -5467,5 +5620,83 @@ mod tests {
             }
             _ => panic!("Expected redirect Html output for ambiguous prefix with page_size=1"),
         }
+    }
+
+    // --- Hardened pack / delta parsing (malformed input must return Err, never panic or over-allocate) ---
+
+    use super::{MAX_OBJECT_BYTES, apply_git_delta, inflate_pack_entry, read_delta_varint};
+    use gix_zlib::Inflate;
+
+    fn varint(mut v: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let b = (v & 0x7f) as u8;
+            v >>= 7;
+            if v == 0 {
+                out.push(b);
+                return out;
+            }
+            out.push(b | 0x80);
+        }
+    }
+
+    #[test]
+    fn test_apply_git_delta_valid_copy_and_insert() {
+        let base = b"hello world";
+        let mut delta = varint(base.len());
+        delta.extend(varint(8));
+        delta.extend([0x80 | 0x01 | 0x10, 0, 5]); // copy base[0..5] = "hello"
+        delta.extend([3, b'!', b'!', b'!']); // insert "!!!"
+        assert_eq!(apply_git_delta(base, &delta).unwrap(), b"hello!!!");
+    }
+
+    #[test]
+    fn test_apply_git_delta_truncated_copy_instruction_is_error() {
+        let base = b"abc";
+        let mut delta = varint(3);
+        delta.extend(varint(3));
+        delta.push(0x80 | 0x01 | 0x02 | 0x10); // declares 3 operand bytes but none follow
+        assert!(apply_git_delta(base, &delta).is_err());
+    }
+
+    #[test]
+    fn test_apply_git_delta_overflowing_copy_is_error() {
+        let base = b"abc";
+        let mut delta = varint(3);
+        delta.extend(varint(3));
+        // cp_off = 0xFFFF_FFFF, cp_size = 0x10000 (would wrap on 32-bit targets)
+        delta.extend([0x80 | 0x0f, 0xff, 0xff, 0xff, 0xff]);
+        assert!(apply_git_delta(base, &delta).is_err());
+    }
+
+    #[test]
+    fn test_apply_git_delta_rejects_huge_declared_result() {
+        let base = b"abc";
+        let mut delta = varint(3);
+        delta.extend(varint(MAX_OBJECT_BYTES + 1));
+        assert!(apply_git_delta(base, &delta).is_err());
+    }
+
+    #[test]
+    fn test_read_delta_varint_overflow_is_error() {
+        let data = [0xffu8; 16];
+        let mut pos = 0;
+        assert!(read_delta_varint(&data, &mut pos).is_err());
+    }
+
+    #[test]
+    fn test_inflate_pack_entry_rejects_short_stream_and_huge_size() {
+        use gix_zlib::{Compression, stream::deflate};
+        use std::io::Write;
+        let mut w = deflate::Write::new(Vec::new(), Compression::DEFAULT);
+        w.write_all(b"abc").unwrap();
+        w.flush().unwrap();
+        let z = w.into_inner();
+        let mut inflate = Inflate::default();
+        let (out, _) = inflate_pack_entry(&mut inflate, &z, 3).unwrap();
+        assert_eq!(out, b"abc");
+        // Declared size larger than the stream: previously zero-padded silently.
+        assert!(inflate_pack_entry(&mut inflate, &z, 10).is_err());
+        assert!(inflate_pack_entry(&mut inflate, &z, MAX_OBJECT_BYTES + 1).is_err());
     }
 }

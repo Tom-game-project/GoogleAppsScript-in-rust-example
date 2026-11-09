@@ -8,11 +8,15 @@ module.exports = {
   target: ['web', 'es2020'],
   entry: ['./textencoderdecoder.ts', './main.ts'],
   devtool: false,
+  // NOTE: `cache: { type: 'filesystem' }` is intentionally not used: gas-webpack-plugin's
+  // GasDependency is not serializable, so webpack would skip caching those modules anyway.
+  // Rebuild avoidance is handled by the Makefile's explicit dependencies instead.
   output: {
     filename: 'main.js',
     path: path.resolve(__dirname, 'dist'),
+    // dist/index.html (Web UI) and dist/appsscript.json are produced by other make rules.
     clean: {
-      keep: /index\.html$/,
+      keep: /^(index\.html|appsscript\.json)$/,
     },
   },
   module: {
@@ -26,7 +30,12 @@ module.exports = {
               compact: false,
             },
           },
-          'ts-loader',
+          {
+            loader: 'ts-loader',
+            // Type checking is done once by `tsc --noEmit` (make typecheck / build-pack)
+            // in parallel with bundling instead of per-module inside webpack.
+            options: { transpileOnly: true },
+          },
         ],
         exclude: /node_modules/,
       },
