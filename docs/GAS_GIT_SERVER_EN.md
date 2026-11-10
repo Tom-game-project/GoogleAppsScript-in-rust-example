@@ -105,7 +105,22 @@ The server also caches the following in `CacheService`; the relevant keys are in
 
 For large repositories, `git-remote-gas` splits the push into packs of a few MB each. It advances the branch along first-parent checkpoints, so an interrupted push resumes where it left off when re-run.
 
-### 1.5 No Automatic Initial Commit & Gleam + Lustre Browser Web UI (`web/`)
+### 1.5 Clone / Fetch Processing (`src/upload_pack.rs`)
+
+`git-upload-pack` mirrors `git upload-pack --stateless-rpc`. It lives in a standalone, GAS-independent module tested against real `git`. Each HTTP request is one negotiation round, and only a request containing `done` gets a pack.
+
+| Capability | Behavior |
+| :--- | :--- |
+| `multi_ack` / `multi_ack_detailed` | `ACK <oid> continue` / `common` for each common commit, then `ready` once every wanted commit has a common ancestor, so the client stops negotiating. Real `git fetch-pack` requires `multi_ack_detailed` over HTTP |
+| `shallow` | Supports `deepen <n>` (`--depth`) and `--unshallow`: replies with `shallow` / `unshallow` lines and limits the pack to that depth. Plain fetches into a shallow clone treat the client's shallow commits as boundaries |
+| `ofs-delta` | Blobs and trees are stored as deltas against the newer version at the same path (newest stored whole) |
+| `thin-pack` | Sends `REF_DELTA`s against the version the client already has at the same path, which greatly reduces incremental fetches (the client completes the pack with `index-pack --fix-thin`) |
+| `include-tag` | Adds annotated tags that point at sent objects. `info/refs` also advertises peeled `^{}` lines for tags |
+| `side-band` / `side-band-64k` / `no-progress` | Progress / data multiplexing |
+
+What the client already has is derived from the ancestry of the common commits, plus the trees of the "edge" commits adjacent to the commits being sent. The server never walks every tree in history. `git-remote-gas` sends `have` lines (up to 256 recent local commits) and the capabilities above, so `git pull` transfers only the difference. `git clone --depth N`, `git fetch --depth N` and `--unshallow` are supported, and `$GIT_DIR/shallow` is updated.
+
+### 1.6 No Automatic Initial Commit & Gleam + Lustre Browser Web UI (`web/`)
 - **No unwanted initial commits**: the server never creates a commit on its own. New repositories start empty (`0` commits, unborn `HEAD -> refs/heads/main`), so `git push -u origin main` from any local repository works without non-fast-forward conflicts.
 - **Gleam + Lustre Web UI (`web/src/gas_git_ui.gleam`)**: opening `https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec` in a browser serves the UI.
   - **Pure Elm Architecture (MVU)**: built on `lustre.application(init, update, view)` and `lustre/effect.from`.
@@ -118,7 +133,7 @@ For large repositories, `git-remote-gas` splits the push into packs of a few MB 
   - **Browser-side cache**: commit lists and diffs are stored in IndexedDB (falling back to CacheStorage, then localStorage), so repeat views make no server request. Cache keys include the HEAD commit, so data is refetched after a push.
 - The Web UI HTML (`dist/index.html`) is **not** embedded into the Wasm binary. `clasp push` uploads it as the GAS HTML file `index`, and the server reads it at runtime with `HtmlService.createHtmlOutputFromFile("index")`, then injects the initial-state JSON.
 
-### 1.6 Role of `gitoxide` in `src/git_server.rs`
+### 1.7 Role of `gitoxide` in `src/git_server.rs`
 
 | Crate | Usage in GAS Git Server |
 | :--- | :--- |

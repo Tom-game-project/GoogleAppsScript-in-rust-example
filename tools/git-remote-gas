@@ -762,6 +762,274 @@ def parse_refs_from_advertisement(data: bytes) -> Tuple[List[Tuple[str, str]], O
     return refs, symref_head
 
 
+MAX_HAVES = 256
+INFINITE_DEPTH = 0x7FFFFFFF
+
+
+class FetchOptions:
+    """Options git passes to the helper via `option <name> <value>`."""
+
+    def __init__(self) -> None:
+        self.depth: Optional[int] = None
+        self.followtags = False
+        self.progress = True
+        self.verbosity = 1
+
+    def set(self, name: str, value: str) -> str:
+        """Apply one option; returns the helper reply (`ok` / `unsupported` / `error <msg>`)."""
+        if name == "depth":
+            try:
+                depth = int(value)
+            except ValueError:
+                return f"error invalid depth '{value}'"
+            if depth <= 0:
+                return "error depth must be positive"
+            self.depth = min(depth, INFINITE_DEPTH)
+            return "ok"
+        if name == "followtags":
+            self.followtags = value == "true"
+            return "ok"
+        if name == "progress":
+            self.progress = value == "true"
+            return "ok"
+        if name == "verbosity":
+            try:
+                self.verbosity = int(value)
+            except ValueError:
+                return "error invalid verbosity"
+            return "ok"
+        if name in ("cloning", "check-connectivity"):
+            return "ok"
+        # deepen-since / deepen-not / deepen-relative / filter / ... are not supported by the server.
+        return "unsupported"
+
+
+def pkt_line_bytes(text: str) -> bytes:
+    data = text.encode("utf-8")
+    if not text.endswith("\n"):
+        data += b"\n"
+    return f"{len(data) + 4:04x}".encode("ascii") + data
+
+
+def git_dir() -> Path:
+    env = os.environ.get("GIT_DIR")
+    if env:
+        return Path(env)
+    out = subprocess.check_output(["git", "rev-parse", "--git-dir"], text=True).strip()
+    return Path(out)
+
+
+def read_shallow_file() -> List[str]:
+    path = git_dir() / "shallow"
+    if not path.exists():
+        return []
+    return [line.strip() for line in path.read_text(encoding="ascii").splitlines() if line.strip()]
+
+
+def update_shallow_file(add: List[str], remove: List[str]) -> None:
+    """Apply `shallow` / `unshallow` lines from the server to `$GIT_DIR/shallow` atomically."""
+    if not add and not remove:
+        return
+    current = set(read_shallow_file())
+    current.update(add)
+    current.difference_update(remove)
+    path = git_dir() / "shallow"
+    if not current:
+        if path.exists():
+            path.unlink()
+        return
+    lock = path.with_name("shallow.lock")
+    lock.write_text("".join(f"{oid}\n" for oid in sorted(current)), encoding="ascii")
+    os.replace(lock, path)
+
+
+def local_have_commits(limit: int = MAX_HAVES) -> List[str]:
+    """Recent local commits to advertise as `have` (remote-tracking tips first, then newest by date)."""
+    haves: List[str] = []
+    seen: Set[str] = set()
+    for cmd in (
+        ["git", "for-each-ref", "--format=%(objectname)", "refs/remotes/", "refs/heads/"],
+        ["git", "rev-list", "--date-order", f"--max-count={limit}", "--all"],
+    ):
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, check=False).stdout
+        except OSError:
+            continue
+        for oid in out.split():
+            if len(oid) == 40 and oid not in seen:
+                seen.add(oid)
+                haves.append(oid)
+                if len(haves) >= limit:
+                    return haves
+    return haves
+
+
+class PktReader:
+    def __init__(self, data: bytes) -> None:
+        self.data = data
+        self.pos = 0
+
+    def at_raw_pack(self) -> bool:
+        return self.data[self.pos : self.pos + 4] == b"PACK"
+
+    def read(self) -> Optional[bytes]:
+        """Next pkt payload, `None` for flush/delim. Raises `EOFError` at the end."""
+        if self.pos + 4 > len(self.data):
+            raise EOFError("unexpected end of upload-pack response")
+        head = self.data[self.pos : self.pos + 4]
+        try:
+            size = int(head.decode("ascii"), 16)
+        except ValueError:
+            raise RuntimeError(f"invalid pkt-line header {head!r} in upload-pack response")
+        if size < 4:
+            self.pos += 4
+            return None
+        payload = self.data[self.pos + 4 : self.pos + size]
+        self.pos += size
+        return payload
+
+
+def parse_upload_pack_response(
+    resp: bytes, expect_shallow: bool, progress: bool
+) -> Tuple[bytes, List[str], List[str]]:
+    """
+    Parse a stateless upload-pack response:
+    `[shallow-section flush] ACK/NAK lines (side-band pack | raw pack)`.
+    Returns `(pack_bytes, shallow_oids, unshallow_oids)`.
+    """
+    reader = PktReader(resp)
+    shallow: List[str] = []
+    unshallow: List[str] = []
+
+    def check_err(line: bytes) -> None:
+        if line.startswith(b"ERR "):
+            raise RuntimeError(line[4:].decode("utf-8", errors="replace").strip())
+
+    if expect_shallow:
+        while True:
+            payload = reader.read()
+            if payload is None:
+                break
+            line = payload.rstrip(b"\n")
+            check_err(line)
+            if line.startswith(b"shallow "):
+                shallow.append(line.split()[1].decode("ascii"))
+            elif line.startswith(b"unshallow "):
+                unshallow.append(line.split()[1].decode("ascii"))
+            else:
+                raise RuntimeError(f"expected shallow/unshallow, got {line!r}")
+
+    # ACK lines: `ACK <oid> continue` (multi_ack) until a final `ACK <oid>` or `NAK`.
+    while True:
+        payload = reader.read()
+        if payload is None:
+            continue
+        line = payload.rstrip(b"\n")
+        check_err(line)
+        if line == b"NAK":
+            break
+        if line.startswith(b"ACK "):
+            parts = line.split()
+            if len(parts) >= 3 and parts[2] in (b"continue", b"common", b"ready"):
+                continue
+            break
+        raise RuntimeError(f"unexpected upload-pack line {line!r}")
+
+    if reader.at_raw_pack():
+        return resp[reader.pos :], shallow, unshallow
+
+    pack = bytearray()
+    while reader.pos < len(resp):
+        payload = reader.read()
+        if payload is None:
+            break
+        band, data = payload[0], payload[1:]
+        if band == 1:
+            pack.extend(data)
+        elif band == 2:
+            if progress:
+                sys.stderr.write(data.decode("utf-8", errors="replace"))
+                sys.stderr.flush()
+        elif band == 3:
+            raise RuntimeError("remote error: " + data.decode("utf-8", errors="replace").strip())
+        else:
+            raise RuntimeError(f"unexpected side-band channel {band}")
+    return bytes(pack), shallow, unshallow
+
+
+def execute_fetch(client: "GasHttpClient", wants: List[str], opts: FetchOptions) -> None:
+    """
+    Fetch `wants` with one stateless upload-pack request:
+      - `have` lines from local history so only missing objects are transferred,
+      - `multi_ack ofs-delta thin-pack side-band-64k` (+ `include-tag`, `no-progress`, `shallow`),
+      - `shallow` / `deepen` for `--depth` / `--unshallow` and fetches into shallow repositories,
+    then completes the (thin) pack with `git index-pack --fix-thin` and updates `$GIT_DIR/shallow`.
+    """
+    client_shallows = read_shallow_file()
+    deepen = opts.depth
+    # Like git upload-pack, the server sends a shallow-update section only when deepening.
+    expect_shallow = deepen is not None
+
+    caps = ["multi_ack", "side-band-64k", "ofs-delta", "thin-pack"]
+    if opts.followtags:
+        caps.append("include-tag")
+    if not opts.progress:
+        caps.append("no-progress")
+    if deepen is not None or client_shallows:
+        caps.append("shallow")
+    caps.append("agent=git-remote-gas/0.6")
+
+    req = bytearray()
+    for idx, oid in enumerate(wants):
+        if idx == 0:
+            req.extend(pkt_line_bytes(f"want {oid} {' '.join(caps)}"))
+        else:
+            req.extend(pkt_line_bytes(f"want {oid}"))
+    for oid in client_shallows:
+        req.extend(pkt_line_bytes(f"shallow {oid}"))
+    if deepen is not None:
+        req.extend(pkt_line_bytes(f"deepen {deepen}"))
+    req.extend(b"0000")
+    haves = local_have_commits()
+    for oid in haves:
+        req.extend(pkt_line_bytes(f"have {oid}"))
+    req.extend(pkt_line_bytes("done"))
+
+    envelope = json.dumps(
+        {
+            "service": "git-upload-pack",
+            "git_path": client.full_git_path("/git-upload-pack"),
+            "encoding": "base64",
+            "body_base64": base64.b64encode(bytes(req)).decode("ascii"),
+        }
+    ).encode("utf-8")
+    resp = client.request(
+        "POST",
+        "/git-upload-pack",
+        {"service": "git-upload-pack", "encoding": "base64"},
+        body=envelope,
+        content_type="application/json",
+    )
+    if resp.startswith(b"ERR "):
+        raise RuntimeError(resp[4:].decode("utf-8", errors="replace").strip())
+
+    pack_data, shallow, unshallow = parse_upload_pack_response(resp, expect_shallow, opts.progress)
+    if not pack_data.startswith(b"PACK"):
+        raise RuntimeError(f"No PACK in upload-pack response: {resp[:200]!r}")
+    if opts.verbosity > 1:
+        log_err(f"fetch: {len(wants)} want(s), {len(haves)} have(s), pack {len(pack_data):,} bytes")
+
+    proc = subprocess.run(
+        ["git", "index-pack", "--stdin", "--fix-thin"],
+        input=pack_data,
+        stdout=subprocess.DEVNULL,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"git index-pack failed with exit code {proc.returncode}")
+    update_shallow_file(shallow, unshallow)
+
+
 def build_receive_pack_commands(updates: List[Tuple[str, str, str]]) -> bytes:
     """
     Encode Smart HTTP v1 `git-receive-pack` command list (`old_oid new_oid dst`) + `0000` flush-pkt.
@@ -1180,6 +1448,7 @@ def main() -> int:
         return 1
 
     cached_refs: Optional[Tuple[List[Tuple[str, str]], Optional[str]]] = None
+    opts = FetchOptions()
 
     def get_refs(for_push: bool = False) -> Tuple[List[Tuple[str, str]], Optional[str]]:
         nonlocal cached_refs
@@ -1199,7 +1468,7 @@ def main() -> int:
         line = line.rstrip("\r\n")
 
         if line == "capabilities":
-            sys.stdout.write("fetch\npush\n\n")
+            sys.stdout.write("fetch\npush\noption\n\n")
             sys.stdout.flush()
 
         elif line.startswith("list"):
@@ -1217,52 +1486,25 @@ def main() -> int:
             sys.stdout.write("\n")
             sys.stdout.flush()
 
+        elif line.startswith("option "):
+            parts = line.split(" ", 2)
+            reply = opts.set(parts[1], parts[2] if len(parts) > 2 else "") if len(parts) >= 2 else "unsupported"
+            sys.stdout.write(reply + "\n")
+            sys.stdout.flush()
+
         elif line.startswith("fetch "):
             wants: List[str] = []
             while line.startswith("fetch "):
                 parts = line.split()
-                if len(parts) >= 2:
+                if len(parts) >= 2 and parts[1] not in wants:
                     wants.append(parts[1])
                 line = sys.stdin.readline().rstrip("\r\n")
 
-            req_lines = bytearray()
-            for oid in wants:
-                pkt = f"want {oid}\n".encode("ascii")
-                req_lines.extend(f"{len(pkt) + 4:04x}".encode("ascii") + pkt)
-            req_lines.extend(b"00000009done\n")
-
-            envelope = json.dumps(
-                {
-                    "service": "git-upload-pack",
-                    "git_path": client.full_git_path("/git-upload-pack"),
-                    "encoding": "base64",
-                    "body_base64": base64.b64encode(bytes(req_lines)).decode("ascii"),
-                }
-            ).encode("utf-8")
-
-            resp = client.request(
-                "POST",
-                "/git-upload-pack",
-                {"service": "git-upload-pack", "encoding": "base64"},
-                body=envelope,
-                content_type="application/json",
-            )
-            pack_idx = resp.find(b"PACK")
-            if pack_idx == -1:
-                raise RuntimeError(
-                    f"No PACK signature found in upload-pack response: {resp[:200]!r}"
-                )
-            pack_data = resp[pack_idx:]
-            if pack_data.endswith(b"0000"):
-                pack_data = pack_data[:-4]
-            proc = subprocess.run(
-                ["git", "index-pack", "--stdin", "--fix-thin"],
-                input=pack_data,
-                stdout=subprocess.DEVNULL,
-                check=False,
-            )
-            if proc.returncode != 0:
-                return proc.returncode
+            try:
+                execute_fetch(client, wants, opts)
+            except Exception as e:
+                log_err(f"fetch failed: {e}")
+                return 1
             sys.stdout.write("\n")
             sys.stdout.flush()
 

@@ -182,6 +182,7 @@ RS_SRCS := \
 	src/lib.rs \
 	src/args.rs \
 	src/git_server.rs \
+	src/upload_pack.rs \
 	$(WIT_SRCS)
 
 # Node toolchain inputs (jco / webpack / babel / tsc versions and settings)

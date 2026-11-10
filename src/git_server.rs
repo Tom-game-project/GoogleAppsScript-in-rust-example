@@ -450,7 +450,6 @@ pub const ENV_GAS_WEB_APP_URL: &str = "GAS_WEB_APP_URL";
 pub const ENV_GIT_COMMIT_PAGE_SIZE: &str = "GIT_COMMIT_PAGE_SIZE";
 pub const DEFAULT_COMMIT_PAGE_SIZE: usize = 20;
 const DEFAULT_BRANCH: &str = "refs/heads/main";
-const MAX_SIDEBAND_CHUNK: usize = 65500;
 const HEAD_FILE_NAME: &str = "HEAD";
 const REFS_FILE_NAME: &str = "refs.json";
 const COMMITS_CACHE_FILE_NAME: &str = "commits_cache.json";
@@ -2283,7 +2282,8 @@ impl GasGitStore {
     }
 }
 
-/// Handle `GET /<project_name>.git/info/refs?service=git-upload-pack` or `git-receive-pack` using `gix_packetline`.
+/// Handle `GET /<project_name>.git/info/refs?service=git-upload-pack` or `git-receive-pack`.
+/// The advertisement itself is built by [`crate::upload_pack::advertise_refs`].
 pub fn handle_info_refs(service: &str, project_name: &str) -> Result<Vec<u8>, String> {
     if service != "git-upload-pack" && service != "git-receive-pack" {
         return Err(format!(
@@ -2291,346 +2291,21 @@ pub fn handle_info_refs(service: &str, project_name: &str) -> Result<Vec<u8>, St
             service
         ));
     }
-
     let mut store = GasGitStore::open(project_name)?;
     let refs = store.list_refs();
     let head_sym = store
         .head_symref()
         .unwrap_or_else(|| DEFAULT_BRANCH.to_string());
     let head_oid = store.resolve_ref("HEAD");
-
-    let mut out = Vec::with_capacity(512);
-    let header_line = format!("# service={}", service);
-    pkt_encode::text_to_write(header_line.as_bytes(), &mut out)
-        .map_err(|e| format!("pkt-line encode error: {}", e))?;
-    pkt_encode::flush_to_write(&mut out).map_err(|e| format!("pkt-line flush error: {}", e))?;
-
-    let capabilities = if service == "git-upload-pack" {
-        format!(
-            "multi_ack thin-pack side-band side-band-64k ofs-delta shallow no-progress include-tag allow-tip-sha1-in-want allow-reachable-sha1-in-want symref=HEAD:{} object-format=sha1 agent=gitoxide-gas/0.2.0",
-            head_sym
-        )
-    } else {
-        "report-status delete-refs side-band-64k quiet atomic ofs-delta object-format=sha1 agent=gitoxide-gas/0.2.0"
-            .to_string()
-    };
-
-    let mut advertised: Vec<(String, ObjectId)> = Vec::new();
-    if let Some(h_oid) = head_oid {
-        advertised.push(("HEAD".to_string(), h_oid));
-    }
-    for (r_name, r_oid) in refs {
-        advertised.push((r_name, r_oid));
-    }
-
-    if advertised.is_empty() {
-        let zero_oid = ObjectId::null(HashKind::Sha1);
-        let first_line = format!("{} capabilities^{{}}\0{}", zero_oid.to_hex(), capabilities);
-        pkt_encode::text_to_write(first_line.as_bytes(), &mut out)
-            .map_err(|e| format!("pkt-line encode error: {}", e))?;
-    } else {
-        for (idx, (ref_name, oid)) in advertised.iter().enumerate() {
-            let line = if idx == 0 {
-                format!("{} {}\0{}", oid.to_hex(), ref_name, capabilities)
-            } else {
-                format!("{} {}", oid.to_hex(), ref_name)
-            };
-            pkt_encode::text_to_write(line.as_bytes(), &mut out)
-                .map_err(|e| format!("pkt-line encode error: {}", e))?;
-        }
-    }
-
-    pkt_encode::flush_to_write(&mut out).map_err(|e| format!("pkt-line flush error: {}", e))?;
-    Ok(out)
+    crate::upload_pack::advertise_refs(&mut store, service, &head_sym, head_oid, &refs)
 }
 
 /// Handle `POST /<project_name>.git/git-upload-pack` (`git fetch`, `git clone`, `git pull`).
+/// Negotiation, shallow handling, delta compression and `include-tag` live in [`crate::upload_pack`].
 pub fn handle_upload_pack(req_body: &[u8], project_name: &str) -> Result<Vec<u8>, String> {
     let mut store = GasGitStore::open(project_name)?;
-
-    let mut wants: Vec<ObjectId> = Vec::new();
-    let mut haves: BTreeSet<ObjectId> = BTreeSet::new();
-    let mut client_caps: BTreeSet<String> = BTreeSet::new();
-
-    let mut cursor = Cursor::new(req_body);
-    // Phase 1: Read `want` lines up to Flush (`0000`)
-    {
-        let mut reader = StreamingPeekableIter::new(&mut cursor, &[PacketLineRef::Flush], false);
-        while let Some(line_res) = reader.read_line() {
-            let pkt = line_res
-                .map_err(|e| format!("upload-pack io error: {}", e))?
-                .map_err(|e| format!("upload-pack decode error: {}", e))?;
-            if let Some(text) = pkt.as_text() {
-                let raw = text.as_slice();
-                let (main_part, cap_part) = match raw.find_byte(0) {
-                    Some(nul_idx) => (&raw[..nul_idx], Some(&raw[nul_idx + 1..])),
-                    None => (raw, None),
-                };
-                let line_str = String::from_utf8_lossy(main_part);
-                let mut tokens = line_str.split_whitespace();
-                if let Some(cmd) = tokens.next() {
-                    if cmd == "want" {
-                        if let Some(hex_oid) = tokens.next() {
-                            let oid = ObjectId::from_hex(hex_oid.as_bytes())
-                                .map_err(|e| format!("Invalid want OID '{}': {}", hex_oid, e))?;
-                            if !wants.contains(&oid) {
-                                wants.push(oid);
-                            }
-                        }
-                        for cap in tokens {
-                            client_caps.insert(cap.to_string());
-                        }
-                    }
-                }
-                if let Some(caps_bytes) = cap_part {
-                    for cap in String::from_utf8_lossy(caps_bytes).split_whitespace() {
-                        client_caps.insert(cap.to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    // Phase 2: Read `have` and `done` lines
-    {
-        let mut reader = StreamingPeekableIter::new(&mut cursor, &[], false);
-        while let Some(line_res) = reader.read_line() {
-            let Ok(Ok(pkt)) = line_res else {
-                break;
-            };
-            if let Some(text) = pkt.as_text() {
-                let line_str = String::from_utf8_lossy(text.as_slice());
-                let mut tokens = line_str.split_whitespace();
-                match tokens.next() {
-                    Some("have") => {
-                        if let Some(hex_oid) = tokens.next() {
-                            if let Ok(oid) = ObjectId::from_hex(hex_oid.as_bytes()) {
-                                haves.insert(oid);
-                            }
-                        }
-                    }
-                    Some("done") => break,
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    let mut excluded_oids: BTreeSet<ObjectId> = BTreeSet::new();
-    let mut first_common_have: Option<ObjectId> = None;
-    for have_oid in &haves {
-        if store.read_loose_object(have_oid).is_some() {
-            if first_common_have.is_none() {
-                first_common_have = Some(*have_oid);
-            }
-            collect_reachable_objects(&mut store, *have_oid, &mut excluded_oids)?;
-        }
-    }
-
-    let mut visited: BTreeSet<ObjectId> = excluded_oids;
-    let mut queue: VecDeque<ObjectId> = wants.iter().copied().collect();
-
-    // Stream deflated objects directly into `pack_bytes` without holding all uncompressed
-    // object bodies in memory at the same time.
-    let mut pack_bytes = Vec::with_capacity(4096);
-    pack_bytes.extend_from_slice(b"PACK");
-    pack_bytes.extend_from_slice(&2u32.to_be_bytes());
-    pack_bytes.extend_from_slice(&0u32.to_be_bytes()); // placeholder for object count
-    let mut sent_objects_count: u32 = 0;
-
-    while let Some(oid) = queue.pop_front() {
-        if !visited.insert(oid) {
-            continue;
-        }
-        let Some(loose_bytes) = store.read_loose_object(&oid) else {
-            continue;
-        };
-        let (kind, size, offset) = gix_object::decode::loose_header(&loose_bytes)
-            .map_err(|e| format!("Failed to decode loose header for {}: {}", oid.to_hex(), e))?;
-        let end = (offset + (size as usize)).min(loose_bytes.len());
-
-        let obj_ref = ObjectRef::from_loose(&loose_bytes)
-            .map_err(|e| format!("Failed to parse object {}: {}", oid.to_hex(), e))?;
-        match obj_ref {
-            ObjectRef::Commit(commit_ref) => {
-                queue.push_back(commit_ref.tree());
-                for parent_oid in commit_ref.parents() {
-                    queue.push_back(parent_oid);
-                }
-            }
-            ObjectRef::Tree(tree_ref) => {
-                for entry in &tree_ref.entries {
-                    queue.push_back(entry.oid.to_owned());
-                }
-            }
-            ObjectRef::Tag(tag_ref) => {
-                queue.push_back(tag_ref.target());
-            }
-            ObjectRef::Blob(_) => {}
-        }
-
-        append_pack_v2_object(kind, &loose_bytes[offset..end], &mut pack_bytes)?;
-        sent_objects_count += 1;
-    }
-
-    pack_bytes[8..12].copy_from_slice(&sent_objects_count.to_be_bytes());
-    let mut pack_hasher = gix_hash::hasher(HashKind::Sha1);
-    pack_hasher.update(&pack_bytes);
-    let pack_checksum = pack_hasher
-        .try_finalize()
-        .map_err(|e| format!("pack SHA-1 finalize error: {}", e))?;
-    pack_bytes.extend_from_slice(pack_checksum.as_bytes());
-
-    let mut out = Vec::with_capacity(pack_bytes.len() + 128);
-    if let Some(common_oid) = first_common_have {
-        let ack_line = format!("ACK {}", common_oid.to_hex());
-        pkt_encode::text_to_write(ack_line.as_bytes(), &mut out)
-            .map_err(|e| format!("pkt-line ACK error: {}", e))?;
-    } else {
-        pkt_encode::text_to_write(b"NAK", &mut out)
-            .map_err(|e| format!("pkt-line NAK error: {}", e))?;
-    }
-
-    let use_sideband =
-        client_caps.contains("side-band-64k") || client_caps.contains("side-band");
-    let no_progress = client_caps.contains("no-progress");
-
-    if use_sideband {
-        if !no_progress {
-            let msg = format!(
-                "gitoxide-gas: Counting objects: {}, done.\n",
-                sent_objects_count
-            );
-            pkt_encode::band_to_write(Channel::Progress, msg.as_bytes(), &mut out)
-                .map_err(|e| format!("sideband progress error: {}", e))?;
-        }
-        let chunk_limit = if client_caps.contains("side-band-64k") {
-            MAX_SIDEBAND_CHUNK
-        } else {
-            999
-        };
-        for chunk in pack_bytes.chunks(chunk_limit) {
-            pkt_encode::band_to_write(Channel::Data, chunk, &mut out)
-                .map_err(|e| format!("sideband data error: {}", e))?;
-        }
-        pkt_encode::flush_to_write(&mut out).map_err(|e| format!("pkt-line flush error: {}", e))?;
-    } else {
-        out.extend_from_slice(&pack_bytes);
-    }
-
-    Ok(out)
-}
-
-fn collect_reachable_objects(
-    store: &mut GasGitStore,
-    root: ObjectId,
-    visited: &mut BTreeSet<ObjectId>,
-) -> Result<(), String> {
-    let mut queue = VecDeque::new();
-    queue.push_back(root);
-    while let Some(oid) = queue.pop_front() {
-        if !visited.insert(oid) {
-            continue;
-        }
-        let Some(loose_bytes) = store.read_loose_object(&oid) else {
-            continue;
-        };
-        if let Ok(obj_ref) = ObjectRef::from_loose(&loose_bytes) {
-            match obj_ref {
-                ObjectRef::Commit(c) => {
-                    queue.push_back(c.tree());
-                    for p in c.parents() {
-                        queue.push_back(p);
-                    }
-                }
-                ObjectRef::Tree(t) => {
-                    for e in &t.entries {
-                        let child_oid = e.oid.to_owned();
-                        if e.mode.is_tree() {
-                            queue.push_back(child_oid);
-                        } else {
-                            // Blobs and submodules have no child objects; mark visited without loading the blob!
-                            visited.insert(child_oid);
-                        }
-                    }
-                }
-                ObjectRef::Tag(t) => {
-                    queue.push_back(t.target());
-                }
-                ObjectRef::Blob(_) => {}
-            }
-        }
-    }
-    Ok(())
-}
-
-fn append_pack_v2_object(kind: ObjectKind, body: &[u8], pack: &mut Vec<u8>) -> Result<(), String> {
-    let type_id: u8 = match kind {
-        ObjectKind::Commit => 1,
-        ObjectKind::Tree => 2,
-        ObjectKind::Blob => 3,
-        ObjectKind::Tag => 4,
-    };
-    encode_pack_obj_header(type_id, body.len(), pack);
-
-    let mut deflater = deflate::Write::new(Vec::new(), Compression::DEFAULT);
-    deflater
-        .write_all(body)
-        .map_err(|e| format!("zlib deflate write error: {}", e))?;
-    deflater
-        .flush()
-        .map_err(|e| format!("zlib deflate flush error: {}", e))?;
-    let compressed = deflater.into_inner();
-    pack.extend_from_slice(&compressed);
-    Ok(())
-}
-
-#[allow(dead_code)]
-fn build_pack_v2(objects: &[(ObjectId, ObjectKind, Vec<u8>)]) -> Result<Vec<u8>, String> {
-    let mut pack = Vec::with_capacity(12 + objects.len() * 128 + 20);
-    pack.extend_from_slice(b"PACK");
-    pack.extend_from_slice(&2u32.to_be_bytes());
-    pack.extend_from_slice(&(objects.len() as u32).to_be_bytes());
-
-    for (_oid, kind, body) in objects {
-        let type_id: u8 = match kind {
-            ObjectKind::Commit => 1,
-            ObjectKind::Tree => 2,
-            ObjectKind::Blob => 3,
-            ObjectKind::Tag => 4,
-        };
-        encode_pack_obj_header(type_id, body.len(), &mut pack);
-
-        let mut deflater = deflate::Write::new(Vec::new(), Compression::DEFAULT);
-        deflater
-            .write_all(body)
-            .map_err(|e| format!("zlib deflate write error: {}", e))?;
-        deflater
-            .flush()
-            .map_err(|e| format!("zlib deflate flush error: {}", e))?;
-        let compressed = deflater.into_inner();
-        pack.extend_from_slice(&compressed);
-    }
-
-    let mut hasher = gix_hash::hasher(HashKind::Sha1);
-    hasher.update(&pack);
-    let checksum = hasher
-        .try_finalize()
-        .map_err(|e| format!("pack SHA-1 finalize error: {}", e))?;
-    pack.extend_from_slice(checksum.as_bytes());
-
-    Ok(pack)
-}
-
-fn encode_pack_obj_header(type_id: u8, mut size: usize, out: &mut Vec<u8>) {
-    let mut byte = ((type_id & 0x07) << 4) | ((size & 0x0f) as u8);
-    size >>= 4;
-    while size > 0 {
-        out.push(byte | 0x80);
-        byte = (size & 0x7f) as u8;
-        size >>= 7;
-    }
-    out.push(byte);
+    let refs = store.list_refs();
+    crate::upload_pack::handle_upload_pack_request(&mut store, &refs, req_body)
 }
 
 #[derive(Debug)]
@@ -3070,7 +2745,7 @@ fn read_delta_byte(data: &[u8], pos: &mut usize) -> Result<u8, String> {
     Ok(b)
 }
 
-fn apply_git_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, String> {
+pub(crate) fn apply_git_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, String> {
     let mut pos = 0usize;
     let src_size = read_delta_varint(delta, &mut pos)?;
     if src_size != base.len() {

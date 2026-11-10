@@ -97,7 +97,7 @@ git clone gas::https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec/my-projec
 git pull
 ```
 
-URL は `gas::` + `/exec` URL + `/<project_name>.git` の形式です。大きなリポジトリは自動的に複数回に分割して push され、途中で失敗しても再実行すれば続きから送信されます。
+URL は `gas::` + `/exec` URL + `/<project_name>.git` の形式です。`git pull` / `git fetch` は手元にない差分だけを受信します。浅いクローン（`git clone --depth 1`、`git fetch --depth N`、`git fetch --unshallow`）にも対応しています。大きなリポジトリは自動的に複数回に分割して push され、途中で失敗しても再実行すれば続きから送信されます。
 
 ### 5.3 認証
 

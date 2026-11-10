@@ -106,7 +106,22 @@ GAS で最もコストが高いのは Drive API の呼び出しです（1 回あ
 
 大きなリポジトリは `git-remote-gas` が PACK を数 MB 単位に分割して送ります。区切りごとに第一親のコミットへブランチを進めるので、中断しても再実行すれば続きから送れます。
 
-### 1.5 初期コミットの自動生成なし & Gleam + Lustre によるブラウザ Web UI (`web/`)
+### 1.5 clone / fetch の処理 (`src/upload_pack.rs`)
+
+`git-upload-pack` は `git upload-pack --stateless-rpc` と同じ動作をするよう実装しています（GAS 依存のない独立モジュールで、実際の `git` を相手にしたテストで確認しています）。1 回の HTTP リクエストが 1 往復分で、`done` を含むリクエストにだけ PACK を返します。
+
+| 機能 (capability) | 内容 |
+| :--- | :--- |
+| `multi_ack` / `multi_ack_detailed` | 共通コミットごとに `ACK <oid> continue` / `common` を返し、欲しいコミットすべてに共通の祖先が見つかった時点で `ready` を返してネゴシエーションを打ち切らせます。実際の `git fetch-pack` は HTTP では `multi_ack_detailed` を必須とします |
+| `shallow` | `deepen <n>`（`--depth`）と `--unshallow` に対応します。`shallow` / `unshallow` 行を返し、PACK を指定の深さまでに制限します。浅いクローンへの通常の fetch では、クライアントの shallow コミットを境界として扱います |
+| `ofs-delta` | Blob / Tree を同じパスの新しい版との差分（delta）として格納します（新しい版を丸ごと、古い版を delta に） |
+| `thin-pack` | クライアントが既に持っている同じパスの版を基準にした delta (`REF_DELTA`) を送ります。差分 fetch の転送量が大きく減ります（クライアントは `index-pack --fix-thin` で補完） |
+| `include-tag` | 送るオブジェクトを指す annotated tag を PACK に含めます。`info/refs` は tag の `^{}`（peel 後の値）も広告します |
+| `side-band` / `side-band-64k` / `no-progress` | 進捗とデータの多重化 |
+
+クライアントが既に持っているオブジェクトは、共通コミットの祖先と、送るコミットに隣接する「境界」コミットのツリーから判定します。履歴全体のツリーを読む必要はありません。`git-remote-gas` は `have` 行（ローカルの最近のコミット最大 256 個）と上記の capability を送るので、`git pull` では差分だけが転送されます。`git clone --depth N` / `git fetch --depth N` / `--unshallow` にも対応し、`$GIT_DIR/shallow` を更新します。
+
+### 1.6 初期コミットの自動生成なし & Gleam + Lustre によるブラウザ Web UI (`web/`)
 - サーバー側が勝手に初期コミットを生成することはありません。新規作成されたリポジトリはコミット数 `0` の空リポジトリ (`HEAD -> refs/heads/main`) として作成されます。
 - ブラウザから GAS Web アプリの URL (`https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec`) にアクセスすると、**Gleam + Lustre** (`web/src/gas_git_ui.gleam`) で実装された Web UI が表示されます。
   - **純粋な MVU (Elm Architecture) 実装**: `lustre.application(init, update, view)` と `lustre/effect.from` で状態遷移と通信を管理しています。
@@ -119,7 +134,7 @@ GAS で最もコストが高いのは Drive API の呼び出しです（1 回あ
   - **ブラウザ側キャッシュ**: コミット一覧と差分は IndexedDB に保存し（使えない場合は CacheStorage → localStorage）、2 回目以降はサーバーへ問い合わせません。キーに HEAD のコミット ID を含むため、push 後は自動的に再取得します。
 - Web UI の HTML (`dist/index.html`) は Wasm に埋め込まず、`clasp push` で GAS の HTML ファイル `index` としてアップロードします。サーバーは実行時に `HtmlService.createHtmlOutputFromFile("index")` で読み込み、初期状態の JSON を差し込んで返します。
 
-### 1.6 サーバーサイド (`src/git_server.rs`) における `gitoxide` の役割
+### 1.7 サーバーサイド (`src/git_server.rs`) における `gitoxide` の役割
 
 | 使用クレート | GAS Git Server (`src/git_server.rs`) での用途 |
 | :--- | :--- |

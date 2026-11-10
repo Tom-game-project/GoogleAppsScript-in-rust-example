@@ -1,5 +1,6 @@
 mod args;
 pub mod git_server;
+pub mod upload_pack;
 
 mod bindings {
     wit_bindgen::generate!({

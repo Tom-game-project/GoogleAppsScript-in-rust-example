@@ -77,3 +77,9 @@ export function getInsecureSeed(): [bigint, bigint] {
 	}
 	return cachedSeed;
 }
+
+// wasi:random/insecure-seed@0.2.0 names the function `insecure-seed` (jco: `insecureSeed`), while 0.3.x
+// uses `get-insecure-seed`. Rust's std `HashMap` (RandomState) imports the 0.2.0 name on wasm32-wasip2.
+export function insecureSeed(): [bigint, bigint] {
+	return getInsecureSeed();
+}
